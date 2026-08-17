@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scripts named in role prompts exist, parse, and are runnable as written.
+"""Named references resolve: scripts in role prompts, and tests cited in the lane.
 
 The role prompts under `kernel_workflow/roles/` are the instructions the
 unattended agents follow. Nine distinct `scripts/<name>` paths appear across
@@ -26,6 +26,15 @@ violations as defects, which is exactly the mistake §53 and §54 each made once
 `kernel_workflow/scripts` alone: `scripts/task_runner.py` legitimately means the
 task's own runner, and hard-coding one root would fail a reference that is
 correct.
+
+`CitedTestsResolveTest` at the bottom is the same rule aimed the other way. The
+numbered-finding comments in `kernel_lane.js` are this project's institutional
+memory, and several of them close by naming the test that pins the fix. A
+citation to a test that does not exist is worse than no citation: it is the one
+form of comment a reader trusts without checking, so it stops the next reader
+from looking -- and it is how `test_qd_persist_manifest.py::LedgerOnlyWriteTest`
+sat in the (124b) comment while the two tests that actually run that path were
+module-level functions under different names.
 """
 from __future__ import annotations
 
@@ -154,6 +163,67 @@ class ReferencesAreRunnableTest(unittest.TestCase):
                 with self.subTest(script=str(path.relative_to(REPO_ROOT))):
                     self.assertGreater(path.stat().st_size, 0,
                                        "an empty file resolves and then does nothing")
+
+
+# `test_foo.py::test_bar` or `test_foo.py::ClassName`, as written in a comment.
+# Only the `::` form, for the (139) reason: the lane's prose names plenty of
+# bare `test_*.py` files in passing, and demanding that every one of those be a
+# citation would invent a rule the comments do not follow.
+CITATION = re.compile(r"(test_[A-Za-z0-9_]+\.py)::([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def lane_sources() -> list[Path]:
+    return [p for p in (REPO_ROOT / "kernel_workflow" / "kernel_lane.js",
+                        REPO_ROOT / "kernel_workflow" / "kernel_workflow.js") if p.is_file()]
+
+
+def citations() -> dict[tuple[str, str], list[Path]]:
+    """(file, name) -> the lane sources whose comments cite it."""
+    out: dict[tuple[str, str], list[Path]] = {}
+    for src in lane_sources():
+        for ref in set(CITATION.findall(src.read_text(encoding="utf-8"))):
+            out.setdefault(ref, []).append(src)
+    return out
+
+
+def defined_names(path: Path) -> set[str]:
+    return {node.name for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+
+
+class CitedTestsResolveTest(unittest.TestCase):
+    def test_the_citation_set_is_not_empty(self):
+        """(55). Every check below iterates the citations, so a lane that stopped
+        using the `file.py::name` form would make this class pass while reading
+        like coverage."""
+        self.assertTrue(lane_sources(), f"no lane source under {REPO_ROOT / 'kernel_workflow'}")
+        self.assertTrue(citations(),
+                        "no comment in the lane cites a test by `file.py::name` any more; "
+                        "either the convention changed or this guard is watching nothing")
+
+    def test_every_cited_test_file_exists(self):
+        for (filename, name), where in sorted(citations().items()):
+            with self.subTest(citation=f"{filename}::{name}"):
+                self.assertTrue(resolve(filename),
+                                f"cited by {[p.name for p in where]} but exists in no scripts/ root")
+
+    def test_every_cited_name_is_defined_in_the_file_that_is_cited(self):
+        for (filename, name), where in sorted(citations().items()):
+            for path in resolve(filename):
+                with self.subTest(citation=f"{filename}::{name}"):
+                    self.assertIn(
+                        name, defined_names(path),
+                        f"{filename} has no `{name}`, so the comment in "
+                        f"{[p.name for p in where]} points a reader at nothing. Renaming a "
+                        "test is the ordinary way this happens; the citation does not move "
+                        "with it and no run reads it.")
+
+    def test_the_lookup_can_fail(self):
+        """(55) on the resolution itself, both halves."""
+        self.assertEqual([], resolve("test_no_such_file_hopefully.py"))
+        here = Path(__file__).resolve()
+        self.assertIn("CitedTestsResolveTest", defined_names(here))
+        self.assertNotIn("NoSuchTestHopefully", defined_names(here))
 
 
 if __name__ == "__main__":

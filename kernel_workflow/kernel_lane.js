@@ -3565,7 +3565,9 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // nothing to materialize, the merge leaves `cells` exactly as found, and
     // `verify_written` recomputes the same two digests off disk, so
     // `qdVerifyPersisted` still checks a real equality rather than a vacuous
-    // one. See `test_qd_persist_manifest.py::LedgerOnlyWriteTest`.
+    // one. The two tests that run this exact payload shape:
+    // `test_qd_persist_manifest.py::test_a_round_that_admitted_nothing_still_persists_its_ledger`
+    // `test_qd_persist_manifest.py::test_the_ledger_only_receipt_is_still_checkable_against_the_lane`
     {
       const ledgerOnly = !qdAdmissions.length;
       const roundPersist = qdPersistPrompt(qdPersistPayload(qdAdmissions), `gen${round}`);

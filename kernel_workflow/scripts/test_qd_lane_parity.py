@@ -677,6 +677,10 @@ class ResidencyGateReachabilityTest(unittest.TestCase):
 
 
 class CellIdParityTest(unittest.TestCase):
+    """Three corners state what a cell is: `qdCellId`, `QD.cell_id`, and one
+    sentence of prose in `tech_lead.md`. The first two were pinned to each
+    other; the third was not, and drifted."""
+
     def test_the_cell_id_joins_the_same_fields_in_the_same_order(self):
         # A reordered join produces a valid-looking cell id that indexes a
         # different cell, so warm-started archives would silently mis-key.
@@ -692,6 +696,56 @@ class CellIdParityTest(unittest.TestCase):
             "plan_binding": "static"}, known_contexts=["decode_m8"])
         self.assertEqual("decode_m8|native_mfma|independent|lds_single|tile_grid|"
                           "direct_store|grouped_m|static", cell)
+
+    def test_the_planner_is_told_the_same_cell_shape_the_lane_keys_on(self):
+        """Finding (44) one surface further out.
+
+        (44) caught `rasterization` and `plan_binding` missing from
+        `QD_DESCRIPTOR_SCHEMA` and `QD_DESCRIPTOR_AXES` -- both machine-readable,
+        both now pinned by `AgentFacingVocabularyParityTest`. The same two axes
+        were also missing from this sentence, which is the only prose copy and
+        belongs to the one role that selects cells and plans transitions between
+        them, and nothing was watching it.
+
+        A planner told a cell has six fields is told the space is smaller than
+        the one it is filling. A move along either unnamed axis changes cell and
+        it cannot know that, so the coverage-bearing `directed_transition` the
+        `variant_spread` paragraph asks for reads to it as another local
+        mutation on the incumbent -- and gets filed as `unimproved_local`
+        against that mechanism's capsule key. This fails in the worst direction
+        available: `qdCellId` keys correctly and the archive fills correctly, so
+        the only broken thing is the planner's model of its own search, and no
+        run reports it.
+        """
+        prompt = (LANE.parent / "roles" / "tech_lead.md").read_text(encoding="utf-8")
+        formulas = re.findall(r"`<exact harness context_id>((?:\|<[a-z_]+>)+)`", prompt)
+        # A second copy is how (44) happened in the first place, so one is the
+        # only acceptable count -- zero means the regex stopped matching and this
+        # test is watching nothing.
+        self.assertEqual(1, len(formulas),
+                         "tech_lead.md must state the cell shape exactly once, in a form this "
+                         "test can read; two copies drift and zero means it moved")
+        self.assertEqual(list(QD.AXES), re.findall(r"<([a-z_]+)>", formulas[0]),
+                         "the axes the planner is told compose a cell are not the axes qdCellId "
+                         "joins; an axis missing here is a cell boundary the planner cannot see")
+
+    def test_the_prompt_says_the_two_late_axes_are_coordinates_not_knobs(self):
+        """Listing them is necessary and not sufficient. The same paragraph
+        enumerates tile sizes, stages and vector widths as `metadata/knobs`, so
+        an axis that appears in the formula but is never distinguished from that
+        list can still be read as a parameter to tune in place."""
+        prompt = (LANE.parent / "roles" / "tech_lead.md").read_text(encoding="utf-8")
+        block = re.search(r"A cell is `<exact harness context_id>.*?(?=\nShape predicates)",
+                          prompt, re.S)
+        self.assertIsNotNone(block, "the cell-shape paragraph moved")
+        for axis in ("rasterization", "plan_binding"):
+            with self.subTest(axis=axis):
+                self.assertIn(axis, block.group(0))
+        self.assertRegex(block.group(0), r"different\*{0,2} cell",
+                         "the prompt has to say that moving these lands in another cell")
+        self.assertIn("directed_transition", block.group(0),
+                      "and name the operator that move is, or the planner has the fact "
+                      "without the consequence")
 
 
 def js_object_literal_enums(const_name: str) -> dict[str, list[str]]:

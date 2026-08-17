@@ -285,7 +285,13 @@ are visible for remeasurement but cannot parent until promoted. `asymmetric_prod
 recorded on gfx90a but receives no frontier/coverage bonus because static per-wave register allocation
 makes it a known CDNA anti-pattern.
 
-A cell is `<exact harness context_id>|<compute_primitive>|<wave_schedule>|<k_pipeline>|<decomposition>|<output_path>`.
+A cell is `<exact harness context_id>|<compute_primitive>|<wave_schedule>|<k_pipeline>|<decomposition>|<output_path>|<rasterization>|<plan_binding>`
+— eight fields, in that order, over exactly the seven axes `QD_DESCRIPTOR_AXES` hands you.
+`rasterization` and `plan_binding` are cell coordinates like the other five, not knobs: changing either
+one lands in a **different** cell, so such a move is a `directed_transition` and the coverage it opens is
+real. Reading an XCD remap or a switch to `runtime_tuned` as a parameter move on the incumbent
+understates it here and files it as `unimproved_local` against that mechanism's capsule key, which is
+what the two-strike block below reads.
 Shape predicates, exact fences, tile sizes, stages, vector widths, resources, occupancy, TFLOPS, and SOL
 gap are metadata/knobs, never new contexts or axes. Follow the supplied legality vocabulary, but do not choose a transition in this selection-only phase.
 The orchestrator deterministically validates mutation targets against `QD_EVIDENCE_HELPER adjacency`,
