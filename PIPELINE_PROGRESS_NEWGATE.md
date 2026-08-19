@@ -82,7 +82,16 @@ python3 kernel_workflow/scripts/measure_noise_floor.py   # 8 次同变体全套�
 python3 kernel_workflow/scripts/deprovisionalize_epoch.py --verdict <json> --machine <字母> --apply
 ```
 
-注册纪元目前需要改 `kernel_workflow/scripts/noise_floor_stats.py` 源码（`MACHINE_HOSTNAME`、`PROVISIONAL_MACHINES`、`CURRENT_MACHINE`）。这是已知的架构债：通用工具里焊死了任务与机器专属知识。改完跑一遍 `python3 -m unittest test_noise_floor_stats test_check_measurement_frame`，别把测试留红。
+注册纪元用 **`kernel_workflow/scripts/register_epoch.py`**，不要手改 `noise_floor_stats.py`：
+
+```bash
+python3 kernel_workflow/scripts/register_epoch.py \
+  --letter <下一个没用过的字母> --host $(hostname) --note '<哪次换机>'
+```
+
+它做那四处编辑（往 `MACHINE_HOSTNAME` **追加**——顺序是承重的，`machine_for_host` 取最后一个匹配；加进 `PROVISIONAL_MACHINES`；插一张全 DEFAULT 的占位表；把 `CURRENT_MACHINE` 指过去），每处断言锚点恰好命中一次，改完重新 import 模块自检，任何一条不符就把文件回滚并退出非零。手改在 §13.18 出过一次 `.replace()` 静默 no-op 的事故，这个脚本就是为它写的。`--dry-run` 先看 diff。
+
+底层的架构债还在：机器专属知识仍然住在通用脚本的源码里，注册一个纪元本该是写一个 JSON。脚本让这次改动安全，没有消除它。
 
 ## 6. 这一波要盯的三件事（相对旧 lane 的新行为）
 
@@ -91,5 +100,276 @@ python3 kernel_workflow/scripts/deprovisionalize_epoch.py --verdict <json> --mac
 3. **`isa_evidence` 是否真的产出了 verdict。** 观察模式下父归档现在由 verifier 自己采集并按 hash 采纳。旧 lane 是 11 次干净采集、0 个可读判决；这一波如果还是 0，说明采纳路径没走通。
 
 ## 7. 进展日志（每波追加，最新在最上面）
+### 修复 3 — 同一个 gate 的第三次假拒绝：`shortx4_t` 不在 CAST_WIDTH（2026-08-19 ~14:35）
 
-<!-- 还没有。第一波尚未启动。 -->
+r1_d0（algorithm，那个 0.5072 / 相对同场 control 1.512x 的 prefill 赢家）重跑后**也**被 step 2c 拦下，同样是 `findings: 0`：
+
+```
+UNP: as  cast type 'shortx4_t' is not in CAST_WIDTH
+UNP: bs  cast type 'shortx4_t' is not in CAST_WIDTH
+```
+
+**一轮三个方向，两个死在同一个 gate 上，都没有产生任何一条 finding。** 这已经不是偶发事故，是本 lane 当前最主要的吞吐瓶颈。
+
+而这个类型的宽度**就写在同一个文件里、离用它的 cast 一百行**：
+
+```c
+typedef __attribute__((__vector_size__(4 * sizeof(short)))) short shortx4_t;   // = 8 字节
+```
+
+**处置。** 加 `vector_typedefs(text)`：解析被扫描文件自己声明的向量 typedef（`__vector_size__(...)` 与 `ext_vector_type(N)` 两种写法），把宽度并进**每文件**的 cast 宽度表（文件内 typedef 在重名时优先，因为那才是此处真正在作用域里的定义）。
+
+**为什么这不是放松判据。** 工具的规则一直是 *resolve-or-report*，它**本来就**从同一份源码里解析 `constexpr` 数组维度而不是维护一张维度表；向量 typedef 是同一类事实。宽度是**读出来的，从不默认**：`_vector_size_bytes()` 只接受整数字面量、`sizeof(T)` 及二者的乘积，遇到具名常量、除法或没见过的算术就返回 None，该 cast 照旧报 unparseable。测试钉住了这一点（`test_an_unevaluable_width_stays_unresolved`、`test_an_unknown_base_stays_unresolved`），也钉住了**修复没有把检查关掉**（`test_a_file_local_typedef_still_catches_a_real_hazard`：同样的 typedef 机制下，8 元素 = 16 字节的 cast 打在 136 字节行距上仍然被抓）。
+
+对真实候选验证：
+
+```
+resolved typedefs: {'floatx4_t': 16, 'shortx4_t': 8}
+$ lds_cast_alignment.py --json <ws_cand>/src/custom_gemm.hip <ws_cand>/src/custom_gemm_hip.hip
+{"findings": [], "gate_mode": false, "inherited": [], "passed": true, "unparseable": []}
+EXIT=0
+```
+
+测试：`test_lds_cast_alignment` 38 个全绿（原 28 + char 3 + typedef 7）；`python3 -m unittest discover` 全仓 **875 tests OK**，没有留红。
+
+**本轮的损失（如实记录）。** r1_d0 和 r1_d1 在本轮已经以 policy_failed 结束，且 resume 的缓存键是 (prompt, opts) —— verify 提示词没变，再 resume 只会重放同样的失败，所以**这两个方向在 round 1 无法回收**，没有为此第三次重启（代价大于回收）。round 1 只剩 r1_d2（0.6267）作为候选；它足以让 `winner` 非 null，从而**第一次真正触发 per-route gate**。修复对 round 2-12 的每一次 verify 生效，而预算的绝大部分在那里。
+
+可惜的是 retrospective 指出的那个真正的结论——d0（prefill）与 d2（decode）**路线互补，逐例取小的并集 geomean 0.7887，是种子的 2.35 倍**——本轮拿不到了，要等后续轮次由 director 重新提出。
+
+**顺带发现的一个覆盖盲区（未修，仅记录）。** retrospective 说 r1_d0 有个"只是碰巧安全"的对齐隐患：`reinterpret_cast<uint4*>(&smem.stage.as[r][kk])` 打进 `Bf16[BM][BK+4]`，BK=32 时行距 72 字节，奇数行偏 8 字节。本工具**看不到它**，但原因不是 retrospective 说的"BM/BK 是模板参数"：`DECL` 只匹配 `__shared__` 声明，而这个数组是**结构体成员**（`smem.stage.as`），根本没有进入匹配。这是既有盲区，不是本次改动引入的，修它是另一件事。
+
+---
+### 修复 2 — `lds_cast_alignment.py` fail-closed，第二次杀掉同一个方向（2026-08-19 ~14:20）
+
+resume 之后 r1_d1（memory / staging pipeline）**又一次**在 step 2c 的 vector-cast alignment gate 上 `policy_failed`，在 build 之前、correctness 之前、任何一次计时之前。收据 `round_1/engineer_1/verify/cast_alignment.json`：
+
+```json
+{"findings": [], "gate_mode": true, "inherited": [], "passed": false,
+ "unparseable": [ 4 x {"array":"smem","reason":"element type 'char' is not in ELEM_SIZE; its size decides the whole verdict"} ]}
+```
+
+**已独立核实这个退出是空判决**（不是只信 retrospective）：`lds_cast_alignment.py:165` 查不到元素类型就 `continue`，该数组**从不进入 `arrays`**；于是 `scan()` 里每一个针对它的 cast 都撞上 `if name not in arrays: continue` —— **一条 finding 都不可能产生**。而且 `smem` 是一维的，stride 循环走的是 `strides[:-1]`，一维数组这个切片为空，**对任何元素类型都无判决可下**。`passed` 却仅凭 unparseable 一项翻成 false。这是典型的 fail-closed 假拒绝：工具什么都没判定，却拦下了一个正确的候选。
+
+**处置。** 给 `ELEM_SIZE` 补上字节类型（`char` / `int8_t` / `uint8_t` / `std::byte` / `std::int8_t`）。`char` 按定义就是 1 字节，这是**解析**尺寸而不是猜测。原有 28 个测试仍全绿，另加 3 个回归测试（`ByteArenaTest`）钉住：一维 char arena 干净通过、一维数组无外层 stride 可判、**二维 char 数组的 136 字节行距仍然被抓住**（确认修复只是解出尺寸，没有把检查关掉）。现 31 tests OK。
+
+对被拒了两次的那份真实候选重跑：
+
+```
+$ python3 kernel_workflow/scripts/lds_cast_alignment.py --json <ws>/src/custom_gemm.hip <ws>/src/custom_gemm_hip.hip
+{"findings": [], "gate_mode": false, "inherited": [], "passed": true, "unparseable": []}
+EXIT=0
+```
+
+**影响范围。** 只影响候选**能不能被测量**，不影响任何测量值本身；`harness_lib.py` / `scripts/task_runner.py` / oracle 一律未动。r1_d1 在本轮已经损失（修复对其后每一次 verify 生效），没有为它第三次重启——它的机制已记在 retrospective insights 里，可在后续轮次重新提出；重启的代价大于回收的价值。
+
+**注意：这是一条会重复出现的 finding。** 任何使用 `__shared__ __align__(16) char smem[...]` 原始 arena 的 engineer 都会撞上；旧 lane 的 retrospective 已经把它记为"cost an entire direction"，现在证明它会**反复**吃掉方向，而不是一次性事故。
+
+---
+
+### 波 1 · 第 2 次发起 — 修掉第五个 gate 缺陷后 resume（2026-08-19 ~14:00）
+
+**发生了什么。** 第一次发起（run `wf_e22ca8b0-fbb`）跑完 round 1，**一个候选都没进候选表，什么都没提交**，canonical 仍停在 `6585d50 baseline`。这不是"优化不出来"：round 1 有两个 verified / correctness pass / policy clean 的幸存者。
+
+| 方向 | 专长 | vs oracle | vs 同场 control(0.3353) |
+|---|---|---|---|
+| r1_d0 | algorithm（128x128 macro tile，2x2 wave grid） | 0.5072 | **1.512x** |
+| r1_d2 | host_runtime（split-K + (M,N,K) 路由选择器） | 0.6267 | **1.869x** |
+
+两者**路线互补**：d0 吃 prefill/large-M（m2048 已到 rocBLAS 的 1.30x），d2 吃 decode（4 条 decode route 落在 oracle 的 10% 以内）。逐例取小的并集 = geomean **0.7887**，是种子 0.336 的 2.35 倍。
+
+**根因（已在代码里核实，不是只信 agent 的话）。** 这是第 5 个 gate 缺陷，§1 那四条之外的新的一条：
+
+- 本任务的 PRIMARY metric 由 harness 固定为**相对不可变 rocBLAS oracle** 的加速比（`COMMANDMENT.md` 116-129 行），而**种子只有 0.336** —— 候选树从一开始就在自己的比较基准**之下**。
+- `kernel_lane.js:2263`：`return primSpeedup(r.ver) > CANDIDATE_FLOOR;`，而 `CANDIDATE_FLOOR` 默认 **1.0**。于是从 0.336 爬到 rocBLAS 平价的**整段过程全部被过滤掉**，`candidates=[]` → `winner=null`。
+- 致命之处：本 lane 要测的 per-route gate 挂在 `kernel_lane.js:2352` 的 `if (winner && ROUTE_BANDS)` 后面。**winner 恒为 null，gate 就永远跑不到** —— 本 lane 会以另一种方式复现旧 lane "gate 一行都没打"的结局，且拿不到任何关于自身自变量的数据。
+- 代码自己的注释（`kernel_lane.js:113-118`）逐字描述了这个情形：候选"lands BELOW the comparator by construction"，在 1.0 下"its recovery phase is invisible"。旋钮本来就是为这个准备的。
+
+**处置。** 按 §2 的唯一合法路径改**文件**（不是手抄参数）：`kernel_workflow/lanes/coldstart_newgate_20260819.json` 增加 `candidate_floor: 0.29`，并写进 `_require` 让它被 pin 住。`lane_args.py --check` → **exit 0**（9 个参数，6 个 pinned 值匹配），`--print` 重新渲染后**原样**调用。
+
+- 为什么是 0.29：低于同场 control（0.3353）的幅度大于实测最宽的 route band（11.55%，最坏读数 0.2966），所以不会丢掉任何真实结果；同时诚实报告"比种子还差"的 engineer 仍然走 `kernel_lane.js:2086` 的 `trustworthyBelowBaseline` 跳过 verify 的经济性。
+- **提交判据没有被放松**：banking 仍然要过 per-route band gate 或 `cumulative` 上的 MIN_IMPROVE。改的是**被跟踪**的东西，不是**被采纳**的东西。
+- **配对性代价（如实记录）**：greedy lane 跑的是 1.0 默认值，所以两条 lane 现在差**两个**旋钮，严格意义上不再是单变量对照。这是权衡后的选择——floor 留在 1.0，本 lane 根本无法触发 per-route gate，那就是"干净但什么都测不到"。两条曲线应读作"per-route gate + 可达的候选表" vs "suite gate"；并注意 greedy 早期同样耗在这段隐形的恢复期里。
+
+**重启方式。** `resumeFromRunId: wf_e22ca8b0-fbb`。`CANDIDATE_FLOOR_TXT` 只出现在 Optimize 提示词一处（`kernel_lane.js:2041`），所以 Setup / Analyze / Benchmark / Profile 的提示词未变、命中缓存，昂贵的 baseline GPU 测量不用重做；只有 engineer 轮次重跑。新 task ID `wtlxltbmv`。
+
+**round 1 另外值得带走的事实**（来自 retrospective，已并入 lane 记忆）：
+- 绑定项是 **occupancy 而非 LDS 复用**：128x128x64 要 34816 B → 1 CTA/CU，单靠寄存器分块只有 1.32x；BK 减半到 32（18432 B，3 CTA/CU）同样 tile 再拿 1.84x。超过 4x2 fragment grid 后寄存器分块这条轴就耗尽了。
+- **此 kernel 不是 DRAM-bound**（对 roadmap.md 的更正）：HBM 峰值 584 GB/s（prefill）/ 314 GB/s（decode），L2 吸收 89.8%，各 pipe 占用均 <22%。48x 读放大付出的是**暴露延迟 + LDS/VALU 指令开销**，不是带宽。
+- 小 M/小 N 路线是**并行度饥饿**，tile 形状救不了，并行度必须来自 K —— d2 的 split-K 把 decode geomean 从 0.3453 抬到 0.8305。
+- 别再提"B 没有 per-wave 复用所以砍掉它的 LDS staging"：实测 11 例全负（最差 prefill_m2048 0.60x）。B 的 LDS tile 是**合并访存变换**，不是复用变换。
+- 工具缺陷：`lds_cast_alignment.py` 对 `__shared__ __align__(16) char smem[...]` 因 'char' 不在 ELEM_SIZE 表里而 exit 2（fail-closed），findings 为空——**空判决 + 非零退出**害掉了一整个方向。修在候选侧：把 arena 声明成 `Bf16 smem[kSmemBytes/2]`。
+- 流程卫生：有 engineer 在 verifier 运行中改写了 `best_patch.diff`。verifier 应在验证前快照并 pin md5；engineer 交接后不得再碰该文件。
+
+**§6 三件事的现状**：三条都还**未观测到**——第一次发起从未走到 gate 就结束了 round 1，且 `log()` 的叙述行不落盘，只能从 journal 的结构化结果反推。第二次发起后重新盯。
+
+### 波 1 — 已启动（2026-08-19）
+
+- **开工检查单**：`check_measurement_frame.py` → **exit 0**。hostname `tw053`，纪元 **Y**，已在 11 条 route 上测过底噪、与 `CURRENT_MACHINE` 相符。无需注册新字母，不需要重测底噪，直接可计时。
+- **参数**：`lane_args.py --check kernel_workflow/lanes/coldstart_newgate_20260819.json` → exit 0（8 个参数全部被入口点接受，5 个协议值 pin 住且匹配）。`--print` 渲染出的调用**原样**发起，未手抄、未增删键。生效值含 `min_improve=0.005`、`budget=12`、`gpu_ids=2,3,4,5,6,7`。
+- **冷启动确认**：`exp/state_coldstart_newgate_20260819` 发起前不存在（无播种）。
+- **运行标识**：Workflow run ID `wf_e22ca8b0-fbb`，task ID `ws8frhgsh`；transcript 在
+  `/home/yxh/.claude/projects/-home-yxh-GEAK/096453ae-8652-4183-b00f-d5ead2509ce6/subagents/workflows/wf_e22ca8b0-fbb`。
+- **待核对（§6 三件事）**：Setup 的 effective-config 回显里 `min_improve=0.005` 不带 `(default)`；`Commit gate: PER-ROUTE, N bands` 是否出现；`isa_evidence` 是否产出 verdict。波次结束后回填。
+
+
+---
+
+## 2026-08-19 15:2x — 第一次真正的提交：per-route band gate 首次运行并 ACCEPT
+
+`candidate_floor: 0.29` 落地后，round 1 重跑的结果第一次让 `winner` 非空，于是
+`kernel_lane.js:2352` 的 `if (winner && ROUTE_BANDS)` 分支——本 lane 存在的理由——
+在这个项目里第一次真的执行了。
+
+**独立复算（不采信 agent 的说法）。** 我用 Python 孪生 `scripts/route_gate.py`
+拿 winner 的 `per_case` 对 `control_per_case`（同 session 对照臂）重算了一遍。
+`decide()` 是 keyword-only 的，正确调用是
+`RG.decide(candidate_per_case=…, incumbent_per_case=…, bands=…, target_routes=…)`。
+
+- band 表由本 wave 自己的 `baseline_per_case[].samples_ms` 导出（11/11 路由各 5 次
+  预热重复，§6 item 2 的前置条件确认满足），未使用任何外部 route_bands 表。
+- 判决：**ACCEPT**。
+  理由串：`improved past band on: decode_m16_square (+67.43% vs band 1.29%),
+  decode_m2_square (+65.01% vs 1.31%), decode_m32_down (+79.13% vs 3.05%)`
+  ——正好是该候选申报的三条 target route。
+- `regressed: []`；`improved` 覆盖全部 11 条路由，没有触发回归否决。
+
+| route | incumbent ms | candidate ms | delta | band |
+|---|---|---|---|---|
+| decode_m2_square | 0.07242 | 0.02534 | +65.01% | 1.31% |
+| decode_m8_up | 0.09468 | 0.06148 | +35.07% | 0.54% |
+| decode_m16_square | 0.10328 | 0.03364 | +67.43% | 1.29% |
+| decode_m32_down | 0.42788 | 0.08930 | +79.13% | 3.05% |
+| decode_m64_square | 0.31278 | 0.14146 | +54.77% | 0.48% |
+| decode_m96_up | 0.17076 | 0.13480 | +21.06% | 3.16% |
+| prefill_m128_square | 0.15256 | 0.07508 | +50.79% | 4.53% |
+| prefill_m256_down | 0.41736 | 0.27880 | +33.20% | 14.86% |
+| prefill_m512_up | 0.51698 | 0.48444 | +6.29% | 1.29% |
+| prefill_m1024_down | 1.08671 | 0.89759 | +17.40% | 0.89% |
+| prefill_m2048_square | 0.64802 | 0.63076 | +2.66% | 0.27% |
+
+注意最后两行是这套 band 机制真正有意思的地方：+2.66% 在 suite geomean 里几乎
+看不见，但 prefill_m2048 的 band 只有 0.27%，所以它是一个**可判定的**改进；反过来
+prefill_m256_down 的 band 有 14.86%，+33.20% 才刚够两倍余量。用一个 suite 平均值
+去判这两条路由，本来就是在问一个它测不了的问题（这正是 commit 1777af35 修的东西）。
+
+**提交已落地。** canonical 树 `…/dense_bf16_gemm_fused/workspace`（注意 canonical
+是 `workspace/` 子目录，父目录不是 git repo——从父目录跑 `git log` 会走到 /home/yxh/GEAK
+上去，读到的是本仓库的历史，不是 lane 的）：
+
+```
+8d9bee7 round 1 winner: engineer r1_d2 (0.61x)
+6585d50 baseline
+```
+
+`git status --porcelain` 空；`current_best.diff` 45036 B，与 `git diff --binary
+<root>..HEAD` 逐字节一致；6 个文件全部是 candidate-owned，没有碰任何 immutable 路径。
+提交后重跑：policy scan v2 findings 0 / advisory 0 / 4 个 candidate ELF；correctness
+PASS（tol 0.02，5 随机 draw × 11 shape，最差 max_rel_err 0.00773，write probe 11/11
+conclusive，5 个 negative test 全过）。
+
+**Tech lead 报上来两件不阻塞提交但必须记下的事：**
+
+1. `round_1/engineer_2/report.md` 描述的**不是**被提交的代码。report 里的
+   "~6144 CTAs 选择器"、"template row-fragment 16/32/64"、"grow-only per-device fp32
+   scratch"、"K %% 64 != 0 就不 split" 在 patch 里一个都没有；patch 实际是
+   `kFillTarget = 2432`、固定二选一的 `kTile`/`kTallM`、`kGroupM = 1` swizzle、
+   每次调用 `torch::empty` 的 workspace，外加 report.md 从没提过的 skinny-M
+   非 MFMA gemv 路由（`kGemvMaxM = 4`）。被测被提交的是 patch，report.md 的机制叙述
+   和它那张 per-case 表对本次提交**未经验证**。顺带：round 1 insight #12 里那条
+   "grow-only、永不释放的 fp32 partial-plane cache" 的负债，在提交的代码里不存在——
+   它属于 report.md 描述的那个版本。
+2. `splitk_reduce_kernel`（src/custom_gemm.hip）有一个 suite 外的潜在 bug：
+   `nvec = total >> 2; vstride = nvec;`，而 plane 在 float4 单位下的 stride 是
+   `total/4`，两者只在 `total = M*N` 能被 4 整除时相等。11 条评分 shape 全都满足，
+   所以 correctness 过；shape 集一旦放宽，向量主体会从错位的 plane 偏移累加并静默出错
+   （下面的标量尾巴是对的）。当前 gate 到不了这里。
+
+**还没兑现的：** round 1 的 r1_d0（prefill 侧，0.5072）在本轮不可恢复——它的 verify
+prompt 未变，resume 只会重放同一次 policy_failed。retro 里那个 d0 ∪ d2 route-disjoint
+并集（算术推得 geomean 0.7887，2.35× seed）仍然要等 director 重新提出来才可能变成测量值。
+
+**wave 状态：** round 2 已在跑（journal 42 行，两个 agent 在飞：`abe1c2f57caa6f925`、
+`ab754e0feb0b3d7a0`）。`STATE.json` 仍是 13:49 的 round-1 收尾快照（`cumulative` 1.0），
+因为它由 director 在轮末写；下一次 round close 时应该看到它从 1.0 挪开。
+
+---
+
+## 2026-08-19 15:3x — §6 三个观察项全部有答案；其中第 3 项挖出一个真缺陷并已修
+
+**§6 item 1（Setup 的 effective-config 回显）：确认。** 首launch 的回显是
+
+```
+[kernel-lane]   budget=12  deep_cost=2 (default)  max_no_improve=2 (default)
+[kernel-lane]   min_improve=0.005  candidate_floor=1 (default)  progress_delta=0.005 (default) (= min_improve)
+[kernel-lane]   isa_evidence=observe (default)  mode=optimize  gpu_mode=pool (default)  gpu_ids=2,3,4,5,6,7
+[kernel-lane]   route_bands=not supplied -- will be DERIVED from the baseline repeats after the Benchmark phase
+```
+
+`min_improve=0.005` 后面**没有** `(default)`，正是这个机制要证明的事——commit 2761475b
+之前，一个没送到的参数和一个选定的默认值在运行期是无法区分的。同一行里
+`candidate_floor=1 (default)` 就是当时那个缺陷的现场照片。
+
+注意 `~/.claude/.../workflows/wf_e22ca8b0-fbb.json` 这个记录文件停在 14:01 就不再更新了，
+所以里面只有**首次** launch 的回显；resume 之后的回显没有落进去。不要拿它当 live 配置读。
+live 进程确实跑在 0.29 上，证据是判决本身：admission filter（`kernel_lane.js:2263`
+`primSpeedup(r.ver) > CANDIDATE_FLOOR`）放行了 0.6114 并让 `winner` 非空，这在 floor=1.0
+下不可能发生。
+
+**§6 item 3（isa_evidence 是否产出可读判决）：是，但答案是 `indeterminate`，而原因是一个
+可修的管线缺陷，不是物理上不可判。** 这是本 lane 第一次拿到有实质内容的 ISA 回执：
+
+- 父归档由 verifier 从**自己测过的** control workspace 抓取（`isa_parent_v2`，
+  `parent_source_hash 0071b07c…`），不是从别人递过来的 "canonical" 路径——这正是
+  roles/verify_engineer.md 要求的做法，也是老 lane「11 次干净抓取、0 个判决」的解药。
+- checks 层跑通了：8 个 kernel、9 条 finding、全 advisory、high=0。
+- 但 diff 层 `mechanism_realized=null → indeterminate`，verifier 的说明是：
+  **"ISA_MECHANISM_CLAIMS was handed to me empty, so no claim was passed to isa_signals
+  (the engineer's worker_result declares 'reduce_lds'; I did not substitute it)."**
+
+**缺陷定位（不采信 agent 的说法，逐层查了）：**
+
+1. engineer_2 确实声明了 claim。journal 里它的结构化返回带 `mechanism_claims: ['reduce_lds']`，
+   磁盘上 `round_1/engineer_2/worker_result.json`（13:32 写入）同样带 `['reduce_lds']`。
+2. verifier 收到的确实是空的。它的 prompt 里逐字是 `- ISA_MECHANISM_CLAIMS: []`（15:02:42）。
+3. 中间断在哪：这次 verify 走的是 **recovery 路径**。resume 之后 engineer_2 的 engineer agent
+   （`a06c97744fe75ffd9` / `ae6521b8b776e51ba`）没有返回结果，于是 `kernel_lane.js:2090`
+   的 `recovered = !eng || eng.status === 'failed'` 为真、`eng` 为 null，
+   而 L2133 的 `eng && Array.isArray(eng.mechanism_claims) ? … : []` 就渲染成了 `[]`。
+   verifier 拒绝自己替补 claim——这是对的，它被明确要求不许把假设改成证据的形状。
+   错在上游。
+
+**这个缺陷的讽刺之处，也是修法的依据：** 同一段 harvest 逻辑（L2071-2089）早就论证过
+「engineer 死了不代表磁盘上没有好东西」，因此丢失的返回**不**能压制 `best_patch.diff`。
+`worker_result.json` 是同一个 engineer 在 verify 测量任何东西**之前**写的同一份声明，
+适用完全相同的论证：读它不是"把 claim 拟合到证据上"，是从唯一幸存的副本里把假设捞回来。
+
+**已修：**
+
+- `kernel_lane.js` L2135-2152：recovery 路径额外下发
+  `ISA_MECHANISM_CLAIMS_FILE: <out_dir>/worker_result.json`。只在 `recovered` 为真时下发——
+  活着的 `eng` 永远是权威，文件不得覆盖它。工作流沙箱 stat 不了文件，所以和 patch 一样：
+  只给路径，判断权下放给 verifier。
+- `roles/verify_engineer.md`：新增一段，规定 `ISA_MECHANISM_CLAIMS` 为空且
+  `ISA_MECHANISM_CLAIMS_FILE` 存在时，从该文件逐字读 `mechanism_claims`；非空的
+  `ISA_MECHANISM_CLAIMS` 永远优先；文件缺失/不可读/没有该字段时，就无 claim 跑 diff 并在
+  `notes` 里说明，不许发明一个。无论走哪条路都要在 `notes` 里写明 claim 的来源，
+  好让读的人能区分"engineer 提过的假设"和"没人提过的假设"。
+- 测试：`python3 -m unittest discover` **Ran 875 tests, OK**，没有留下红的。
+
+**这个修复对当前 wave 无效**，说清楚免得误读：嵌套 workflow 的脚本在 wave 启动时就已载入，
+本次 run 不会重读 `kernel_lane.js`。它从下一次 launch 起生效。代价是：如果之后需要
+`resumeFromRunId`，recovered verify 的 prompt 变了、缓存键随之改变，那些 verify 会重跑
+（也正好会带上 claim）。
+
+**"如果当时是 gate 模式会怎样" —— 这个问题可以从代码直接回答，不必猜。**
+`isaEvidenceReject`（`kernel_lane.js:1627`）只在 `mechanism_verdict === 'refuted'` 时拒绝；
+HOLE、缺归档、`indeterminate`、以及任何 `checks` finding 都**不**拒绝，而且注释里给了理由：
+证据里的洞是我们的缺陷、不是候选的过错，在这个方向上失败会静默地毁掉正确的快 kernel。
+所以 gate 模式**不会**挡掉本轮这个候选。
+
+但把上面那个 claim 丢失缺陷和这条规则放在一起看，结论比"无害"难看得多：没有 claim →
+diff 的 `mechanism_realized` 恒为 `null` → 判决恒为 `indeterminate` → gate **永远不可能触发**。
+也就是说，在修好之前，恰恰是对那些 engineer 中途死掉、最需要独立检查的候选，
+`isa_evidence=gate` 会被静默解除武装，而日志上看起来一切正常。这比"少一条证据"严重，
+是这次修复真正的价值。即便如此，提到 `gate` 仍然要等：先用 observe 跑一整波、
+手工看过判决，确认 `refuted` 只落在真的没实现的机制上，再谈。

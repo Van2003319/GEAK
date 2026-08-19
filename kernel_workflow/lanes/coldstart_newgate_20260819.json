@@ -1,34 +1,31 @@
 {
   "_lane": "coldstart_newgate_20260819 -- a second cold start from the same seed, on the gate/per-route-default code",
-
   "_what_this_measures": "This lane is the PAIRED CONTROL for greedy_coldstart_20260817. Same seed (examples/tasks/dense_bf16_gemm_fused, byte-identical to git), same 11-case suite, same immutable rocBLAS oracle, same budget 12, same six GPUs. The one thing that changed is the workflow code: per-route band gate promoted from an optional argument to the default path and fed from the wave's own baseline repeats; unknown/omitted launch arguments now refused instead of silently defaulted; the stall counter judged per route instead of on the suite average; the ISA parent archive bound to the canonical tree's source_hash instead of to the commit event. So the difference between the two lanes' round-by-round curves is attributable to those changes rather than to a different starting point.",
-
   "_require": {
     "min_improve": 0.005,
     "mode": "optimize",
     "budget": 12,
     "kernel_path": "/home/yxh/GEAK/examples/tasks/dense_bf16_gemm_fused",
-    "state_dir": "/home/yxh/GEAK/exp/state_coldstart_newgate_20260819"
+    "state_dir": "/home/yxh/GEAK/exp/state_coldstart_newgate_20260819",
+    "candidate_floor": 0.29
   },
-
   "_note_state_dir": "A NEW, EMPTY directory. That is the whole point: with no <state_dir>/best on disk the director seeds from kernel_path and returns resumed:false, which is a true cold start. It must NOT be pointed at exp/state_greedy_coldstart_20260817 (the 1.4045 incumbent, 209 insights, 43 ledger entries) or at any exp/task_bf16_* / exp/v98_* / exp/qd_* directory. From round 1 onward the lane fills this directory itself, so 'cold start' and 'runs continuously across machine restores' are not in conflict.",
-
   "_note_min_improve": "0.005 is carried over from greedy_coldstart_20260817 unchanged, so the two lanes remain comparable. It matters less than it did -- the per-route band gate is now the default path -- but it is still the fallback threshold on any round where no band table can be derived, and it is still the denominator the union commit gate falls back to.",
-
   "_note_gpu_ids": "Six lanes, ids 2-7, identical to greedy_coldstart_20260817, so round parallelism -- and therefore the shape of the budget curve -- matches the lane this one is being compared against. Keeping 0 and 1 out is not ceremony: on tw053 a foreign tenant's container is holding 173 GB on the GPU that gpu_lock.sh calls 0. Note that rocm-smi numbers that same card 3; the two indexings do not agree, and gpu_lock's is the one that decides, because it reads /sys/class/drm/renderD(128+8*id). Check with gpu_lock's own criteria (busy<=5% and vram<=1024MB per that sysfs path), not with rocm-smi, before concluding a lane is free.",
-
   "_not_passed_on_purpose": {
     "route_bands": "Omitted so the lane DERIVES per-route bands from this wave's own baseline_per_case[].samples_ms, measured on the box that will judge the candidates. Passing a table pins the gate to another epoch's noise, which is how route_bands_gfx942_epochQ.json went six epochs stale without anyone noticing.",
     "isa_evidence": "Omitted = 'observe', the default. The new-symbol pairing artefact is fixed (isa_signals.py returns indeterminate rather than refuted for a mechanism landing in a symbol that exists only in the child), but 'gate' has never run for real. Observe first: the parent archive is now adoptable from the verifier's own control build, so this is the first lane that should produce readable mechanism verdicts at all. Promote to 'gate' only after a wave's verdicts have been inspected by hand.",
     "search_strategy": "REMOVED. It matched nothing after the QD search was deleted and the entry point now throws on it. Greedy is the only strategy."
   },
-
   "kernel_path": "/home/yxh/GEAK/examples/tasks/dense_bf16_gemm_fused",
   "workflow_dir": "/home/yxh/GEAK/kernel_workflow",
   "mode": "optimize",
   "budget": 12,
   "min_improve": 0.005,
+  "candidate_floor": 0.29,
   "gpu_ids": "2,3,4,5,6,7",
   "state_dir": "/home/yxh/GEAK/exp/state_coldstart_newgate_20260819",
-  "task": "cold-start run on the per-route-gate code, paired against greedy_coldstart_20260817; target the 11-case suite geomean vs direct rocblas_gemm_ex"
+  "task": "cold-start run on the per-route-gate code, paired against greedy_coldstart_20260817; target the 11-case suite geomean vs direct rocblas_gemm_ex",
+  "_note_candidate_floor": "0.29, a RECORDED DEVIATION from the 1.0 default, added 2026-08-19 after wave 1 round 1 committed nothing. Reason: on this task the PRIMARY metric is fixed by the harness as speedup vs the IMMUTABLE rocBLAS oracle (COMMANDMENT lines 116-129), and the seed sits at 0.336 -- i.e. the candidate tree starts BELOW its own comparator. kernel_lane.js:2263 admits a verified result to the round's candidate list only when primSpeedup > CANDIDATE_FLOOR, so at the 1.0 default every result during the entire climb from 0.336 to rocBLAS parity is filtered out: round 1's two verified, correctness-passing, policy-clean survivors (0.5072 and 0.6267 vs oracle -- 1.512x and 1.869x over the SAME-SESSION incumbent control arm at 0.3353) produced candidates=[] and WINNER=null. Critically, the per-route gate this lane exists to measure is behind `if (winner && ROUTE_BANDS)` at kernel_lane.js:2352, so with winner permanently null it can never run -- the lane would have reproduced the greedy lane's 'gate logged NOTHING' outcome for a different reason and returned no data on its own experimental variable. This is the exact case the CANDIDATE_FLOOR comment (kernel_lane.js:113-118) describes: a candidate that 'lands BELOW the comparator by construction' whose 'recovery phase is invisible' at 1.0. 0.29 sits below the seed control (0.3353) by more than the widest measured route band (11.55%, worst case 0.2966), so no real work is dropped, while an engineer that honestly reports worse-than-seed still skips verification via the `trustworthyBelowBaseline` economy at kernel_lane.js:2086. The COMMIT decision is untouched: banking still requires the per-route band gate or MIN_IMPROVE over `cumulative`, so this changes what is TRACKED, not what is BANKED.",
+  "_note_pairing_caveat": "candidate_floor is a SECOND knob differing from greedy_coldstart_20260817 (which ran the 1.0 default). The paired comparison is therefore no longer single-variable in the strict sense. It was taken deliberately: with the floor at 1.0 this lane cannot exercise the per-route gate at all, so the alternative was a clean pairing that measures nothing. Read the two curves as 'per-route gate + a reachable candidate list' vs 'suite gate', and note that greedy spent its early waves in the same invisible recovery phase."
 }
