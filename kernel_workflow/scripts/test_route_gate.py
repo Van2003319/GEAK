@@ -165,6 +165,26 @@ class DecisionTest(unittest.TestCase):
                       bands=BANDS, target_routes=["prefill_m1024_down"])
         self.assertTrue(d.accepted)
 
+    def test_an_empty_target_list_narrows_nothing(self):
+        """`[]` means "this direction declared no target", not "narrow to nothing".
+
+        This is the one input on which this function and its JS twin in
+        kernel_lane.js disagreed. Under `target_routes is not None` an empty list
+        narrowed to nothing and refused, while the twin -- the gate that actually
+        decides whether a round commits -- treats the same value as "no narrowing"
+        and accepts. A parity test between the two is what neither side had, and
+        the shape is reachable: engineer.md only says "omit when the direction
+        names none", and an agent filling a declared array field it has nothing to
+        say about returns [] as readily as it omits the key.
+        """
+        t = flat()
+        t["decode_m32_down"] = 0.100 * (1 - 0.10)
+        for empty in ([], None):
+            d = rg.decide(candidate_per_case=rows(t), incumbent_per_case=rows(flat()),
+                          bands=BANDS, target_routes=empty)
+            self.assertTrue(d.accepted, f"target_routes={empty!r} must not narrow")
+            self.assertEqual(d.improved, ["decode_m32_down"])
+
 
 class NoDeviceScreenTest(unittest.TestCase):
     """The gate takes no device argument, by decision of the run owner.

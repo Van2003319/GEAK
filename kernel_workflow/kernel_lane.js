@@ -295,7 +295,19 @@ const primSpeedup = (o) => {
 // contradiction only when it is not n/n, so "15/15" passes and "10/11" does not.
 const saysContradicted = (v) => {
   const s = String(v == null ? '' : v);
-  if (/\b(fail\w*|mismatch\w*|incorrect|wrong|error\w*|partial\w*|except|nan|inf)\b/i.test(s)) return true;
+  // VERDICT vocabulary only. `error`, `nan` and `inf` were here and had to go: they are
+  // MEASUREMENT vocabulary, and a correctness report quotes them when it PASSES --
+  // "PASS (max error 3.1e-05, within rtol=1e-3)", "pass, no NaN or Inf in output",
+  // "PASS - allclose within tolerance, no errors" were all vetoed. That is this veto
+  // firing in the one direction it must never fire in: a correct, faster candidate
+  // discarded, and the ledger recording it as a correctness failure -- which closes the
+  // direction for the rest of the run, since the ledger is the search's only memory.
+  // Matching the presence of a word cannot see a negation, so words that appear in
+  // passing reports do not belong in the list. Do not re-add them: the fail-open cases
+  // they were meant to catch ("contains NaN") are already caught by `status`, which the
+  // caller gates through this same helper and which verify_engineer.md requires to be
+  // `correctness_failed` on any correctness failure.
+  if (/\b(fail\w*|mismatch\w*|incorrect|wrong|partial\w*|except)\b/i.test(s)) return true;
   const frac = /(\d+)\s*\/\s*(\d+)/g;
   for (let m = frac.exec(s); m; m = frac.exec(s)) if (Number(m[1]) !== Number(m[2])) return true;
   return false;
@@ -700,11 +712,17 @@ const PLAN_SCHEMA = obj({
 // or an imported symbol, both of which are visible only in the built binary, so
 // `elf: 0` on a post-build receipt means the one scan that could have caught the
 // cheat did not look at the thing the cheat lives in.
+// `files` is REQUIRED and `inspected` is not the same question: `policyReject` gates on
+// `files`, because `inspected` counts directory entries and so reads 1 for an empty tree.
+// Declaring only `inspected` is what made a receipt carrying every declared field, all
+// healthy, come back `policy:inspected_nothing(files=undefined)` -- a refusal that reads as
+// "the agent scanned nothing" when the agent was never asked for the field being gated on.
 const POLICY_SUMMARY_SCHEMA = obj({
   schema: { type: 'string' }, passed: { type: 'boolean' },
   findings: { type: 'number' }, advisory: { type: 'number' },
-  inspected: { type: 'number' }, elf: { type: 'number' }, unreadable: { type: 'number' },
-}, ['passed', 'findings', 'inspected', 'elf']);
+  inspected: { type: 'number' }, files: { type: 'number' },
+  elf: { type: 'number' }, unreadable: { type: 'number' },
+}, ['passed', 'findings', 'inspected', 'files', 'elf']);
 // (87). The exit code is the field with teeth, and it has three meanings, not
 // two: 0 in lockstep, 1 drifted, 2 nothing was checked. `pairs` and `drifted`
 // are carried because they let the orchestrator refuse a receipt that could not
@@ -790,6 +808,10 @@ const VERIFY_SCHEMA = obj({
   // different points in the run reporting the same oracle is materially stronger evidence than
   // one agent asserting it once -- and it is the only evidence available to a script with no FS.
   oracle_digest: { type: 'string' },
+  // Declared, not just listed in `required` below. It is the strictest gate in the admission
+  // filter (`r.ver.policy_pass === true`), and a required-but-undeclared property is a field the
+  // agent is obliged to return and never told about. INTEGRATE_SCHEMA has always declared it.
+  policy_pass: { type: 'boolean' },
   policy_receipts: { type: 'object', additionalProperties: true },
   // (69): the summary of `$VERIFY_DIR/policy_postbuild.json`, the scan that sees the ELFs.
   policy_postbuild: POLICY_SUMMARY_SCHEMA,
@@ -2150,7 +2172,16 @@ matter how the rest of the run looked.`,
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
-  if (madeProgress || improved) { noImprove = 0; } else { noImprove++; }
+  // `committedThisRound`, never `improved`. `improved` is decided BEFORE the commit is attempted,
+  // so a winner that repeatedly fails to LAND (patch will not apply, hand-merge conflict, commit
+  // agent dead or honestly reporting committed:false) reset this counter every round while
+  // `cumulative` never moved -- and because the next round's winner then clears that same
+  // unchanged threshold, MAX_NO_IMPROVE could never fire and the lane spent its ENTIRE budget
+  // re-deriving one patch it could not bank. That is (127)'s rule applied to the stall counter:
+  // bookkeeping may only advance when the canonical tree demonstrably moved. It also restores
+  // what the pre-knob loop did (`legacy()` in test_candidate_floor.js: "reset ONLY on a commit")
+  // while keeping `madeProgress`, the knob that lets a sub-baseline climb keep its budget.
+  if (madeProgress || committedThisRound) { noImprove = 0; } else { noImprove++; }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(

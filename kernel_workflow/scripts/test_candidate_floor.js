@@ -115,6 +115,13 @@ ok(/let improved = legacyImproved;/.test(src) && /if \(winner && ROUTE_BANDS\) \
    'the per-route gate is opt-in: no band table means the legacy threshold decides');
 ok(/const madeProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
    'the progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
+// The other half of the stall counter, and the half that decides whether a lane can ever stop.
+// `improved` is settled BEFORE the commit is attempted, so resetting on it let a winner that
+// never LANDED clear the counter every round while `cumulative` stood still -- and the next
+// round's winner then cleared the same unchanged threshold, so MAX_NO_IMPROVE could not fire
+// and the whole budget went into re-deriving one unbankable patch.
+ok(/if \(madeProgress \|\| committedThisRound\) \{ noImprove = 0; \} else \{ noImprove\+\+; \}/.test(src),
+   'the stall counter resets on a COMMIT, not on an `improved` that may never have landed');
 ok(!/cumulative \* \(1 \+ CANDIDATE_FLOOR\)|CANDIDATE_FLOOR\)\s*;?\s*\/\/ commit/.test(src),
    'and the floor is nowhere near the commit decision');
 
@@ -129,9 +136,13 @@ function replay({ budget, deepCost, maxNoImprove, floor, minImprove, progressDel
     const winner = raw > floor ? raw : null;
     const improved = winner !== null && winner > cumulative * (1 + minImprove);
     const progress = winner !== null && bestSeen > 0 && winner > bestSeen * (1 + progressDelta);
-    if (improved) { cumulative = winner; commits++; }
+    // This model's commit never fails, so `committed` tracks `improved` here. Named anyway,
+    // because the lane resets the stall counter on the COMMIT and a model that reads `improved`
+    // instead is one edit away from re-authorising the bug that change removed.
+    const committed = improved;
+    if (committed) { cumulative = winner; commits++; }
     if (winner !== null && winner > bestSeen) bestSeen = winner;
-    noImprove = (progress || improved) ? 0 : noImprove + 1;
+    noImprove = (progress || committed) ? 0 : noImprove + 1;
     log.push([round, noImprove, +cumulative.toFixed(4)]);
   }
   return { rounds: round, commits, final: +cumulative.toFixed(4), log };

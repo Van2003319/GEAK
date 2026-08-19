@@ -33,6 +33,18 @@ console.log('\n# the correctness gate and the primary-metric selector, executed'
                    'PASS_WITH_WARNINGS']) {
     ok(says.says(s, 'pass') === true, `the correctness gate opens on ${JSON.stringify(s)}`);
   }
+  // ...and on a PASS that quotes its MEASUREMENT vocabulary, which is what a numerical
+  // correctness report normally does. `error\w*`, `nan` and `inf` were in the veto list and
+  // vetoed every one of these: matching the presence of a word cannot see the negation in
+  // "no NaN", and a max-error figure is evidence the check RAN, not that it failed. This is
+  // the veto firing in the only direction it must never fire in -- a correct, faster
+  // candidate discarded and written into the ledger as a correctness failure.
+  for (const s of ['PASS (max error 3.1e-05, within rtol=1e-3)', 'pass, no NaN or Inf in output',
+                   'PASS - allclose within tolerance, no errors',
+                   'passed - relative error 1e-7 on all cases']) {
+    ok(says.says(s, 'pass') === true,
+      `the correctness gate opens on a PASS that quotes measurement vocabulary: ${JSON.stringify(s)}`);
+  }
   // ...and stays shut on failures, INCLUDING the ones that used to open it.
   for (const s of ['FAIL', 'failed', 'did not pass', 'partially passes', '', null, undefined,
                    'passes 10/11 cases', 'pass rate 10/11', 'PASS except decode_m2',
@@ -257,6 +269,33 @@ console.log('\n# the post-build policy receipt gate, executed');
     'the summary is in the schemas, so an agent that returns it is not stripped');
   ok((src.match(/policy_postbuild: POLICY_SUMMARY_SCHEMA/g) || []).length === 2,
     'in both report schemas that carry a verdict, not just the one easiest to reach');
+
+  // A gate may only refuse on a field the schema ASKED FOR. This one reads `files`, and the
+  // schema declared only `inspected` -- so a receipt carrying every declared field, all healthy,
+  // came back `policy:inspected_nothing(files=undefined)`: a refusal that names the AGENT for a
+  // field nothing ever requested. The fixtures above could not see it, because they supply
+  // `files` themselves, and that is the general trap -- EXECUTING a gate proves nothing about
+  // the gate's reachability when the fixture is more generous than the contract the agent is
+  // handed. So the schemas are evaluated too, and the fixture is checked against them.
+  const schemaBlock = grab(/const obj = \(props, required\) => [^\n]*\n/, 'obj') +
+    grab(/const perCase = \{[\s\S]*?\n\};\n/, 'perCase') +
+    grab(/const POLICY_SUMMARY_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'POLICY_SUMMARY_SCHEMA') +
+    grab(/const HIP_TWIN_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'HIP_TWIN_SCHEMA') +
+    grab(/const ISA_EVIDENCE_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'ISA_EVIDENCE_SCHEMA') +
+    grab(/const VERIFY_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'VERIFY_SCHEMA');
+  const schemas = new Function(`${schemaBlock}\nreturn { POLICY_SUMMARY_SCHEMA, VERIFY_SCHEMA };`)();
+  const polSummary = schemas.POLICY_SUMMARY_SCHEMA;
+  ok(polSummary.properties.files !== undefined && polSummary.required.includes('files'),
+    'POLICY_SUMMARY_SCHEMA declares AND requires `files`, the count this gate refuses without');
+  ok(Object.keys(good).every(k => polSummary.properties[k] !== undefined),
+    'every field the passing fixture carries is one the schema asks the agent for',
+    Object.keys(good).filter(k => polSummary.properties[k] === undefined).join(', '));
+  // The same defect one level up: `policy_pass` is the boolean the admission filter reads, and
+  // it sat in VERIFY_SCHEMA's `required` list with no property declared beside it -- a field the
+  // agent is obliged to return and was never told about.
+  ok(schemas.VERIFY_SCHEMA.properties.policy_pass !== undefined &&
+     schemas.VERIFY_SCHEMA.required.includes('policy_pass'),
+    'VERIFY_SCHEMA declares policy_pass rather than only listing it in `required`');
 }
 
 console.log('\n# the hipify twin-sync gate, executed');

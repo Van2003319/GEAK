@@ -197,7 +197,14 @@ def decide(
             for v in verdicts if v.status == "regressed"))
 
     wanted = improved
-    if target_routes is not None:
+    # Truthiness, not `is not None`: an EMPTY list means "this direction declared no target
+    # route", which must not narrow anything. Under `is not None` an empty list narrowed to
+    # nothing and refused every candidate, and the JS twin in kernel_lane.js -- which is the
+    # gate that actually decides a commit -- reads the same input as "no narrowing" and
+    # ACCEPTS. Two opposite verdicts on one piece of evidence, and it is a reachable shape:
+    # engineer.md only says "omit when the direction names none", and an agent filling a
+    # declared array field it has nothing to say about returns [] as readily as it omits it.
+    if target_routes:
         wanted = [r for r in improved if r in set(target_routes)]
         if not wanted:
             return out(False, (
