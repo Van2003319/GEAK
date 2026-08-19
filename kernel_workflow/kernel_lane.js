@@ -69,6 +69,118 @@ const PROGRESS_DELTA = (() => {
   const v = parseFloat(A.progress_delta != null ? A.progress_delta : MIN_IMPROVE);
   return Number.isFinite(v) && v > -1 ? v : MIN_IMPROVE;
 })();
+// Per-route repeat bands, as {route: fraction}. Supplying them switches the COMMIT gate from the
+// suite geometric mean to a per-route absolute-time test (`routeGate` below). Omitting them keeps
+// the historical gate byte-for-byte, so a run that does not pass this argument is unaffected.
+//
+// Why the switch exists: COMMANDMENT's claim rule and the tech-lead close-out both say a
+// single-route mechanism must be judged by that route's absolute microseconds, with the suite
+// geomean used only to confirm nothing else regressed -- and the gate below did the opposite. An
+// eleven-route geometric mean divides a single-route win by roughly eleven, so a real +7% route
+// mechanism reaches the gate reading +0.6%, under the noise, and MIN_IMPROVE on top of that is
+// equivalent to "never commit".
+//
+// The bands must be MEASURED, not guessed: derive them with
+// `scripts/route_gate.py:bands_from_repeats()` over repeats of one unchanged tree. On this lane
+// they span 1.56% to 11.55% across routes, so a single default would be wrong by ~7x. They are
+// epoch- and host-specific and must be regenerated after a machine change.
+const ROUTE_BANDS = (() => {
+  const raw = A.route_bands;
+  if (raw == null) return null;
+  let obj = raw;
+  // This script cannot read the filesystem (see the header), so a path is not loadable here. It is
+  // named explicitly rather than failing on `undefined.bands` later, because the band table lives in
+  // a JSON file on disk and passing its path is the obvious first thing a caller tries.
+  if (typeof raw === 'string') {
+    try {
+      obj = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(`args.route_bands was a string that is not JSON ("${raw.slice(0, 80)}"). ` +
+        'This script cannot read files; pass the table inline as an object, or paste the contents ' +
+        `of scripts/route_bands_<arch>_<epoch>.json. (${e.message})`);
+    }
+  }
+  if (obj && typeof obj === 'object' && obj.bands && typeof obj.bands === 'object') obj = obj.bands;
+  if (!obj || typeof obj !== 'object') throw new Error('args.route_bands must be an object of {route: band}');
+  const out = {};
+  for (const [route, band] of Object.entries(obj)) {
+    const v = parseFloat(band);
+    if (!Number.isFinite(v) || v < 0) {
+      throw new Error(`args.route_bands["${route}"]=${band} is not a non-negative fraction`);
+    }
+    out[route] = v;
+  }
+  if (!Object.keys(out).length) throw new Error('args.route_bands is empty');
+  return out;
+})();
+// Twin of `scripts/route_gate.py:decide()`, kept in lockstep by scripts/test_route_gate_parity.py.
+// Returns {applicable, accepted, reason, improved, regressed, routes}. `applicable:false` means the
+// evidence to run this gate is missing, and the caller falls back to the legacy test rather than
+// refusing a round -- a missing band table must not be able to stall a lane, but it must also never
+// look like a pass, which is why the reason is logged either way.
+const routeGate = (candPerCase, incPerCase, bands, opts) => {
+  const o = opts || {};
+  const na = (reason) => ({ applicable: false, accepted: false, reason, improved: [], regressed: [], routes: [] });
+  if (!bands || !Object.keys(bands).length) return na('no route bands supplied');
+  const read = (rows, which) => {
+    const out = {};
+    for (const row of rows || []) {
+      const name = row && (row.name || row.test_case_id);
+      const ms = row && (row.optimized_ms != null ? row.optimized_ms : row.candidate_ms);
+      if (!name || !(typeof ms === 'number' && ms > 0)) {
+        return { err: `${which}: a per_case row has no route name or no positive time` };
+      }
+      if (out[name] != null) return { err: `${which}: route ${name} appears twice` };
+      out[name] = ms;
+    }
+    if (!Object.keys(out).length) return { err: `${which}: per_case is empty` };
+    return { rows: out };
+  };
+  const cand = read(candPerCase, 'candidate');
+  if (cand.err) return na(cand.err);
+  const inc = read(incPerCase, 'incumbent');
+  if (inc.err) return na(inc.err);
+
+  const missing = Object.keys(inc.rows).filter(r => cand.rows[r] == null).sort();
+  if (missing.length) {
+    return { applicable: true, accepted: false, improved: [], regressed: [], routes: [],
+      reason: `candidate did not measure ${missing.length} incumbent route(s): ${missing.join(', ')}; ` +
+        'non-regression cannot be claimed for a route that was not measured' };
+  }
+  const unbanded = Object.keys(inc.rows).filter(r => bands[r] == null).sort();
+  if (unbanded.length) return na(`no measured band for route(s) ${unbanded.join(', ')}`);
+
+  const routes = [], improved = [], regressed = [];
+  for (const route of Object.keys(inc.rows).sort()) {
+    const band = bands[route], i = inc.rows[route], c = cand.rows[route];
+    const delta = (i - c) / i;                       // > 0 means the candidate is faster
+    const status = delta > band ? 'improved' : (-delta > band ? 'regressed' : 'flat');
+    routes.push({ route, incumbent_ms: i, candidate_ms: c, delta_frac: delta, band, status });
+    if (status === 'improved') improved.push(route);
+    if (status === 'regressed') regressed.push(route);
+  }
+  const pct = (x) => `${(x * 100).toFixed(2)}%`;
+  const done = (accepted, reason) => ({ applicable: true, accepted, reason, improved, regressed, routes });
+  if (regressed.length) {
+    return done(false, 'regressed past its own band on: ' + routes.filter(r => r.status === 'regressed')
+      .map(r => `${r.route} (${pct(-r.delta_frac)} vs band ${pct(r.band)})`).join(', '));
+  }
+  // A direction that declared a mechanism on one route does not get to bank a win that showed up
+  // somewhere else: that is how a measurement artefact is committed as a mechanism.
+  let wanted = improved;
+  if (Array.isArray(o.targetRoutes) && o.targetRoutes.length) {
+    const targets = new Set(o.targetRoutes);
+    wanted = improved.filter(r => targets.has(r));
+    if (!wanted.length) {
+      return done(false, 'no declared target route improved past its own band' +
+        (improved.length ? `; incidental gains on ${improved.join(', ')} are not the claimed mechanism` : ''));
+    }
+  }
+  if (!wanted.length) return done(false, 'no route improved past its own band (all flat)');
+  const won = new Set(wanted);
+  return done(true, 'improved past band on: ' + routes.filter(r => won.has(r.route))
+    .map(r => `${r.route} (${pct(r.delta_frac)} vs band ${pct(r.band)})`).join(', '));
+};
 // Budget cost of ONE `deep_explore` direction. The deep-explore engineer does far more than a single
 // specialist — broad rewrite authority, its own multi-iteration measure→profile→rewrite loop — so it
 // is charged more than 1 against the direction budget (default 2). It also always runs in a DEDICATED
@@ -311,6 +423,106 @@ const HARNESS_ADDENDUM = String(A.harness_addendum || '').trim();
 const INCREMENTAL = !!STATE_DIR && String(A.incremental_analyze || '') === 'true';
 const RESUME_INPUT = INCREMENTAL ? { INCREMENTAL_RESUME: '1' } : {};
 const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 2, 10));
+
+// Finding (87), one question further along. `hip_twin_sync.py` proves the file
+// that was EDITED is the file that was COMPILED. It cannot prove the MECHANISM
+// that was written survived compilation: a widened staging load whose alignment
+// the backend could not prove, a matrix-core builtin lowered back to the opcodes
+// it replaced, a conversion burst re-materialized. All of those build, pass
+// correctness, measure within noise of the parent, and get written into
+// `history.ledger` as "tried X, no effect". That entry is false, and the planner
+// reads the ledger as memory -- in greedy search it is the ONLY memory there is,
+// so one false negative closes a direction for the rest of the run. This is the
+// same cost (87) names: "not one wasted round, [but] a mechanism written off".
+//
+// `isa_capture.py` archives the AMDGCN out of the artifact that was measured and
+// `isa_signals.py` diffs it against the parent's archive.
+//   observe  capture + record + log. Never rejects a candidate. DEFAULT.
+//   gate     additionally refuses a candidate whose own ISA receipt refutes the
+//            mechanism it declared.
+//   off      no capture, no prompt input, no record. An escape hatch, not a normal
+//            setting -- for an ablation, or for a box where the read is impossible.
+//
+// `observe` IS THE DEFAULT, and that is the design rather than a convenience.
+//
+// The tempting rule is "read the machine code when the source does not explain the
+// result". It cannot work here, because the case this layer exists to catch produces
+// a result that IS fully explained by the source: the engineer widened a load, the
+// compiler quietly declined to, the candidate builds, passes correctness, and
+// measures within noise of its parent. That reads as a clean, self-consistent
+// negative. NOTHING about it says "go look at the assembly". Escalating on a symptom
+// works only for symptoms that exist, and the whole failure mode here is that there
+// is no symptom -- so a conditional check is not a cheaper version of this check, it
+// is a check that never fires on the case it was written for.
+//
+// Off-by-default would be the same mistake with a flag on it. Finding (87) is the
+// standing example: `hip_twin_sync.py` "has existed and been correct for several
+// rounds while nothing called it", and the fix was not a better tool, it was calling
+// it. A layer that has to be switched on will be off during exactly the run whose
+// ledger it was meant to keep honest.
+//
+// What default-on costs, stated plainly rather than hand-waved: the ISA inputs are
+// now spread on every hip-shaped lane, so verify and engineer prompts grow by a
+// bounded block, and each candidate pays two CPU-only subprocess calls over an
+// artifact that already exists. It cannot rebuild, cannot touch the GPU, and cannot
+// perturb a measurement. Where the read is impossible the capture returns its HOLE
+// code, the verdict is `indeterminate`, and nothing is refused -- inert and visible.
+//
+// `gate` stays opt-in for a different reason: it changes outcomes, and there is no
+// field data yet on how often a `refuted` verdict would be a false refusal. Observe
+// first, on real kernels, then decide from the number.
+const ISA_MODES = ['off', 'observe', 'gate'];
+const ISA_MODE_RAW = String(A.isa_evidence != null ? A.isa_evidence : '').trim().toLowerCase();
+const ISA_MODE = ISA_MODE_RAW === '' || !ISA_MODES.includes(ISA_MODE_RAW)
+  ? 'observe' : ISA_MODE_RAW;
+// A misspelled mode resolves to the default and SAYS SO. It deliberately does not
+// resolve to `off`: `isa_evidence=gat` silently becoming "no ISA layer at all" is the
+// same silent-off failure the TARGET_LANGUAGE whitelist had, and a typo is exactly
+// how it would happen. Emitted at the first log point below, because `log` is not
+// available this early in the file.
+const ISA_MODE_WARNING = (ISA_MODE_RAW !== '' && !ISA_MODES.includes(ISA_MODE_RAW))
+  ? `isa_evidence="${ISA_MODE_RAW}" is not one of ${ISA_MODES.join('|')}; using `
+    + `"${ISA_MODE}". If you meant to enforce, pass "gate"; nothing is gated on this run.`
+  : '';
+// The mode is the ONLY precondition. This deliberately does NOT consult
+// `TARGET_LANGUAGE`, and an earlier version that did was wrong in the worst
+// direction.
+//
+// The real precondition is not "the lane declared a language this stack can read",
+// it is "the build produced an AMDGPU code object in the tree that was scanned".
+// `isa_capture.py` measures exactly that and says so out loud: no code object is
+// its HOLE exit code, named in `manifest.json` under `holes`, and echoed per
+// candidate by the round log. A language whitelist is a weaker, indirect proxy for
+// that measurement, and it fails SILENTLY -- `TARGET_LANGUAGE` defaults to
+// `'triton'` whenever the caller does not pass it (which the greedy pipeline does
+// not), so the whitelist turned the whole layer off with no message at all. A loud
+// HOLE beats a silent off: one is a gap you can see, the other is a gate everybody
+// believes is running.
+//
+// What that costs on a lane this cannot read: the capture returns HOLE, the verdict
+// is `indeterminate`, and `isaEvidenceReject` refuses nothing. It degrades to inert
+// AND visible, which is the correct failure direction and is pinned by the
+// non-refusal probes in `test_qd_archive.js`.
+//
+// The AMD-specific scope has not changed and is not a language check -- it is a
+// property of the tools. `isa_capture.py` accepts an ELF only when `e_machine` is
+// EM_AMDGPU (224), disassembles with `llvm-objdump --arch-name=amdgcn`, and reads
+// register/scratch/LDS out of AMDGPU metadata (`amdhsa.kernels`, `.vgpr_count`,
+// `.private_segment_fixed_size`); `isa_signals.py`'s whole op vocabulary is AMDGCN
+// mnemonics. An NVIDIA cubin is EM_CUDA (190) and SASS spells everything
+// differently (HMMA, LDS, LDG.E.128, BAR.SYNC), so a CUDA build yields a HOLE
+// rather than a wrong answer. A Triton lane also yields a HOLE, because its code
+// object is a `.hsaco` in TRITON_CACHE_DIR rather than in the scanned workspace;
+// supporting it means passing a per-candidate cache dir as an extra --scan root AND
+// forcing a fresh compile, or a cache hit hands over a PREVIOUS candidate's binary
+// and the diff describes the wrong tree. `dump_ir.sh` already solves both and is
+// the pattern to copy.
+const ISA_ENABLED = ISA_MODE !== 'off';
+// Optional read-only AMDGPU backend checkout for the compiler role's second tier.
+// Empty by default and expected to stay empty: this image has no such sources, and
+// the role is written to finish on runtime evidence or return inconclusive rather
+// than reconstruct pass behaviour from memory.
+const COMPILER_SOURCE_DIR = String(A.compiler_source_dir || '').trim();
 // Conditional inputs: spreading {} adds NOTHING to a prompt (byte-identical) when a hook is unset.
 const KB_INPUTS = {
   ...(SHARED_KB ? { SHARED_KB } : {}),
@@ -359,6 +571,10 @@ const SETUP_SCHEMA = obj({
   // does not re-explore dead directions. Absent (undefined) on a fresh run -> no behavior change.
   resumed: { type: 'boolean' },
   prior_state: obj({
+    // (127). `cumulative` here is the LANE TOTAL VS THE ORIGINAL SEED, read back out of STATE.json.
+    // It is NOT in the same frame as anything this run measures: this run's baseline is the tree
+    // STATE_DIR/best just seeded, so this run's own speedups start at 1.0. Consumed only via
+    // `priorCumulativeVsSeed`; never compare it to a verified_geomean.
     cumulative: { type: 'number' }, insights: { type: 'array', items: { type: 'string' } },
     ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
     bottleneck_now: { type: 'string' }, best_per_case: perCase,
@@ -597,6 +813,50 @@ const HIP_TWIN_SCHEMA = obj({
   exit_code: { type: 'number' }, pairs: { type: 'number' }, drifted: { type: 'number' },
   checked: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
 }, ['exit_code', 'pairs']);
+// The ISA receipt. `mechanism_verdict` is a three-valued ENUM rather than a
+// boolean because the third value is the load-bearing one: `indeterminate` means
+// the archive did not carry the evidence needed to judge the claim, and a schema
+// that could only say true or false would force that case into `false` -- which
+// manufactures the very false negative this receipt exists to prevent, now with a
+// receipt behind it. `isa_signals.py::mechanism_verdict` owns the truth table.
+const ISA_EVIDENCE_SCHEMA = obj({
+  exit_code: { type: 'number' },
+  archive: { type: 'string' }, parent_archive: { type: 'string' },
+  source_hash: { type: 'string' }, parent_source_hash: { type: 'string' },
+  mechanism_claims: { type: 'array', items: { type: 'string' } },
+  mechanism_verdict: { type: 'string', enum: ['realized', 'refuted', 'indeterminate'] },
+  unchanged_machine_code: { type: 'boolean' },
+  claims_refuted: { type: 'array', items: { type: 'string' } },
+  claims_indeterminate: { type: 'array', items: { type: 'string' } },
+  high_findings: { type: 'number' }, notes: { type: 'string' },
+}, ['exit_code', 'mechanism_verdict']);
+// The deep-analysis return, shared by the `isa` and `compiler` depths. `status` has
+// three values and `inconclusive` is the one that must stay reachable: a plateau the
+// evidence cannot explain has to be recordable as such, or the analyst is pushed
+// into inventing a mechanism to have something to return. `source_change_required`
+// is the field that makes the analysis worth its cost -- an attribution that does
+// not end in a condition the next edit must satisfy is a compiler note, not a
+// diagnosis.
+const ISA_ATTRIBUTION_SCHEMA = obj({
+  status: { type: 'string', enum: ['attributed', 'inconclusive', 'skipped'] },
+  depth: { type: 'string', enum: ['isa', 'compiler'] },
+  archive: { type: 'string' }, source_hash: { type: 'string' },
+  summary_path: { type: 'string' },
+  signals_cited: { type: 'array', items: { type: 'string' } },
+  diagnosis: { type: 'string' },
+  source_change_required: { type: 'string' },
+  ruled_out: { type: 'array', items: { type: 'string' } },
+  confidence: { type: 'string' },
+  gaps: { type: 'array', items: { type: 'string' } },
+}, ['status', 'diagnosis']);
+// The retrospective pass. `reason` is required alongside a zero count on purpose:
+// "nothing qualified" is the normal outcome of a run, and a bare 0 is
+// indistinguishable from an agent that skipped the work.
+const ISA_SYNTHESIS_SCHEMA = obj({
+  promoted: { type: 'number' }, anti_signals: { type: 'number' },
+  path: { type: 'string' }, reason: { type: 'string' },
+  entries: { type: 'array', items: { type: 'string' } },
+}, ['promoted']);
 const QD_CASE_SAMPLES_SCHEMA = {
   type: 'array', items: obj({
     name: { type: 'string' }, samples: { type: 'array', items: { type: 'number' } },
@@ -614,6 +874,15 @@ const ENG_SCHEMA = obj({
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
   descriptor: QD_DESCRIPTOR_SCHEMA, descriptor_evidence: { type: 'array', items: { type: 'string' } },
   route_descriptors: { type: 'array', items: QD_ROUTE_SCHEMA }, source_hash: { type: 'string' },
+  // The routes this direction claims a mechanism on. Feeds the per-route commit gate: without it an
+  // incidental gain on an unrelated route can be banked as the declared mechanism.
+  target_routes: { type: 'array', items: { type: 'string' } },
+  // What this edit should have done to the MACHINE CODE, in `isa_signals.py`'s
+  // closed vocabulary. Declared by the engineer because the engineer is the only
+  // party that knows what it changed, and declared BEFORE verify measures anything
+  // so the claim cannot be fitted to the result. Present only when the lane runs
+  // with isa_evidence=observe|gate.
+  mechanism_claims: { type: 'array', items: { type: 'string' } },
 }, ['status', 'speedup_geomean']);
 
 const VERIFY_SCHEMA = obj({
@@ -623,6 +892,9 @@ const VERIFY_SCHEMA = obj({
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' }, descriptor: QD_DESCRIPTOR_SCHEMA,
   route_descriptors: { type: 'array', items: QD_ROUTE_SCHEMA },
+  // See ENG_SCHEMA. The verifier's value is the one the commit gate uses, because the verifier's
+  // per_case is what becomes `bestPerCase`.
+  target_routes: { type: 'array', items: { type: 'string' } },
   source_hash: { type: 'string' }, seed_source_hash: { type: 'string' },
   // Finding (67): the setup digest, recomputed independently at verify time. Two agents at two
   // different points in the run reporting the same oracle is materially stronger evidence than
@@ -639,6 +911,9 @@ const VERIFY_SCHEMA = obj({
   policy_postbuild: POLICY_SUMMARY_SCHEMA,
   // (87): `hip_twin_sync.py` over the measured tree -- did ninja compile what was edited?
   hip_twin_sync: HIP_TWIN_SCHEMA,
+  // The next question: did the mechanism survive the compiler? Present only when
+  // the lane runs with isa_evidence=observe|gate.
+  isa_evidence: ISA_EVIDENCE_SCHEMA,
 }, ['status', 'verified_geomean', 'policy_pass']);
 
 const INTEGRATE_SCHEMA = obj({
@@ -776,7 +1051,11 @@ const QD_ARCHIVE_SCHEMA = obj({
 }, ['persisted_elite_ids']);
 
 const COMMIT_SCHEMA = obj({
+  // (127). `head_sha_before`/`head_sha_after` make the one claim that matters checkable by the
+  // script: a commit that reports success while HEAD never moved is the exact shape in which two
+  // consecutive rounds silently kept building on the previous round's tree.
   committed: { type: 'boolean' }, current_best_diff: { type: 'string' }, note: { type: 'string' },
+  head_sha_before: { type: 'string' }, head_sha_after: { type: 'string' },
 }, ['committed']);
 
 const REPORT_SCHEMA = obj({
@@ -912,6 +1191,7 @@ const CANONICAL = setup.workspace;       // canonical current-best workspace (ad
 const KERNEL_NAME = setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
+if (ISA_MODE_WARNING) log(`  [isa] WARNING: ${ISA_MODE_WARNING}`);
 
 // ---------------------------------------------------------------------------
 // Enforce a FROZEN REAL-ONLINE BASELINE in BOTH modes (author AND same-language
@@ -1106,9 +1386,27 @@ log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (d
 // ===========================================================================
 let dispatched = 0;          // counts ONLY optimization-direction engineers (the budget)
 let round = 0;
+// `cumulative` is in THIS WAVE'S FRAME: speedup vs BASELINE_PER_CASE, which the benchmark
+// engineer measured on CANONICAL at the top of this run. On a resumed wave CANONICAL already
+// IS the prior waves' cumulative best, so this correctly starts at 1.0 on every wave.
 let cumulative = 1.0;        // best verified geomean speedup vs the TRUE baseline
+// Finding (127). The OTHER frame, kept strictly separate: total speedup vs the seed the lane
+// started from, several waves back. It is a REPORTING number and must never be compared against
+// a verifier's `verified_geomean`, which is always wave-local. Mixing the two is what made a
+// resumed wave compare 1.01 (vs-incumbent) against 4.35 (vs-seed) and conclude IMPROVED=false
+// on every round of a wave that in fact improved every round -- see the resume block below.
+let priorCumulativeVsSeed = 1.0;
+const cumulativeVsSeed = () => priorCumulativeVsSeed * cumulative;
 let bestSeen = 0;            // best verified geomean of any candidate, committed or not
 let noImprove = 0;
+// The ISA archive of the tree that is currently canonical, i.e. the parent every
+// candidate in the next round is a mutation of. Null until a committed winner
+// supplies one, and reset to null -- never left stale -- whenever the new canonical
+// has no archive. A stale value here is the one failure mode worth designing
+// against: it would diff a candidate against a tree that is not its parent and
+// report confident, wrong claim verdicts, which is strictly worse than the honest
+// `indeterminate` a null produces.
+let isaCanonicalArchive = null;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
@@ -1144,6 +1442,17 @@ const QD_CONTEXT_IDS = new Set((BASELINE_PER_CASE || []).map(c => c && (c.name |
 // verifier's verbatim rows and may say something else; the label describes
 // the lane's arithmetic, which is what admission actually sorts on.
 const QD_ROBUST_BASELINE_FRAME = 'oracle';
+// The refusal below is a QD contract, so it is fed a QD-gated row set rather
+// than being wired straight to BASELINE_PER_CASE. `qdAuthoritativeBaseline`
+// THROWS, and building the map eagerly made that contract fatal to every OTHER
+// strategy: a greedy run died here because its bench frames legitimately carry
+// both `latency_ms` (the CANDIDATE's own latency) and `baseline_ms` (the
+// oracle's) -- two different measurements, unambiguous in a bench frame, that
+// the QD field list below reads as two offers of one number. Under QD the
+// collision is real and the refusal is right; outside it nothing reads the map
+// (all three consumers are `qd*` helpers that return null on a miss), so an
+// empty row set is the honest input and the refusal stays where it is owned.
+const QD_BASELINE_PER_CASE = QD_ENABLED ? (BASELINE_PER_CASE || []) : [];
 const QD_BASELINE_FIELDS = ['latency_ms', 'baseline_ms', 'execution_time_ms'];
 const qdAuthoritativeBaseline = (c, name) => {
   const offered = QD_BASELINE_FIELDS
@@ -1162,7 +1471,7 @@ const qdAuthoritativeBaseline = (c, name) => {
   }
   return first;
 };
-const QD_BASELINE_MS = new Map((BASELINE_PER_CASE || []).map(c => {
+const QD_BASELINE_MS = new Map((QD_BASELINE_PER_CASE || []).map(c => {
   const name = c && (c.name || c.test_case_id);
   return [name, name ? qdAuthoritativeBaseline(c, name) : undefined];
 }).filter(([name, latency]) => name && Number.isFinite(latency) && latency > 0));
@@ -1251,22 +1560,20 @@ const QD_NOISE_FLOOR_BY_MACHINE = new Map([
     ['decode_m64_square', 0.0074], ['decode_m16_square', 0.0066],
     ['decode_m8_up', 0.0047],
   ])],
-  // machine Q -- tw003, gfx942, the host the container was restored onto after
-  // run 16. PROVISIONAL: nothing has been measured here. Every route carries
-  // the fail-closed default, so admission on this epoch refuses any effect
-  // smaller than the widest spread ever measured on any box. That is correct
-  // and it is also expensive: at 0.072 a 2-5% suite move is unreadable and
-  // cannot be admitted at all. Measuring the real tw003 table -- 8 same-variant
-  // full-suite primed repeats, finding (105) debiased harness, the same
-  // 2*MAD(speedup)/median(speedup) statistic -- is the first GPU work when a
-  // device frees up. Mirrors PROVISIONAL_MACHINES in qd_robust_stats.py.
+  // machine Q -- tw003. MEASURED: 8 complete same-variant primed repeats, source_hash 943b15834616ca9b857a59b94c548a7392c621b89093a792b69c6d6cf8a5db75.
+  // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
   ['Q', new Map([
-    ['prefill_m256_down', 0.072], ['prefill_m128_square', 0.072],
-    ['decode_m96_up', 0.072], ['decode_m2_square', 0.072],
-    ['prefill_m512_up', 0.072], ['decode_m32_down', 0.072],
-    ['prefill_m1024_down', 0.072], ['prefill_m2048_square', 0.072],
-    ['decode_m64_square', 0.072], ['decode_m16_square', 0.072],
-    ['decode_m8_up', 0.072],
+    ['decode_m16_square', 0.0305],
+    ['decode_m2_square', 0.0189],
+    ['decode_m32_down', 0.0501],
+    ['decode_m64_square', 0.0047],
+    ['decode_m8_up', 0.0261],
+    ['decode_m96_up', 0.0064],
+    ['prefill_m1024_down', 0.0097],
+    ['prefill_m128_square', 0.0232],
+    ['prefill_m2048_square', 0.0072],
+    ['prefill_m256_down', 0.0720],
+    ['prefill_m512_up', 0.0159]
   ])],
   // machine R -- tw008. MEASURED: 8 complete same-variant primed repeats, source_hash f3da61b3e2b673f7cf2c2847a668432860f90c37b7eb848c863ad8fdacddb2fa.
   // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
@@ -1283,13 +1590,101 @@ const QD_NOISE_FLOOR_BY_MACHINE = new Map([
     ['prefill_m256_down', 0.0364],
     ['prefill_m512_up', 0.0245]
   ])],
+  // machine S -- tw054. PROVISIONAL: the greedy lane's container was restored
+  // from a tw008 snapshot onto tw054 and this letter still read 'R' afterwards
+  // -- finding (126) recurring, caught by the host cross-check and not by the
+  // post-restore integrity pass, which verified digests, lane HEAD and the
+  // oracle but never the floor table. It cost nothing only because a foreign
+  // tenant has held all eight GPUs since the restore: no timing has been taken
+  // on tw054. Rounds 5-7 were NOT measured on tw008 under R -- that inference
+  // came from a restore record with no hostname and was wrong. rocprofv3 names
+  // its output dir after the host: wave 1 ran on tw051, wave 2 (rounds 5-7) on
+  // tw003, whose epoch carried no measured table -- 0.072 on every route --
+  // corroborated by the round 6 record ("against the 7% noise floor"). They
+  // stand a fortiori, having cleared a floor wider than any measured table, and
+  // not on R's narrow one. tw051 is in no epoch at all, so that wave ran
+  // host-mismatched too. (Epochs named by host, not letter: stale_prose flags a
+  // block pairing PROVISIONAL with a bare letter, and this block is about S.)
+  // NOT resolved to O, the retired first container on this same box -- that is
+  // the re-registered-box trap machine_for_host documents, and O disagrees with
+  // R by 2.1-5.3x one way and up to 7.6x the other.
+  // Measuring the real tw054 table is the FIRST GPU work of wave 3, ahead of
+  // round 8. Mirrors PROVISIONAL_MACHINES in qd_robust_stats.py.
+  ['S', new Map([
+    ['prefill_m256_down', 0.072], ['prefill_m128_square', 0.072],
+    ['decode_m96_up', 0.072], ['decode_m2_square', 0.072],
+    ['prefill_m512_up', 0.072], ['decode_m32_down', 0.072],
+    ['prefill_m1024_down', 0.072], ['prefill_m2048_square', 0.072],
+    ['decode_m64_square', 0.072], ['decode_m16_square', 0.072],
+    ['decode_m8_up', 0.072],
+  ])],
+  // machine T -- tw046. MEASURED: 8 complete same-variant primed repeats, source_hash 943b15834616ca9b857a59b94c548a7392c621b89093a792b69c6d6cf8a5db75.
+  // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+  ['T', new Map([
+    ['decode_m16_square', 0.0470],
+    ['decode_m2_square', 0.0438],
+    ['decode_m32_down', 0.0275],
+    ['decode_m64_square', 0.0208],
+    ['decode_m8_up', 0.0280],
+    ['decode_m96_up', 0.0121],
+    ['prefill_m1024_down', 0.0043],
+    ['prefill_m128_square', 0.0123],
+    ['prefill_m2048_square', 0.0118],
+    ['prefill_m256_down', 0.0458],
+    ['prefill_m512_up', 0.0079]
+  ])],
+  // machine U -- tw049. MEASURED: 8 complete same-variant primed repeats, source_hash f3da61b3e2b673f7cf2c2847a668432860f90c37b7eb848c863ad8fdacddb2fa.
+  // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+  ['U', new Map([
+    ['decode_m16_square', 0.0140],
+    ['decode_m2_square', 0.0121],
+    ['decode_m32_down', 0.0249],
+    ['decode_m64_square', 0.0071],
+    ['decode_m8_up', 0.0438],
+    ['decode_m96_up', 0.0059],
+    ['prefill_m1024_down', 0.0034],
+    ['prefill_m128_square', 0.0093],
+    ['prefill_m2048_square', 0.0032],
+    ['prefill_m256_down', 0.0448],
+    ['prefill_m512_up', 0.0077]
+  ])],
+  // machine V -- tw051. MEASURED: 8 complete same-variant primed repeats, source_hash c4b6dba073440f108e3f07585272b1488850df3f95f8c7e3c926dccc1fc96355.
+  // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+  ['V', new Map([
+    ['decode_m16_square', 0.0087],
+    ['decode_m2_square', 0.0020],
+    ['decode_m32_down', 0.0225],
+    ['decode_m64_square', 0.0132],
+    ['decode_m8_up', 0.0223],
+    ['decode_m96_up', 0.0090],
+    ['prefill_m1024_down', 0.0121],
+    ['prefill_m128_square', 0.0216],
+    ['prefill_m2048_square', 0.0093],
+    ['prefill_m256_down', 0.0120],
+    ['prefill_m512_up', 0.0107]
+  ])],
+  // machine W -- tw042. MEASURED: 8 complete same-variant primed repeats, source_hash f87a1ccd45be3f3ee060ce401f8119845ffd68efe9c45b2cc8475b97253d6786.
+  // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+  ['W', new Map([
+    ['decode_m16_square', 0.0101],
+    ['decode_m2_square', 0.0083],
+    ['decode_m32_down', 0.0045],
+    ['decode_m64_square', 0.0042],
+    ['decode_m8_up', 0.0043],
+    ['decode_m96_up', 0.0121],
+    ['prefill_m1024_down', 0.0042],
+    ['prefill_m128_square', 0.0136],
+    ['prefill_m2048_square', 0.0092],
+    ['prefill_m256_down', 0.0181],
+    ['prefill_m512_up', 0.0091]
+  ])],
 ]);
 // The machine whose floors apply. One line, set deliberately; nothing infers it.
 // Finding (126): it used to be a remembered constant with the hostname only in
 // a comment, and it read 'P' (tw008) while the process was running on tw003.
 // `test_the_epoch_letter_matches_the_host` now checks this letter against the
 // box, via MACHINE_HOSTNAME in qd_robust_stats.py.
-const QD_CURRENT_MACHINE = 'R';
+const QD_CURRENT_MACHINE = 'W';
 const QD_NOISE_FLOOR = QD_NOISE_FLOOR_BY_MACHINE.get(QD_CURRENT_MACHINE);
 // Epochs whose table is a fail-closed PLACEHOLDER rather than a measurement:
 // structurally complete so that every code path behaves, every route at the
@@ -1298,7 +1693,7 @@ const QD_NOISE_FLOOR = QD_NOISE_FLOOR_BY_MACHINE.get(QD_CURRENT_MACHINE);
 // authoritative; `test_qd_lane_parity.py` fails if the two sets drift apart.
 // Anything asking "is this route's floor a measurement" must consult this and
 // not table membership -- on a provisional epoch every route is present.
-const QD_PROVISIONAL_MACHINES = new Set(['Q']);
+const QD_PROVISIONAL_MACHINES = new Set(['S']);
 const qdFloorIsMeasured = (contextId) =>
   !QD_PROVISIONAL_MACHINES.has(QD_CURRENT_MACHINE) && QD_NOISE_FLOOR.has(contextId);
 // A provenance string that says "measured: 8 primed baseline repeats" states
@@ -1313,7 +1708,7 @@ const qdFloorIsMeasured = (contextId) =>
 // `null` for the two gfx90a-era epochs, which pre-date the convention -- an
 // unrecorded host is stated as unrecorded, not backfilled with a guess.
 const QD_MACHINE_HOSTNAME = new Map([
-  ['L', null], ['M', null], ['N', 'tw035'], ['O', 'tw054'], ['P', 'tw008'], ['Q', 'tw003'], ['R', 'tw008'],
+  ['L', null], ['M', null], ['N', 'tw035'], ['O', 'tw054'], ['P', 'tw008'], ['Q', 'tw003'], ['R', 'tw008'], ['S', 'tw054'], ['T', 'tw046'], ['U', 'tw049'], ['V', 'tw051'], ['W', 'tw042'],
 ]);
 const QD_EPOCH_STAMP = (() => {
   const host = QD_MACHINE_HOSTNAME.get(QD_CURRENT_MACHINE);
@@ -1772,6 +2167,122 @@ const qdParentReject = (d, selections, solCards, cells) => {
 // candidate in the lane for a hazard that cannot occur in it, which is not
 // fail-closed, it is fail-shut. So the gate is armed by language, and the
 // arming condition is a literal the parity test can read.
+// The ISA gate, the layer above `qdTwinReject`. Twin-sync answers "was the edited
+// file compiled"; this answers "did the mechanism survive the compiler". Returns a
+// refusal string, or null when there is nothing to refuse.
+//
+// It refuses on exactly ONE thing: the candidate's own receipt contradicting the
+// candidate's own declared mechanism. It deliberately does NOT refuse on a HOLE, a
+// missing archive, an indeterminate verdict, or a `checks` finding:
+//
+//   - A HOLE or a missing tool is a gap in OUR evidence, not a fault in the
+//     candidate. Refusing there would discard correct fast kernels on boxes where
+//     ROCm sits somewhere `isa_capture.py` did not look, and it would do it
+//     silently in the direction that destroys good work. That is the opposite
+//     asymmetry from (87), where exit 2 MUST refuse -- because there, the missing
+//     evidence is evidence about the measurement itself, and an unbacked
+//     measurement manufactures null results. Here the measurement is already
+//     backed by twin-sync, policy and the oracle; the ISA layer only explains it.
+//   - `checks` findings are advisory by construction (a narrow load is correct for
+//     a genuine gather). A rule that refused its own false positives would be
+//     worse than no rule.
+//
+// So a run with `isa_evidence=gate` can only ever LOSE candidates that are
+// provably not doing what they said. Everything else logs and proceeds.
+const isaEvidenceReject = (rep, label) => {
+  if (!ISA_ENABLED || ISA_MODE !== 'gate') return null;
+  const where = label || 'verify';
+  // Same scoping rule as `qdPolicyReject` and `qdTwinReject`: only reports
+  // claiming a pass. A verifier that already failed is refused on its own terms,
+  // and stacking a paperwork complaint on top renames the refusal (60).
+  if (!rep || rep.status === 'failed' || rep.correctness === 'FAIL') return null;
+  // Named `receipt` rather than `s` for the same reason as the log site further
+  // down: that variable name plus this shape of guard is what `test_js_suite.py`'s
+  // mutation probes anchor on, and an extra copy of it moves the anchor off the
+  // gate it is meant to watch.
+  const receipt = rep.isa_evidence;
+  // A missing receipt is NOT refused here, for the reason above: the gate is about
+  // the candidate, and an absent receipt is about us. It is logged by the caller.
+  if (!receipt || typeof receipt !== 'object') return null;
+  if (receipt.mechanism_verdict === 'refuted') {
+    const why = receipt.unchanged_machine_code
+      ? 'the machine code is byte-identical to its parent, so the edit changed nothing that runs'
+      : `the ISA contradicts the declared mechanism (${(receipt.claims_refuted || []).join(', ') || 'no claim survived'})`;
+    return `isa:mechanism_refuted(${where}: ${why}. This is NOT a slow kernel and must not be `
+      + 'recorded as one: the mechanism was never actually tested, so the ledger must say '
+      + '"not realized", not "no effect")';
+  }
+  return null;
+};
+
+// The escalation ladder's decision, as a named function so the JS suite can EXECUTE
+// it against fabricated histories. The two gates above were extracted for exactly
+// this reason; the one that stayed inline was defended only by a regex asserting its
+// log message existed, and `audit_pin_coverage.py` is what surfaced that. A rule
+// about when to spend the run's most expensive evidence is not a good candidate for
+// being the third.
+//
+// Returns {depth, from, reason} where depth is `pattern` | `isa` | `compiler`.
+//
+// The trigger is deliberately EARLY -- one non-improving round. `MAX_NO_IMPROVE`
+// defaults to 2, so a lane dies after two; a three-round stagnation window of the
+// kind `local_optimum.py` uses would never fire before the lane was already over.
+// The round that just failed to move is also the one whose mechanism is worth
+// checking, and by then its ISA archive already exists, so the evidence is free.
+const isaEvidenceDepth = (rounds, noImproveCount, enabled) => {
+  if (!enabled) return { depth: 'pattern', reason: '', from: '' };
+  const list = Array.isArray(rounds) ? rounds : [];
+  const prior = list.length ? list[list.length - 1] : null;
+  const priorDepth = prior && prior.evidence_depth ? prior.evidence_depth : 'pattern';
+  // A REFUTED mechanism is a stronger signal than a flat round: the machine code has
+  // already answered "did it land" with no, so the open question is which backend
+  // constraint refused it. Asking the ISA layer again would re-derive what we know.
+  const priorRefuted = !!(prior && Array.isArray(prior.results) &&
+    prior.results.some(r => r && r.mechanism === 'refuted'));
+  if (!(noImproveCount >= 1) && !priorRefuted) {
+    return { depth: 'pattern', reason: '', from: '' };
+  }
+  if (priorDepth === 'isa' || priorRefuted) {
+    return {
+      depth: 'compiler', from: priorDepth,
+      reason: priorRefuted
+        ? 'the previous round\'s machine code refuted the mechanism it declared, so the open '
+          + 'question is which backend constraint refused it, not whether it landed'
+        : `machine-code evidence was already collected at depth "${priorDepth}" and the round `
+          + 'still did not move, so the plateau needs a compiler-side explanation',
+    };
+  }
+  return {
+    depth: 'isa', from: priorDepth,
+    reason: `${noImproveCount} non-improving round(s); before proposing another source direction, `
+      + 'establish from the machine code whether the last one was actually realised -- a '
+      + 'compiler-removed edit reads exactly like an idea that did not help',
+  };
+};
+
+// The other half of the round's evidence contract: what the round REACHED, given
+// what it asked for and whether an attribution came back. Named, for the same
+// reason as the ladder above -- the first version of this lived inline and its
+// guard matched a string that also appeared in the comment beside it, so the
+// mutation that broke the rule sailed through a check that looked specific.
+//
+//   pattern                          nothing deeper was asked for
+//   isa | compiler                   an analysis at that depth returned a diagnosis
+//   pattern_after_failed_escalation  it was asked for and produced nothing
+//
+// An `inconclusive` attribution COUNTS as reaching the depth: a plateau the evidence
+// genuinely cannot explain is a real finding, and an analyst forced to produce a
+// mechanism instead of admitting that is an analyst inventing one.
+//
+// The third value exists because neither of the other two is true of a failed
+// escalation. Recording `isa` says "we read the machine code and it did not help";
+// recording `pattern` says "we never looked". A later planner acting on either would
+// be acting on a false negative one level above the one this whole layer catches.
+const isaReachedDepth = (requestedDepth, attribution, enabled) => {
+  if (!enabled || requestedDepth === 'pattern') return 'pattern';
+  return attribution ? requestedDepth : 'pattern_after_failed_escalation';
+};
+
 const TWIN_LANGUAGES = ['hip', 'cuda'];
 const TWIN_APPLICABLE = TWIN_LANGUAGES.includes(String(TARGET_LANGUAGE).toLowerCase());
 const qdTwinReject = (rep, label) => {
@@ -2876,20 +3387,155 @@ if (QD_ENABLED && QD_STATE_DIR) {
 // director) and does not re-explore dead directions. No-op on a fresh run (prior_state undefined).
 if (setup.resumed && setup.prior_state) {
   const ps = setup.prior_state;
-  if (Number.isFinite(ps.cumulative) && ps.cumulative > cumulative) cumulative = ps.cumulative;
+  // Finding (127) -- the single line-pair that produced three separate symptoms across two waves.
+  //
+  // It used to read `if (ps.cumulative > cumulative) cumulative = ps.cumulative`. `ps.cumulative`
+  // is vs the ORIGINAL SEED (4.35x after wave 2); `cumulative` is vs THIS wave's BASELINE_PER_CASE,
+  // which is CANONICAL == that same cumulative best. Different denominators, same variable. Every
+  // downstream comparison then mixed frames:
+  //
+  //   (a) `improved = winner.geomean > cumulative * (1 + MIN_IMPROVE)` compared a verifier's
+  //       wave-local ~1.01 against 4.35 and was FALSE for every round of wave 2 -- including the
+  //       three rounds that each really did improve (1.3524 -> 1.37928 -> 1.39884).
+  //   (c) the canonical-commit block is `if (improved)`, so the winner was never committed and
+  //       CANONICAL stayed on the previous round's tree. Rounds 6 and 7 both had to be repaired
+  //       by hand afterwards; round 6's parent was lost once because of it.
+  //   (b) `bestPerCase = ps.best_per_case` carried the PRIOR wave's per-case candidate times
+  //       forward as if they described the current tree. They were threaded into planning and
+  //       into verifiers as the incumbent's timings while the incumbent had moved on by ~37%,
+  //       and were read at face value three separate times (it implied an incumbent geomean of
+  //       1.019 against a measured ~1.39, which would have priced one patch at +34%).
+  //
+  // So: the vs-seed number is carried in its own variable, for reporting only, and the per-case
+  // table is NOT imported. BASELINE_PER_CASE was just measured on CANONICAL this run, which is
+  // exactly "the incumbent's per-case times" -- fresher than anything STATE_DIR can offer.
+  if (Number.isFinite(ps.cumulative) && ps.cumulative > 0) priorCumulativeVsSeed = ps.cumulative;
   if (Array.isArray(ps.insights)) history.insights = ps.insights;
   if (Array.isArray(ps.ledger)) history.ledger = ps.ledger;
   if (ps.bottleneck_now) history.bottleneck_now = ps.bottleneck_now;
-  if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) bestPerCase = ps.best_per_case;
-  log(`RESUMED from STATE_DIR: cumulative=${cumulative.toFixed(3)}x, ${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
+  if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) {
+    log(`  [resume] NOT importing prior_state.best_per_case (${ps.best_per_case.length} rows): those are ` +
+        'the previous wave\'s numbers in the previous wave\'s frame. This wave\'s BASELINE_PER_CASE was ' +
+        'measured on the same tree they claim to describe, and supersedes them.');
+  }
+  log(`RESUMED from STATE_DIR: prior cumulative vs seed=${priorCumulativeVsSeed.toFixed(3)}x, ` +
+      `this wave restarts at 1.000x vs the incumbent it was seeded from (same tree, different frame), ` +
+      `${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
 }
 
 while (dispatched < BUDGET && (QD_ENABLED || noImprove < MAX_NO_IMPROVE) &&
   (!QD_ENABLED || Math.min(qdArchive.coverage_stall, qdArchive.qd_score_stall, qdArchive.global_stall) < MAX_NO_IMPROVE)) {
   round++;
+  // (127). Distinct from `improved` on purpose: `improved` is "the search found something better",
+  // `committedThisRound` is "the canonical tree actually moved". They came apart twice in wave 2 and
+  // the history said only the first.
+  let committedThisRound = false;
   if (QD_ENABLED) { qdArchive.generation = round; }
   const remaining = BUDGET - dispatched;
   phase('Optimize');
+
+  // --- (a0) How deep should this round's evidence go? --------------------
+  // The escalation ladder, decided from the history that already exists rather
+  // than from an agent's sense of being stuck. Depths: `pattern` (the default --
+  // code structure plus the baseline profile), `isa` (capture the machine code and
+  // attribute the plateau to it), `compiler` (ask why the backend refused).
+  //
+  // Why it is computed here and in JS. `local_optimum.py`-style stagnation detection
+  // needs the per-round geomean series and the metric basis, both of which are in
+  // `history` already; shelling out to a Python helper would put a second copy of
+  // the rule in the run, and this file's own ledger is explicit that two
+  // implementations of one verdict is one more than can be trusted. It is pinned by
+  // an executable guard instead.
+  //
+  // The trigger is deliberately EARLY. `MAX_NO_IMPROVE` defaults to 2, so a lane
+  // dies after two non-improving rounds; a three-round stagnation window would
+  // never fire before the lane was already over. So one non-improving round is
+  // enough to ask for machine-code evidence on the next attempt -- the round that
+  // just failed to move is exactly the one whose mechanism is worth checking, and
+  // by then its ISA archive already exists.
+  const isaDepthState = isaEvidenceDepth(history.rounds, noImprove, ISA_ENABLED);
+  if (isaDepthState.depth !== 'pattern') {
+    log(`  [isa] evidence depth for round ${round}: ${isaDepthState.from || 'pattern'} -> `
+      + `${isaDepthState.depth}. ${isaDepthState.reason}`);
+  }
+
+  // Run the deep analysis BEFORE planning, so the plan is shaped by it. Running it
+  // after would produce a document nobody acted on this round, which is how a
+  // "hierarchy" becomes paperwork.
+  let isaAttribution = null;
+  let isaAnalysisSkipped = '';
+  if (isaDepthState.depth !== 'pattern') {
+    if (!isaCanonicalArchive) {
+      // Named, not silent. Without the canonical archive there is no parent to
+      // attribute against, and inventing one from a fresh build would compare the
+      // plateau against a binary that is not the incumbent.
+      isaAnalysisSkipped = `depth "${isaDepthState.depth}" was requested but the canonical tree `
+        + 'has no ISA archive yet (normal before the first committed round, and after any '
+        + 'canonical that carried none), so there is nothing to attribute the plateau against';
+      log(`  [isa] deep analysis SKIPPED: ${isaAnalysisSkipped}`);
+    } else {
+      const deepRole = isaDepthState.depth === 'compiler' ? 'compiler_engineer' : 'profile_engineer';
+      isaAttribution = await agentT(
+        roleAgent(deepRole, isaDepthState.depth === 'compiler' ? 'compiler_attribution' : 'isa_attribution',
+          isaDepthState.depth === 'compiler'
+            ? 'Explain which backend constraint refused the last mechanism, and what the next edit must satisfy.'
+            : 'Attribute this plateau to the machine code of the current canonical tree.', {
+            EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR, WORKSPACE: CANONICAL,
+            KERNEL_KNOWLEDGE_DIR,
+            ISA_ARCHIVE: isaCanonicalArchive,
+            ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
+            ISA_CAPTURE_HELPER: `${WORKFLOW_DIR}/scripts/isa_capture.py`,
+            ISA_DEPTH: isaDepthState.depth,
+            // Tier 2 of the compiler role, and unset on this image: /opt/rocm/llvm ships
+            // the built toolchain, not llvm/lib/Target/AMDGPU. Spread only when an
+            // operator actually supplies a checkout, so the role sees its absence and
+            // finishes on Tier 1 or returns inconclusive -- rather than being handed an
+            // empty string it might read as "look somewhere".
+            ...(COMPILER_SOURCE_DIR ? { COMPILER_SOURCE_DIR } : {}),
+            ESCALATION_FROM: isaDepthState.from || 'pattern',
+            ESCALATION_REASON: isaDepthState.reason,
+            PROFILE_SUMMARY: profileSummary,
+            HISTORY: history,
+            OUTPUT_PATH: `${EVAL_DIR}/round_${round}_isa_attribution.md`,
+          }),
+        { phase: 'Optimize', label: `${deepRole}:${isaDepthState.depth} r${round}`,
+          schema: ISA_ATTRIBUTION_SCHEMA });
+      if (!isaAttribution || !isaAttribution.diagnosis) {
+        isaAnalysisSkipped = `depth "${isaDepthState.depth}" returned no usable diagnosis`;
+        isaAttribution = null;
+        log(`  [isa] deep analysis produced nothing usable; planning proceeds on pattern evidence`);
+      } else {
+        log(`  [isa] ${isaDepthState.depth} attribution: status=${isaAttribution.status} `
+          + `${isaAttribution.status === 'attributed'
+            ? `-> next edit must satisfy: ${String(isaAttribution.source_change_required || '(unstated)').slice(0, 160)}`
+            : `(${String(isaAttribution.diagnosis).slice(0, 160)})`}`);
+      }
+    }
+  }
+
+  // What this round actually REACHED, as distinct from what it asked for. Three
+  // values, and the third is why this is not a boolean:
+  //
+  //   pattern                          no escalation was requested
+  //   isa | compiler                   an analysis at that depth returned a diagnosis
+  //   pattern_after_failed_escalation  escalation was requested and produced nothing
+  //
+  // `inconclusive` COUNTS as reaching the depth. A plateau the evidence genuinely
+  // cannot explain is a real finding, and an analyst forced to produce a mechanism
+  // rather than admit that is an analyst inventing one -- which is how speculation
+  // enters a ledger that later rounds treat as fact.
+  //
+  // The third value exists because collapsing it into plain `pattern` loses the one
+  // thing the next planner needs: writing `isa` on a round whose analysis never ran
+  // says "we looked at the machine code and it did not help", and writing `pattern`
+  // says "we never looked". Neither is true of a failed escalation, and the first is
+  // a false negative one level up from the one this whole layer exists to catch.
+  const isaEffectiveDepth = isaReachedDepth(isaDepthState.depth, isaAttribution, ISA_ENABLED);
+  if (ISA_ENABLED && isaDepthState.depth !== 'pattern' && isaEffectiveDepth !== isaDepthState.depth) {
+    log(`  [isa] round ${round} asked for depth "${isaDepthState.depth}" and reached `
+      + `"${isaEffectiveDepth}". The record states what it reached, never what it wanted, `
+      + 'so no later planner reads an unbacked escalation as evidence already spent.');
+  }
 
   // --- (a) Plan the round ------------------------------------------------
   // QD selection is deliberately isolated from SOL: archive fitness/frontier/UCB/exploration choose
@@ -2915,7 +3561,24 @@ while (dispatched < BUDGET && (QD_ENABLED || noImprove < MAX_NO_IMPROVE) &&
     },
   } : {};
   const planningInputs = {
+    // The escalation ladder's output, spread only when it produced something. An
+    // `attributed` block names a constraint the next edit must satisfy AND the
+    // directions it ruled out -- the paper's point being that deep evidence earns
+    // its cost mostly by REJECTING plausible directions, not by discovering winners.
+    ...(ISA_ENABLED ? {
+      // The depth REACHED, not the one requested. Handing the planner the request
+      // would tell it evidence exists that does not.
+      ISA_EVIDENCE_DEPTH: isaEffectiveDepth,
+      ...(isaDepthState.reason ? { ISA_ESCALATION_REASON: isaDepthState.reason } : {}),
+      ...(isaAttribution ? { ISA_ATTRIBUTION: isaAttribution } : {}),
+      ...(isaAnalysisSkipped ? { ISA_ANALYSIS_SKIPPED: isaAnalysisSkipped } : {}),
+    } : {}),
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
+    // (127). Both frames, each labelled, so a planner cannot silently read one as the other.
+    // CUMULATIVE_SPEEDUP is vs THIS wave's baseline (the tree you are editing, 1.000 at wave start);
+    // CUMULATIVE_VS_SEED is the lane total vs the original seed and is context, not a target.
+    CUMULATIVE_SPEEDUP_FRAME: 'vs this wave\'s BASELINE_PER_CASE == the incumbent tree at wave start',
+    CUMULATIVE_VS_SEED: cumulativeVsSeed(),
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS, ...qdCommonInputs, ...KB_INPUTS,
@@ -3186,6 +3849,10 @@ ${cfg({
           STRATEGY_CAPSULE: d.strategy_capsule || {}, QD_ROUTE_DESCRIPTORS_REQUIRED: '1',
           QD_EVIDENCE_HELPER: `${WORKFLOW_DIR}/scripts/qd_v2.py`,
         } : {}),
+        ...(ISA_ENABLED ? {
+          ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
+          ISA_MODE,
+        } : {}),
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
         baseline_per_case: BASELINE_PER_CASE,
@@ -3273,6 +3940,28 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
             QD_CELL_GUARDRAIL, QD_CANONICAL_GUARDRAIL } : {}),
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+          ...(ISA_ENABLED ? {
+            ISA_MODE,
+            ISA_CAPTURE_HELPER: `${WORKFLOW_DIR}/scripts/isa_capture.py`,
+            ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
+            ISA_ARCHIVE_DIR: `${d.out_dir}/verify/isa`,
+            // Only when actually known. `QD_ARCH` is declared unconditionally but is
+            // an empty string on a greedy lane launched without --qd_arch, and an
+            // empty ISA_ARCH in the prompt reads as "there is an arch, it is blank".
+            // Unset instead: `isa_capture.py` records `arches_observed` from the
+            // metadata, so the arch is recoverable without being asserted here.
+            ...(QD_ARCH ? { ISA_ARCH: QD_ARCH } : {}),
+            // The engineer's own declaration, forwarded unchanged. Verify must not
+            // re-derive it from the candidate's source: the claim is what is being
+            // tested, and a verifier that rewrites the claim to fit the evidence is
+            // not an independent check. Absent when the engineer declared none.
+            ISA_MECHANISM_CLAIMS: eng && Array.isArray(eng.mechanism_claims)
+              ? eng.mechanism_claims : [],
+            // Null on round 1, and null again after any canonical with no archive.
+            // Both mean the same thing to the verifier: diff-based claims are
+            // indeterminate this round; report that, do not substitute another tree.
+            ...(isaCanonicalArchive ? { ISA_PARENT_ARCHIVE: isaCanonicalArchive } : {}),
+          } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
       ).then((ver) => ({ d, eng, ver, patch }));
@@ -3280,6 +3969,46 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   );
 
   const clean = results.filter(Boolean);
+  // The ISA receipt is LOGGED for every candidate in both observe and gate mode;
+  // only `gate` lets it change an outcome. Logging it under `observe` is the entire
+  // point of that mode -- it is how you find out, on your own kernels and before
+  // anything is gated, how often a round that reads "no effect" was actually a
+  // round whose mechanism never reached the machine code. That number is what
+  // should decide whether `gate` is worth turning on.
+  if (ISA_ENABLED) {
+    for (const r of clean) {
+      const id = r.d && r.d.id ? r.d.id : 'candidate';
+      // Named `receipt`, not `s`, and deliberately not spelled the way the two
+      // receipt-absence gates above spell their own guard. `test_js_suite.py`'s
+      // MUTANTS anchor on that exact line of text and mutate its FIRST and LAST
+      // occurrence separately, those two being `qdPolicyReject` and `qdTwinReject`.
+      // A third copy here took the "last" slot, so the probe mutated this log block
+      // instead; no guard watches a log line, the mutant survived, and the suite
+      // reported the policy-receipt check as vacuous when that check was fine and
+      // only the anchor had moved. Keeping the spelling distinct keeps the probe
+      // pointed at the two gates it is about. Do not re-align this with them.
+      const receipt = r.ver && r.ver.isa_evidence;
+      if (!receipt || typeof receipt !== 'object') {
+        log(`  [isa] ${id}: no ISA receipt returned -- mechanism unverified. This is a gap in `
+          + 'OUR evidence, not a fault in the candidate, so it does not gate.');
+        continue;
+      }
+      const parts = [`verdict=${receipt.mechanism_verdict}`,
+        `claims=[${(receipt.mechanism_claims || []).join(',') || 'none declared'}]`];
+      if (receipt.unchanged_machine_code) parts.push('UNCHANGED-MACHINE-CODE');
+      if ((receipt.claims_refuted || []).length) {
+        parts.push(`refuted=[${receipt.claims_refuted.join(',')}]`);
+      }
+      if ((receipt.claims_indeterminate || []).length) {
+        parts.push(`indeterminate=[${receipt.claims_indeterminate.join(',')}]`);
+      }
+      if (Number.isFinite(receipt.high_findings) && receipt.high_findings > 0) {
+        parts.push(`high_findings=${receipt.high_findings}`);
+      }
+      if (receipt.exit_code === 2) parts.push('(archive HOLE: nothing was captured)');
+      log(`  [isa] ${id}: ${parts.join(' ')}`);
+    }
+  }
   const verified = clean.filter(r => {
     if (!(r.ver && r.ver.policy_pass === true &&
           says(r.ver.status, 'verified') && says(r.ver.correctness, 'pass'))) return false;
@@ -3289,8 +4018,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // Finding (87): so is a measurement of a tree whose twin was never checked.
     const metricReason = primMetricReason(r.ver) || oracleDrift(r.ver) || qdPolicyReject(r.ver)
       || qdTwinReject(r.ver);
-    if (metricReason) {
-      log(`  ${r.d && r.d.id ? r.d.id : 'candidate'} verified but not a candidate: ${metricReason}`);
+    // And so is a candidate whose own ISA receipt says the mechanism it declared
+    // never reached the machine code -- that is not a slow kernel, it is an
+    // untested one (isa_evidence=gate only).
+    //
+    // Held as its OWN expression rather than appended to the chain above, because
+    // that chain's exact text is pinned by a guard in `test_qd_archive.js` ("the
+    // greedy admission path runs it beside the policy gate") whose entire purpose
+    // is to prove the twin gate is wired into this path. Widening that regex to
+    // make room for a new clause would weaken the check finding (87) exists to
+    // keep, which is a bad trade for one line of syntax.
+    const isaReason = isaEvidenceReject(r.ver);
+    if (metricReason || isaReason) {
+      log(`  ${r.d && r.d.id ? r.d.id : 'candidate'} verified but not a candidate: `
+        + `${metricReason || isaReason}`);
       return false;
     }
     return primSpeedup(r.ver) > CANDIDATE_FLOOR;
@@ -3372,6 +4113,17 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch, seed_dir: r.d.seed_dir,
     operator: r.d.operator, parent_elite_id: r.d.parent_elite_id || 'canonical',
+    // Carried for the per-route commit gate. The VERIFIER's value wins over the engineer's: its
+    // per_case is the table the gate compares and the one that becomes `bestPerCase`.
+    target_routes: Array.isArray(r.ver.target_routes) ? r.ver.target_routes
+      : (Array.isArray(r.d.target_routes) ? r.d.target_routes : undefined),
+    // Carried on the candidate itself rather than re-looked-up after the sort, so
+    // the archive cannot be matched to the wrong winner. An `integrated` candidate
+    // never gets this field: the integrator builds a fresh tree that nothing
+    // captured, and inheriting a predecessor's archive there is exactly the stale
+    // attribution this field exists to make impossible.
+    isa_archive: r.ver.isa_evidence && typeof r.ver.isa_evidence.archive === 'string'
+      ? r.ver.isa_evidence.archive : null,
   }));
 
   let qdCellChanged = false;
@@ -3672,7 +4424,34 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
-  const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  // SELECTION is unchanged: the winner is still the highest measured paired speedup. Only the
+  // COMMIT decision below can change, and only when a measured band table was supplied.
+  const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let improved = legacyImproved;
+  let routeVerdict = null;
+  if (winner && ROUTE_BANDS) {
+    routeVerdict = routeGate(winner.per_case, bestPerCase, ROUTE_BANDS, {
+      targetRoutes: winner.target_routes,
+    });
+    if (routeVerdict.applicable) {
+      improved = routeVerdict.accepted;
+      log(`  [gate r${round}] per-route: ${routeVerdict.accepted ? 'ACCEPT' : 'REFUSE'} -- ${routeVerdict.reason}`);
+      if (routeVerdict.accepted !== legacyImproved) {
+        // Logged on every disagreement, in both directions, so the change of gate is auditable
+        // against the number every prior round was judged on rather than silently replacing it.
+        log(`  [gate r${round}] this OVERTURNS the legacy suite-geomean gate ` +
+            `(${legacyImproved ? 'it would have committed' : 'it would have refused'}: ` +
+            `winner ${winner.geomean.toFixed(5)} vs cumulative ${cumulative.toFixed(5)} ` +
+            `at MIN_IMPROVE=${MIN_IMPROVE}). The per-route test is authoritative: a suite geomean ` +
+            'divides a single-route win by the route count, which is what this table exists to undo.');
+      }
+    } else {
+      log(`  [gate r${round}] per-route gate NOT APPLICABLE (${routeVerdict.reason}); ` +
+          'falling back to the legacy suite-geomean gate. A missing band must not stall the lane, ' +
+          'but it must not look like a pass either -- regenerate the table with ' +
+          'scripts/route_gate.py:bands_from_repeats() on this host/epoch.');
+    }
+  }
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
   // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
@@ -3681,11 +4460,12 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    await agentT(
+    const commit = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 cd ${CANONICAL}
+git rev-parse HEAD    # report this as head_sha_before
 ${QD_ENABLED ? `# QD elite patches are relative to the immutable run baseline, not to the current canonical ancestry.
 ROOT=$(git rev-list --max-parents=0 HEAD)
 git reset --hard "$ROOT"
@@ -3698,7 +4478,14 @@ git apply ${winner.patch} || git apply --3way ${winner.patch}`}
 git -c user.email=team@workflow -c user.name=team add -A
 git -c user.email=team@workflow -c user.name=team commit -q -m "round ${round} winner: ${winner.source} (${winner.geomean.toFixed(2)}x)"
 git --no-pager diff --binary "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
+git rev-parse HEAD    # report this as head_sha_after
+git status --porcelain  # must be EMPTY: a dirty tree here means the commit did not capture everything
 \`\`\`
+\`git apply\` is only safe here because ${CANONICAL} is its own git repository. Inside a directory that
+merely sits UNDER some other repository's working tree, \`git apply\` prints \`Skipped patch\` and **exits
+0** — a clean-looking receipt for a patch that was never applied. If you ever materialize a tree outside
+its own repo, use \`patch -p1 --forward\` and re-hash the files afterwards; judge by "is this directory
+its own repo?", never by "did the command return non-zero?".
 If BOTH \`git apply\` and \`git apply --3way\` fail, inspect the patch and apply it manually (edit the
 files to match the patch's intent), then \`add -A\` + commit. Before executing correctness, run
 \`python3 ${WORKFLOW_DIR}/scripts/candidate_policy_scan.py\` over every candidate-owned source/build path
@@ -3707,20 +4494,68 @@ failure, or absent passing receipt means committed=false. The applied source is 
 the patch verbatim after a hand-merge, so after committing, RE-RUN both the policy gate and COMMANDMENT
 correctness (cd ${CANONICAL} and use gpu_lock); only report committed=true if both pass. Even after a clean
 apply, the policy receipt is mandatory because final materialization is a new trust boundary. Return JSON
-{committed, current_best_diff, note}.`,
+{committed, current_best_diff, note, head_sha_before, head_sha_after}. Report the two SHAs verbatim from
+\`git rev-parse HEAD\`; if they are equal, the commit did not happen and \`committed\` MUST be false no
+matter how the rest of the run looked.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
-    cumulative = winner.geomean;
-    bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
-    finalWinner = winner;
+
+    // (127). The result of this call used to be discarded, so `committed: false` -- and the empty
+    // result of a dead agent -- advanced the ledger exactly like a success. From here on the round's
+    // bookkeeping only moves if the canonical tree demonstrably moved with it. The alternative
+    // (advance anyway) is the strictly worse failure: subsequent rounds fork engineers off a tree the
+    // ledger no longer describes, and every measurement after that is against the wrong parent.
+    const headMoved = !!(commit && commit.head_sha_before && commit.head_sha_after &&
+      commit.head_sha_before.trim() !== commit.head_sha_after.trim());
+    const commitOK = !!(commit && commit.committed === true) &&
+      // Absent SHAs are tolerated (an older TechLead prompt may not report them) but equal ones are
+      // not: that is a positive claim that nothing changed, contradicting `committed: true`.
+      !(commit.head_sha_before && commit.head_sha_after && !headMoved);
+    if (commitOK) {
+      cumulative = winner.geomean;
+      bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
+      finalWinner = winner;
+      // Inside the (127) guard, and deliberately absent from the `else`. This pointer
+      // names the tree the NEXT round's candidates are mutations of, so it may only
+      // move when the canonical tree demonstrably moved. On a refused commit canonical
+      // is unchanged, which means the archive it already points at is still the correct
+      // parent -- leaving it alone is the same rule (127) states for `cumulative` and
+      // `bestPerCase`, applied to the evidence pointer.
+      if (ISA_ENABLED) {
+        isaCanonicalArchive = winner.isa_archive || null;
+        if (!isaCanonicalArchive) {
+          log(`  [isa] the new canonical (${winner.source}) carries no ISA archive, so next round's `
+            + 'mechanism claims will be reported indeterminate rather than diffed against a stale '
+            + 'parent. Expected for an integrated winner.');
+        }
+      }
+    } else {
+      log(`  [commit r${round}] REFUSED to advance the ledger: winner ${winner.source} ` +
+          `(${winner.geomean.toFixed(4)}x) was NOT committed into the canonical workspace ` +
+          `(committed=${commit ? commit.committed : 'no result'}` +
+          `${commit && commit.head_sha_before && commit.head_sha_after
+            ? `, HEAD ${commit.head_sha_before.trim().slice(0, 8)} -> ${commit.head_sha_after.trim().slice(0, 8)}` +
+              `${headMoved ? '' : ' UNCHANGED'}` : ''}). ` +
+          `${commit && commit.note ? `note: ${commit.note} ` : ''}` +
+          'cumulative, best_per_case and final_winner are left where they were, so the next round ' +
+          'plans against the tree that actually exists. The patch is not lost: it is still on disk ' +
+          `at ${winner.patch} and can be re-competed or applied by hand.`);
+    }
 
     // --- (f) Re-profile the new best ------------------------------------
-    profileSummary = await agentT(
-      roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-        COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-      }),
-      { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
-    profileSummary = profileSolStrip(profileSummary, `reprofile r${round}`);
+    // Only when there IS a new best in the tree. Re-profiling an unchanged canonical and filing it
+    // as "the new best's bottleneck shift" manufactures a shift out of run-to-run profiler drift
+    // (measured at up to 17% between rocprofv3 invocations on this lane) and steers the next round
+    // off it.
+    if (commitOK) {
+      profileSummary = await agentT(
+        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+        }),
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      profileSummary = profileSolStrip(profileSummary, `reprofile r${round}`);
+    }
+    committedThisRound = commitOK;
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
@@ -3755,7 +4590,12 @@ apply, the policy receipt is mandatory because final materialization is a new tr
       PRIOR_HISTORY: history,
       ...(QD_ENABLED ? { SEARCH_STRATEGY, QD_ARCHIVE: qdSummary(), QD_ARCHIVE_DIR: qdArchive.archive_dir,
         QD_CELL_CHANGED: qdCellChanged, QD_GLOBAL_IMPROVED: qdGlobalImproved } : {}),
-      ...(STATE_DIR ? { STATE_DIR, CANONICAL, CUMULATIVE_SPEEDUP: cumulative, BEST_PER_CASE: bestPerCase } : {}),
+      // (127). STATE.json's `cumulative` is the LANE total vs the original seed, so it must be
+      // written from CUMULATIVE_VS_SEED -- never from CUMULATIVE_SPEEDUP, which is wave-local and
+      // would overwrite a 4.35x lane history with a 1.01x round number on the next resume.
+      ...(STATE_DIR ? { STATE_DIR, CANONICAL, CUMULATIVE_SPEEDUP: cumulative,
+        CUMULATIVE_VS_SEED: cumulativeVsSeed(), PRIOR_CUMULATIVE_VS_SEED: priorCumulativeVsSeed,
+        BEST_PER_CASE: bestPerCase } : {}),
       ...(SHARED_KB ? { SHARED_KB, TARGET_LANGUAGE } : {}),
     }),
     { phase: 'Optimize', label: `tech_lead:memory r${round}`, schema: MEMORY_SCHEMA });
@@ -3769,23 +4609,88 @@ apply, the policy receipt is mandatory because final materialization is a new tr
     round,
     directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
-      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
+      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+      // Carried into HISTORY so the next round's planner can tell "this mechanism
+      // was measured and did not help" from "this mechanism never reached the
+      // machine code". Those two justify opposite next moves, and without this
+      // field they are the same ledger entry. Absent when the lane runs isa off.
+      ...(ISA_ENABLED ? { mechanism: r.ver && r.ver.isa_evidence
+        ? r.ver.isa_evidence.mechanism_verdict : 'no_receipt' } : {}) })),
+    // The round's evidence contract. Recorded together so the three cannot drift:
+    // the depth that was asked for, whether the artifact behind it exists, and the
+    // named reason when it does not. `cannbot`'s round-state rule is the model --
+    // "do not rely on the presence of `profile/` or `ir/` to imply the current
+    // level; state it directly" -- and the consistency check below is what stops a
+    // depth from being claimed without evidence.
+    ...(ISA_ENABLED ? {
+      evidence_depth: isaEffectiveDepth,
+      escalation_from: isaDepthState.from || '',
+      escalation_reason: isaDepthState.reason || '',
+      isa_attribution_path: isaAttribution && isaAttribution.summary_path
+        ? isaAttribution.summary_path : '',
+      analysis_skipped_reason: isaAnalysisSkipped || '',
+    } : {}),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
-    improved, cumulative,
+    improved, committed: committedThisRound, cumulative, cumulative_vs_seed: cumulativeVsSeed(),
   });
-  log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}, cumulative=${cumulative.toFixed(2)}x, noImprove=${noImprove}`);
+  log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}` +
+      `${improved && !committedThisRound ? ' (WINNER NOT COMMITTED -- canonical unchanged)' : ''}` +
+      `, cumulative=${cumulative.toFixed(2)}x vs this wave's baseline` +
+      `${priorCumulativeVsSeed !== 1.0 ? ` (${cumulativeVsSeed().toFixed(2)}x vs seed)` : ''}` +
+      `, noImprove=${noImprove}`);
 }
 
 // ===========================================================================
 // PHASE: Final report (TechLead)
 // ===========================================================================
 phase('Report');
+// The slow half of the loop, run once. Per-round work SPENDS machine-code evidence;
+// this turns what was spent into something the cheap layer knows next time, so the
+// deep levels get rarer instead of becoming a fixed tax on every run. Dispatched
+// only when there is something to synthesise -- a run whose rounds all stayed at
+// pattern depth and refuted nothing has produced no durable lesson, and asking for
+// one anyway is how a knowledge base fills with rules nobody validated.
+let isaSynthesis = null;
+if (ISA_ENABLED) {
+  const deepRounds = (history.rounds || []).filter(r =>
+    (r.evidence_depth && r.evidence_depth !== 'pattern') ||
+    (Array.isArray(r.results) && r.results.some(x => x && x.mechanism === 'refuted')));
+  if (deepRounds.length) {
+    isaSynthesis = await agentT(
+      roleAgent('tech_lead', 'synthesize_isa_lessons',
+        'Distil this run\'s machine-code evidence into reusable rules, or report that none qualified.', {
+          EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, KERNEL_KNOWLEDGE_DIR, HISTORY: history,
+          ISA_ATTRIBUTIONS: deepRounds.map(r => ({
+            round: r.round, evidence_depth: r.evidence_depth,
+            escalation_reason: r.escalation_reason || '',
+            attribution_path: r.isa_attribution_path || '',
+            analysis_skipped_reason: r.analysis_skipped_reason || '',
+            mechanisms: (r.results || []).map(x => x && x.mechanism).filter(Boolean),
+          })),
+          OUTPUT_PATH: `${KERNEL_KNOWLEDGE_DIR}/isa_signals/learned_rules.md`,
+        }),
+      { phase: 'Report', label: 'tech_lead:synthesize_isa_lessons', schema: ISA_SYNTHESIS_SCHEMA });
+    if (isaSynthesis) {
+      log(`  [isa] synthesis: promoted=${isaSynthesis.promoted || 0} `
+        + `anti_signals=${isaSynthesis.anti_signals || 0}`
+        + (isaSynthesis.promoted ? ` -> ${isaSynthesis.path}` : ` (${isaSynthesis.reason || 'no reason given'})`));
+    }
+  } else {
+    log('  [isa] synthesis skipped: no round reached machine-code depth and no mechanism was '
+      + 'refuted, so this run produced nothing durable to promote.');
+  }
+}
 const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
+    ...(isaSynthesis ? { ISA_SYNTHESIS: isaSynthesis } : {}),
     EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR,
     HISTORY: history, FINAL_WINNER: finalWinner, BASELINE_PER_CASE,
     BASELINE_GEOMEAN_MS, CUMULATIVE_SPEEDUP: cumulative,
+    // (127). The report's headline number is wave-local by construction (the director validates the
+    // final patch against BASELINE_PER_CASE). The lane total is a separate, labelled figure.
+    CUMULATIVE_SPEEDUP_FRAME: 'vs this wave\'s BASELINE_PER_CASE == the incumbent tree at wave start',
+    CUMULATIVE_VS_SEED: cumulativeVsSeed(),
   }),
   { phase: 'Report', label: 'tech_lead:report', schema: REPORT_SCHEMA });
 
