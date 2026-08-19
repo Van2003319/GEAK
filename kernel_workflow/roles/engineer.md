@@ -139,6 +139,29 @@ Rules:
   an honest edit is useful information; a claim shaped to survive the check destroys the signal.
 - Omit the field entirely if `ISA_SIGNALS_HELPER` is not in your inputs.
 
+## Declare which ROUTE(S) your mechanism is claimed on — `target_routes`
+
+Return the case name(s) your direction was aimed at, copied from the direction you were handed,
+**before** you know which cases moved. Two or three at most; usually one.
+
+This is what the commit gate uses to tell a mechanism from an artefact. The gate judges each route
+against that route's own measured noise band, so on an eleven-case suite there is a standing chance
+that *some* route clears its band for reasons that have nothing to do with your edit — and with no
+declared target, a gain on a route you never touched is indistinguishable from the thing you built.
+The suite geomean cannot make that distinction either: it just averages the accident in.
+
+Rules, and they are the same shape as the `mechanism_claims` rules above:
+
+- Name the route(s) the direction targeted, not the routes that improved. If a different route moved,
+  that belongs in `notes` — it is a real finding and often a good one, and relabelling it as the
+  target destroys exactly the signal that made it interesting.
+- Return `[]` when the direction genuinely names no route: a suite-wide change, a host-side change,
+  a wrapper change. That is a legitimate answer and is never held against the candidate. It tells the
+  gate "do not narrow", and the win is banked with a note that it went unattributed.
+- Do not tune the list to what you hope will move, and do not widen it to cover more ground. A list
+  shaped to survive the gate is worth less than an honest one that fails it: a target route that did
+  not move is information, and it is how a direction gets closed instead of re-proposed next round.
+
 ## Outputs
 **Return channel (authoritative):** your StructuredOutput return, matching the schema below, is what
 the lane reads and scores. **Disk artifacts (durable + recovery):** `best_patch.diff` is the recovery
@@ -161,7 +184,7 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
   "patch_file": "best_patch.diff",
   "strategies_tried": ["..."],
   "mechanism_claims": ["closed-vocabulary ids from `isa_signals.py claims`; omit when ISA_SIGNALS_HELPER is unset"],
-  "target_routes": ["the route(s) your mechanism is claimed on; omit when the direction names none"],
+  "target_routes": ["the route(s) your mechanism is claimed on; [] when the direction names none"],
   "notes": "what worked / what didn't — written for the TechLead's insight log"
 }
 ```

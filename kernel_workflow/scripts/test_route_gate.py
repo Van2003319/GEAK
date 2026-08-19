@@ -108,6 +108,100 @@ class BandTest(unittest.TestCase):
             rg.bands_from_repeats(reps)
 
 
+class BandsFromSamplesTest(unittest.TestCase):
+    """`bands_from_samples` is what makes the per-route gate REACHABLE.
+
+    Before it, the only band source wanted N whole suite reports keyed on
+    `optimized_ms`, which no caller has when the commit gate is configured -- so
+    the gate needed a hand-maintained per-host JSON, nobody passed one, and the
+    gate never ran. These pin the shape the benchmark engineer already reports on
+    every run of every task.
+    """
+
+    def test_the_two_entry_points_agree_on_the_same_measurements(self):
+        """One statistic, two input shapes. A drift here is a silently different gate."""
+        vals = [0.100, 0.104, 0.096]
+        from_reports = rg.bands_from_repeats(
+            [{"test_cases": [{"name": "a", "optimized_ms": v}]} for v in vals])
+        from_samples = rg.bands_from_samples([{"name": "a", "samples_ms": vals}])
+        self.assertEqual(from_reports, from_samples)
+
+    def test_the_band_is_the_spread_over_the_median(self):
+        bands = rg.bands_from_samples([{"name": "a", "samples_ms": [0.100, 0.104, 0.096]}])
+        self.assertAlmostEqual(bands["a"], (0.104 - 0.096) / 0.100, places=6)
+
+    def test_a_zero_spread_is_clamped_rather_than_left_at_zero(self):
+        """Three identical coarse-timer reads would otherwise make every rounding
+        difference read as `improved` -- the gate banking noise on its quietest routes."""
+        bands = rg.bands_from_samples([{"name": "a", "samples_ms": [0.2, 0.2, 0.2]}])
+        self.assertEqual(bands["a"], rg.MIN_BAND)
+
+    def test_two_samples_cannot_define_a_spread(self):
+        with self.assertRaises(rg.RouteGateError):
+            rg.bands_from_samples([{"name": "a", "samples_ms": [0.1, 0.1]}])
+
+    def test_a_latency_without_samples_is_refused_not_inferred(self):
+        """benchmark_engineer.md makes samples_ms optional, so this shape is reachable.
+        It must raise, because the CALLER's contract is to fall back to the suite gate
+        and say so -- a band invented from one number would silently narrow the bar."""
+        with self.assertRaises(rg.RouteGateError):
+            rg.bands_from_samples([{"name": "a", "latency_ms": 0.1}])
+
+    def test_one_route_without_samples_refuses_the_whole_table(self):
+        """A PARTIAL table is the bad outcome: decide() would refuse the unbanded
+        route with 'no noise band for ...', which reads as a candidate defect."""
+        with self.assertRaises(rg.RouteGateError):
+            rg.bands_from_samples([{"name": "a", "samples_ms": [0.1, 0.11, 0.09]},
+                                   {"name": "b", "latency_ms": 0.2}])
+
+    def test_a_nonfinite_or_nonpositive_sample_is_refused(self):
+        for bad in (0.0, -0.1, float("inf"), float("nan")):
+            with self.subTest(sample=bad):
+                with self.assertRaises(rg.RouteGateError):
+                    rg.bands_from_samples([{"name": "a", "samples_ms": [0.1, 0.11, bad]}])
+
+    def test_a_row_without_a_name_is_refused(self):
+        with self.assertRaises(rg.RouteGateError):
+            rg.bands_from_samples([{"samples_ms": [0.1, 0.11, 0.09]}])
+
+    def test_a_duplicate_route_is_refused(self):
+        with self.assertRaises(rg.RouteGateError):
+            rg.bands_from_samples([{"name": "a", "samples_ms": [0.1, 0.11, 0.09]},
+                                   {"name": "a", "samples_ms": [0.1, 0.11, 0.09]}])
+
+    def test_an_empty_table_is_refused(self):
+        with self.assertRaises(rg.RouteGateError):
+            rg.bands_from_samples([])
+
+    def test_a_derived_table_feeds_decide_end_to_end(self):
+        """The whole point: baseline repeats in, commit verdict out, no band file."""
+        base = {r: 0.100 for r in ROUTES}
+        bands = rg.bands_from_samples(
+            [{"name": r, "samples_ms": [0.100, 0.101, 0.099]} for r in ROUTES])
+        win = dict(base)
+        win[ROUTES[0]] = 0.100 * 0.93          # -7% on one route, ten flat
+        d = rg.decide(candidate_per_case=rows(win), incumbent_per_case=rows(base),
+                      bands=bands, target_routes=[ROUTES[0]])
+        self.assertTrue(d.accepted, d.reason)
+        self.assertEqual(d.improved, [ROUTES[0]])
+
+
+class ConstantsTest(unittest.TestCase):
+    def test_the_floor_constants_match_measure_noise_floor(self):
+        """route_gate mirrors these instead of importing them (measure_noise_floor
+        drags in the machine/epoch tables). Mirroring is only safe while something
+        asserts the copies agree."""
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "measure_noise_floor.py")
+        spec = importlib.util.spec_from_file_location("_mnf", path)
+        mnf = importlib.util.module_from_spec(spec)
+        sys.modules["_mnf"] = mnf
+        spec.loader.exec_module(mnf)
+        self.assertEqual(rg.MIN_BAND, mnf.MIN_FLOOR)
+        self.assertEqual(rg.MIN_REPEATS, mnf.MIN_REPEATS)
+
+
 class DecisionTest(unittest.TestCase):
     def test_all_flat_is_refused(self):
         d = rg.decide(candidate_per_case=rows(flat()), incumbent_per_case=rows(flat()),

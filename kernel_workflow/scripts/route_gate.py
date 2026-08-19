@@ -44,6 +44,20 @@ from typing import Mapping, Sequence
 
 SCHEMA = "geak.route-gate/v1"
 
+# Both mirrored from measure_noise_floor.py rather than imported, because that
+# module pulls in the machine/epoch tables and this one must stay usable with
+# nothing but a per_case list. `test_route_gate.py` asserts the two agree, so the
+# duplication cannot drift silently.
+#
+# MIN_REPEATS: two samples cannot distinguish a spread from a pair.
+# MIN_BAND: "the tightest floor ever measured anywhere in this ledger is 0.005;
+# anything below 0.002 is the sampler running out of resolution, not the GPU
+# being quiet." A band of 0.0 -- which three coarse-timer repeats produce
+# readily -- would make every rounding difference read as `improved`, i.e. the
+# gate would bank noise on the quietest routes instead of on the loudest.
+MIN_REPEATS = 3
+MIN_BAND = 0.002
+
 
 class RouteGateError(ValueError):
     """The gate was asked to decide something it has no evidence for."""
@@ -91,19 +105,29 @@ def _rows(per_case: Sequence[Mapping[str, object]], which: str) -> dict[str, flo
     return out
 
 
-def bands_from_repeats(reports: Sequence[Mapping[str, object]]) -> dict[str, float]:
-    """Derive a per-route band from repeated measurements of ONE unchanged tree.
+def _band_from_values(vals: Sequence[float], route: str) -> float:
+    """The band statistic itself, in ONE place so the two entry points cannot drift.
 
-    The band is the full min-max spread over the repeats, as a fraction of the
-    median. Full spread rather than a MAD multiple on purpose: the gate's job is
-    to not bank noise, and on this lane the distribution is a tight core with a
-    left tail, so a MAD-derived band would admit the tail.
-
-    Needs at least three repeats; two cannot distinguish a spread from a pair.
+    Full min-max spread over the repeats, as a fraction of the median. Full spread
+    rather than a MAD multiple on purpose: the gate's job is to not bank noise, and
+    on this lane the distribution is a tight core with a left tail, so a
+    MAD-derived band would admit the tail.
     """
-    if len(reports) < 3:
+    med = statistics.median(vals)
+    if not med > 0:
+        raise RouteGateError(f"route {route!r} has a non-positive median ({med!r})")
+    return max((max(vals) - min(vals)) / med, MIN_BAND)
+
+
+def bands_from_repeats(reports: Sequence[Mapping[str, object]]) -> dict[str, float]:
+    """Derive a per-route band from N full-suite reports of ONE unchanged tree.
+
+    Needs at least MIN_REPEATS reports; two cannot distinguish a spread from a pair.
+    """
+    if len(reports) < MIN_REPEATS:
         raise RouteGateError(
-            f"need at least 3 repeats of the same tree to derive bands, got {len(reports)}")
+            f"need at least {MIN_REPEATS} repeats of the same tree to derive bands, "
+            f"got {len(reports)}")
     per_route: dict[str, list[float]] = {}
     for rep in reports:
         for route, ms in _rows(rep.get("test_cases") or rep.get("per_case") or [],
@@ -115,9 +139,61 @@ def bands_from_repeats(reports: Sequence[Mapping[str, object]]) -> dict[str, flo
             raise RouteGateError(
                 f"route {route!r} appears in {len(vals)} of {len(reports)} repeats; "
                 "a band derived from a subset would understate the spread")
-        med = statistics.median(vals)
-        bands[route] = (max(vals) - min(vals)) / med
+        bands[route] = _band_from_values(vals, route)
     return bands
+
+
+def bands_from_samples(per_case: Sequence[Mapping[str, object]]) -> dict[str, float]:
+    """Derive per-route bands from a baseline table that carries `samples_ms`.
+
+    Same statistic as `bands_from_repeats`, reading the ALREADY-TRANSPOSED shape
+    the benchmark engineer reports: one row per route, each carrying its own
+    repeat list (`baseline_per_case[].samples_ms`, benchmark_engineer.md step 5,
+    "the raw per-repeat latency for that case -- at least three complete primed
+    repeats, in the order measured, not a summary").
+
+    Why this entry point exists at all. `bands_from_repeats` wants N whole suite
+    reports keyed on `optimized_ms`, and no caller in the lane has that in hand at
+    the moment the commit gate is configured -- which is why the per-route gate
+    shipped with no reachable band source and had to be fed a hand-maintained
+    per-host JSON that nobody passed. The baseline table has the repeats on EVERY
+    run, for EVERY task, measured on the box that will judge the candidates. That
+    makes the gate reachable without any task-specific or host-specific file.
+
+    Raises rather than returning a partial table, and the asymmetry is deliberate:
+    a table missing one route makes `decide()` refuse that route with
+    "no noise band for ...", which reads as a candidate defect, while an absent
+    table lets the caller fall back to the suite gate and say so once.
+    """
+    per_route: dict[str, list[float]] = {}
+    for row in per_case or []:
+        name = row.get("name") or row.get("test_case_id")
+        if not name:
+            raise RouteGateError(f"a per_case row has no route name: {row!r}")
+        name = str(name)
+        if name in per_route:
+            raise RouteGateError(f"route {name!r} appears twice")
+        raw = row.get("samples_ms")
+        if not isinstance(raw, (list, tuple)):
+            raise RouteGateError(
+                f"route {name!r} has no samples_ms list (got {raw!r}); the band is a "
+                "measurement of how much this tree wanders and cannot be inferred from "
+                "a single latency")
+        vals: list[float] = []
+        for v in raw:
+            if not (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) and v > 0):
+                raise RouteGateError(
+                    f"route {name!r} has a non-positive or non-finite sample ({v!r})")
+            vals.append(float(v))
+        if len(vals) < MIN_REPEATS:
+            raise RouteGateError(
+                f"route {name!r} has {len(vals)} sample(s), need at least {MIN_REPEATS}; "
+                "two cannot distinguish a spread from a pair")
+        per_route[name] = vals
+    if not per_route:
+        raise RouteGateError("per_case is empty; no bands to derive")
+    return {route: _band_from_values(vals, route) for route, vals in per_route.items()}
 
 
 def suite_geomean(per_case: Sequence[Mapping[str, object]]) -> float | None:

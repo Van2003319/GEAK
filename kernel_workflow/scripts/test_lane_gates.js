@@ -279,6 +279,12 @@ console.log('\n# the post-build policy receipt gate, executed');
   // handed. So the schemas are evaluated too, and the fixture is checked against them.
   const schemaBlock = grab(/const obj = \(props, required\) => [^\n]*\n/, 'obj') +
     grab(/const perCase = \{[\s\S]*?\n\};\n/, 'perCase') +
+    // VERIFY_SCHEMA references this, so evaluating the schema requires it. Listed rather than
+    // inlined into the schema because that is what makes the omission LOUD: leaving it out makes
+    // this block throw `controlPerCase is not defined` instead of quietly evaluating a schema with
+    // one field missing, which is the difference between a caught mistake and a gate that reads a
+    // contract the agent was never handed.
+    grab(/const controlPerCase = \{[\s\S]*?\n\};\n/, 'controlPerCase') +
     grab(/const POLICY_SUMMARY_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'POLICY_SUMMARY_SCHEMA') +
     grab(/const HIP_TWIN_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'HIP_TWIN_SCHEMA') +
     grab(/const ISA_EVIDENCE_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'ISA_EVIDENCE_SCHEMA') +
@@ -559,23 +565,158 @@ console.log('\n# the budget, the commit threshold and the correctness gate');
 {
   ok(/plannedCost \+ d\.cost > remaining/.test(src),
     'the planner cannot overspend the remaining budget');
-  // The threshold is unchanged and is still the DEFAULT: a run that passes no measured
-  // `route_bands` table evaluates exactly this expression and commits on exactly this test. What
-  // changed is that a run WITH a band table can overrule it per-route, so the fallback is pinned
-  // separately below -- a lexical check on the threshold alone would keep passing if the fallback
-  // were deleted and the per-route verdict became unconditional.
+  // The suite threshold is unchanged and is still the FALLBACK -- the expression a run evaluates
+  // when no band table could be built at all. It is no longer the normal path: bands are now
+  // derived from the baseline's own repeats, so `ROUTE_BANDS` is populated on any run whose
+  // benchmark engineer reported `samples_ms`. Both are pinned, because a lexical check on the
+  // threshold alone would keep passing if the fallback were deleted and the per-route verdict
+  // became unconditional, and a check on the per-route branch alone would keep passing if the
+  // derivation were deleted and the gate silently went back to never running.
   ok(/const legacyImproved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
-    'canonical promotion threshold remains unchanged');
+    'the suite-geomean threshold survives as the no-band fallback');
   ok(/let improved = legacyImproved;/.test(src),
-    'the legacy threshold is the default commit decision, not one branch of two');
+    'the legacy threshold is the starting commit decision, not one branch of two');
   ok(/if \(winner && ROUTE_BANDS\) \{/.test(src) &&
      /if \(routeVerdict\.applicable\) \{\s*improved = routeVerdict\.accepted;/.test(src),
-    'the per-route gate overrules the legacy threshold only when bands were supplied AND it is applicable');
+    'the per-route gate overrules the suite threshold when bands exist AND it is applicable');
   // Finding (62) split this from one conjunction into a gate plus a named metric
   // refusal, so the shape changed; the threshold it enforces did not.
   ok(/says\(r\.ver\.correctness, 'pass'\)\)\) return false;/.test(src) &&
      /return primSpeedup\(r\.ver\) > CANDIDATE_FLOOR;/.test(src),
     'the verified filter still gates on correctness and the candidate floor');
+}
+
+console.log('\n# the per-route gate must be REACHABLE without a hand-maintained band file, executed');
+{
+  // Why this section exists. The per-route gate and its Python twin were both written, both
+  // correct, and both defended by tests -- and across seven waves of the greedy lane the gate
+  // logged NOTHING, because its only band source was an `args.route_bands` table nobody passed and
+  // the sole file on disk was six epochs stale. A gate that cannot be fed is a gate that does not
+  // run, and the suite threshold it was written to overrule went on refusing verified single-route
+  // wins the whole time. So what is pinned here is not the arithmetic (test_route_gate.py owns
+  // that) but the SUPPLY: bands come from data every run already produces.
+  const block = grab(/const BAND_MIN_REPEATS = 3;[\s\S]*?const bandsFromSamples = \(perCase\) => \{[\s\S]*?\n\};\n/,
+    'bandsFromSamples');
+  const { bandsFromSamples, BAND_MIN, BAND_MIN_REPEATS } = new Function(
+    `${block}\nreturn {bandsFromSamples, BAND_MIN, BAND_MIN_REPEATS};`)();
+
+  const row = (name, samples) => ({ name, latency_ms: samples[0], samples_ms: samples });
+
+  // The statistic, and that it agrees with the Python twin's definition: full min-max spread over
+  // the median. test_route_gate.py::BandsFromSamplesTest pins the identical numbers on the other
+  // side, which is the only thing keeping two hand-written implementations of one rule together.
+  {
+    const r = bandsFromSamples([row('a', [0.100, 0.104, 0.096])]);
+    ok(r.bands != null && Math.abs(r.bands.a - (0.104 - 0.096) / 0.100) < 1e-9,
+      'the band is the full spread over the median', r.reason);
+  }
+  // A zero spread must not become a zero band. Three identical coarse-timer reads would otherwise
+  // make every rounding difference read as `improved` -- the gate banking noise on exactly the
+  // routes where it is quietest, which is the opposite of what it is for.
+  {
+    const r = bandsFromSamples([row('a', [0.2, 0.2, 0.2])]);
+    ok(r.bands != null && r.bands.a === BAND_MIN,
+      'a zero spread is clamped to BAND_MIN rather than left at zero', r.reason);
+  }
+  ok(BAND_MIN === 0.002 && BAND_MIN_REPEATS === 3,
+    'the floor constants match measure_noise_floor.py (asserted on the Python side too)');
+
+  // Every refusal returns a REASON and never throws. `samples_ms` is optional by contract
+  // (benchmark_engineer.md: "Omitting the field is not an error and the run proceeds"), so a throw
+  // here would abort a run over a field the agent is allowed to leave out.
+  for (const [bad, why] of [
+    [[row('a', [0.1, 0.1])], 'two samples cannot define a spread'],
+    [[{ name: 'a', latency_ms: 0.1 }], 'a latency with no samples_ms'],
+    [[row('a', [0.1, 0.11, 0.09]), { name: 'b', latency_ms: 0.2 }], 'one route missing samples'],
+    [[row('a', [0.1, 0.11, -1])], 'a negative sample'],
+    [[row('a', [0.1, 0.11, Infinity])], 'a non-finite sample'],
+    [[{ samples_ms: [0.1, 0.11, 0.09] }], 'a row with no route name'],
+    [[row('a', [0.1, 0.11, 0.09]), row('a', [0.1, 0.11, 0.09])], 'a duplicate route'],
+    [[], 'an empty table'],
+  ]) {
+    const r = bandsFromSamples(bad);
+    ok(r.bands === null && typeof r.reason === 'string' && r.reason.length > 0,
+      `refused with a reason, not a throw and not a partial table: ${why}`,
+      JSON.stringify(r.bands));
+  }
+  // A PARTIAL table is the failure worth naming separately: it would leave `routeGate` refusing the
+  // unbanded route with "no measured band for ...", which reads as a candidate defect rather than
+  // as our own missing measurement.
+  {
+    const r = bandsFromSamples([row('a', [0.1, 0.11, 0.09]), { name: 'b', latency_ms: 0.2 }]);
+    ok(r.bands === null, 'one unusable route refuses the WHOLE table, never a partial one');
+  }
+
+  // The wiring, lexically: derived by default, arg as override, and the fallback says so out loud.
+  ok(/const ROUTE_BANDS_ARG = \(\(\) => \{/.test(src),
+    'args.route_bands is now the OVERRIDE (ROUTE_BANDS_ARG), not the only source');
+  ok(/const ROUTE_BANDS = ROUTE_BANDS_ARG \|\| ROUTE_BAND_DERIVED\.bands;/.test(src),
+    'the effective band table prefers an explicit table and otherwise uses the derived one');
+  ok(/bandsFromSamples\(BASELINE_PER_CASE\)/.test(src),
+    'the derived table is built from the baseline the benchmark engineer just measured');
+  ok(/Commit gate: SUITE GEOMEAN at MIN_IMPROVE=/.test(src),
+    'a run that falls back to the suite gate LOGS that it did -- the silent-off failure this ' +
+    'whole section exists to prevent');
+  ok(/Commit gate: PER-ROUTE, /.test(src),
+    'a run on the per-route gate says so, with the band span, so the log shows which gate decided');
+}
+
+console.log('\n# the gate compares against a SAME-SESSION control when the verifier returns one, executed');
+{
+  // route_gate.py's own header records this exposure and declines to guard it: "the same unchanged
+  // tree measures 1.5-3% differently between invocations, and the candidate and the incumbent it is
+  // compared against come from different invocations... the tighter fix is not a device check but
+  // comparing against a control measured in the candidate's own session." The verifiers already
+  // build that arm; until now there was no field to return it in, so the gate compared this round's
+  // candidate against a table measured in an earlier round -- a drift larger than the gains judged.
+  const gateBlock = grab(/const routeGate = \(candPerCase, incPerCase, bands, opts\) => \{[\s\S]*?\n\};\n/,
+    'routeGate');
+  const { routeGate } = new Function(`${gateBlock}\nreturn {routeGate};`)();
+  const bands = { a: 0.02, b: 0.02 };
+
+  // A control row is `{name, optimized_ms}` with NO speedup -- the denominator measuring itself, so
+  // a speedup would be 1.0 by construction. The gate must read that shape with the same accessor it
+  // uses for a candidate row, or the narrower schema would be unreadable by the thing it feeds.
+  const control = [{ name: 'a', optimized_ms: 0.100 }, { name: 'b', optimized_ms: 0.200 }];
+  const cand = [{ name: 'a', optimized_ms: 0.090, speedup: 1.11 },
+                { name: 'b', optimized_ms: 0.200, speedup: 1.00 }];
+  {
+    const v = routeGate(cand, control, bands, { targetRoutes: ['a'] });
+    ok(v.applicable && v.accepted && v.improved.join() === 'a',
+      'a control arm carrying only {name, optimized_ms} is readable and decides the verdict', v.reason);
+  }
+  // The point of the arm: the same patch judged against a control measured in a session that ran
+  // 5% slow reads as a win, and against one that ran 5% fast reads as flat. Same candidate, same
+  // bands -- only the incumbent's session differs. That is the drift this field cancels.
+  {
+    const slowSession = [{ name: 'a', optimized_ms: 0.105 }, { name: 'b', optimized_ms: 0.210 }];
+    const fastSession = [{ name: 'a', optimized_ms: 0.0905 }, { name: 'b', optimized_ms: 0.190 }];
+    const vSlow = routeGate(cand, slowSession, bands, { targetRoutes: ['a'] });
+    const vFast = routeGate(cand, fastSession, bands, { targetRoutes: ['a'] });
+    ok(vSlow.accepted === true && vFast.accepted === false,
+      'the SAME candidate flips verdict with the incumbent\'s session -- which is why the arm exists',
+      `slow=${vSlow.accepted} fast=${vFast.accepted}`);
+  }
+
+  // The wiring: preferred when present, degraded-but-used when absent, and always stated.
+  ok(/const sameSession = !!winner\.control_per_case;/.test(src) &&
+     /const incumbentSide = sameSession \? winner\.control_per_case : bestPerCase;/.test(src),
+    'the gate prefers the same-session control and falls back to the stored table');
+  ok(/routeGate\(winner\.per_case, incumbentSide, ROUTE_BANDS/.test(src),
+    'the chosen incumbent side is what the gate actually reads');
+  ok(/incumbent side: /.test(src),
+    'which incumbent side decided the verdict is logged every round, not inferred');
+  ok(/control_per_case: controlPerCase,/.test(src),
+    'control_per_case is DECLARED in VERIFY_SCHEMA -- a required-but-undeclared field is one the ' +
+    'agent is obliged to return and never told about');
+  ok(!/\}, \['status', 'verified_geomean', 'policy_pass', 'control_per_case'\]/.test(src),
+    'control_per_case is NOT in required: a hard schema failure would discard a whole round of GPU ' +
+    'work over a missing arm (the precedent timing_basis set)');
+  ok(/control_per_case: Array\.isArray\(r\.ver\.control_per_case\) && r\.ver\.control_per_case\.length/.test(src),
+    'an empty control array is treated as absent, not as a control that measured nothing');
+  ok(/accepted with no declared target_routes/.test(src),
+    'a win banked with no declared target route is NOTED rather than refused -- unattributed, but ' +
+    'not thrown away');
 }
 
 console.log('\n# the roadmap profile may not publish a ceiling it did not earn -- (89)');

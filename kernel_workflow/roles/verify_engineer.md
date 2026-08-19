@@ -279,6 +279,38 @@ absolute per-case latencies. The script trusts only your numbers.
    leading word (`"pass"` followed by `10/11`, `except`, `mismatch`, `fail`) is read as NOT passing:
    a partial pass is a failure, and it is reported as `"fail"`, never as a qualified `"pass"`.
 
+7. **Measure the INCUMBENT beside the candidate, in this same session, and return it as
+   `control_per_case`.** Build the unpatched canonical tree independently in your own workspace and
+   time it interleaved with the candidate arm — not before, not after, and never quoting a number
+   from an earlier round.
+
+   This is the load-bearing measurement in your report, not a nicety. An unchanged tree measures
+   **1.5–3% differently between invocations**, and per-round gains on this lane are ~1%. So a
+   candidate timed in your session and an incumbent timed in some earlier round differ by more from
+   *drift* than from the patch, and the commit gate cannot tell which it is looking at. With both arms
+   in one session the drift is common to both and cancels; one verifier caught a session-level −6.8%
+   shift on a route that was present in **both** arms and would otherwise have been scored as the
+   patch's effect.
+
+   Report it as `{"name": ..., "optimized_ms": ...}` per route — the time *this arm* measured, using
+   the same field name the candidate rows use. No `speedup` field: the incumbent measuring itself is
+   1.0 by construction, and a fabricated ratio there is worse than an omitted one. Include
+   `samples_ms` when you repeated it.
+
+   Omitting the field is not an error and the run proceeds — the gate falls back to the stored table
+   from an earlier round and records that it did. But then your verdict carries the drift, and a
+   marginal round is decided by which GPU in the pool was free. Do not synthesize this arm from the
+   candidate run or from `BASELINE_PER_CASE`: an invented control silently narrows the bar every
+   future candidate has to clear, which is the same failure mode as a fabricated `samples_ms`.
+
+8. **`target_routes` is not optional when the direction claimed a route.** Return the route(s) the
+   mechanism was claimed on, taken from the direction you were handed — not the routes that happened
+   to improve. The gate uses it to refuse banking an incidental gain as the declared mechanism; with
+   the field absent it accepts any route that beat its band and logs that the win went unattributed.
+   Return `[]` only when the direction genuinely named no route (a suite-wide or host-side change).
+   Do not widen it to cover a route that moved unexpectedly — report that in `notes` instead. A win on
+   a route nobody predicted is a finding; relabelled as the target, it is a fabricated mechanism.
+
 ## Return JSON
 ```json
 {
@@ -296,6 +328,7 @@ absolute per-case latencies. The script trusts only your numbers.
   "verified_arithmetic": 0.0,
   "verified_weighted": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "weight": 0.0}],
+  "control_per_case": [{"name": "...", "optimized_ms": 0.0, "samples_ms": [0.0, 0.0, 0.0]}],
   "variance_note": "e.g. run-to-run within 3%",
   "target_routes": ["the route(s) this direction claimed a mechanism on"],
   "graph_safe": "pass|fail|n/a (only when REQUIRE_GRAPH_CAPTURE was set; omit otherwise)",

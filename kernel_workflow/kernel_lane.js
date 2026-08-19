@@ -70,22 +70,30 @@ const PROGRESS_DELTA = (() => {
   const v = parseFloat(A.progress_delta != null ? A.progress_delta : MIN_IMPROVE);
   return Number.isFinite(v) && v > -1 ? v : MIN_IMPROVE;
 })();
-// Per-route repeat bands, as {route: fraction}. Supplying them switches the COMMIT gate from the
-// suite geometric mean to a per-route absolute-time test (`routeGate` below). Omitting them keeps
-// the historical gate byte-for-byte, so a run that does not pass this argument is unaffected.
+// Per-route repeat bands, as {route: fraction}. An OPTIONAL OVERRIDE: when absent the lane derives
+// the table from the baseline's own repeats after the Benchmark phase (see ROUTE_BANDS below), so
+// the per-route gate is the DEFAULT path and not something a caller has to know to switch on.
 //
-// Why the switch exists: COMMANDMENT's claim rule and the tech-lead close-out both say a
+// Why the per-route gate exists: COMMANDMENT's claim rule and the tech-lead close-out both say a
 // single-route mechanism must be judged by that route's absolute microseconds, with the suite
-// geomean used only to confirm nothing else regressed -- and the gate below did the opposite. An
+// geomean used only to confirm nothing else regressed -- and the legacy gate did the opposite. An
 // eleven-route geometric mean divides a single-route win by roughly eleven, so a real +7% route
 // mechanism reaches the gate reading +0.6%, under the noise, and MIN_IMPROVE on top of that is
 // equivalent to "never commit".
 //
-// The bands must be MEASURED, not guessed: derive them with
-// `scripts/route_gate.py:bands_from_repeats()` over repeats of one unchanged tree. On this lane
-// they span 1.56% to 11.55% across routes, so a single default would be wrong by ~7x. They are
-// epoch- and host-specific and must be regenerated after a machine change.
-const ROUTE_BANDS = (() => {
+// Why it had to become the default rather than stay an argument. It shipped as `args.route_bands`
+// with the only band source being `route_gate.py:bands_from_repeats()`, which wants N whole suite
+// reports -- something no caller holds at the moment the gate is configured. So the table had to be
+// a hand-maintained per-host JSON, the canonical invocation never passed one, and across seven waves
+// the gate logged NOTHING: it decided nothing while looking like a shipped feature. Meanwhile the
+// suite gate refused a verified, correctness-passing, policy-clean +1.58% stack that this gate
+// accepts. Finding (87)'s lesson, again: "has existed and been correct for several rounds while
+// nothing called it", and the fix is not a better tool, it is calling it.
+//
+// The bands must be MEASURED, not guessed. On this lane they span 1.56% to 11.55% across routes, so
+// a single default would be wrong by ~7x -- which is why `routeGate` refuses a route it has no band
+// for rather than defaulting one.
+const ROUTE_BANDS_ARG = (() => {
   const raw = A.route_bands;
   if (raw == null) return null;
   let obj = raw;
@@ -183,6 +191,61 @@ const routeGate = (candPerCase, incPerCase, bands, opts) => {
   const won = new Set(wanted);
   return done(true, 'improved past band on: ' + routes.filter(r => won.has(r.route))
     .map(r => `${r.route} (${pct(r.delta_frac)} vs band ${pct(r.band)})`).join(', '));
+};
+// Both mirrored from `scripts/route_gate.py` (which mirrors them from
+// `measure_noise_floor.py`). MIN_REPEATS: two samples cannot distinguish a spread from a pair.
+// MIN_BAND: a band of 0 -- which three coarse-timer repeats produce readily -- would make every
+// rounding difference read as `improved`, i.e. the gate would bank noise on its QUIETEST routes.
+const BAND_MIN_REPEATS = 3;
+const BAND_MIN = 0.002;
+// Twin of `scripts/route_gate.py:bands_from_samples()`. Derives the per-route band table from the
+// baseline table the benchmark engineer already returns, where each row carries `samples_ms` -- "the
+// raw per-repeat latency for that case, at least three complete primed repeats, in the order
+// measured, not a summary" (benchmark_engineer.md step 5).
+//
+// This is what makes the per-route gate reachable with no band file, no epoch letter and no
+// task-specific table: every run measures its own baseline three times on the box that will judge
+// the candidates, so the band is this machine's own answer about how much an UNCHANGED tree wanders.
+//
+// ONE DEVIATION FROM THE PYTHON TWIN, deliberate and load-bearing: the Python raises, this returns
+// `{bands: null, reason}`. `samples_ms` is optional by contract, so a throw here would abort a run
+// over a field the benchmark engineer is allowed to omit. The caller falls back to the legacy suite
+// gate and logs the reason -- inert AND visible, never silently off.
+//
+// Refuses the WHOLE table when any route is unusable rather than returning a partial one: a partial
+// table makes `routeGate` refuse the unbanded route with "no measured band for ...", which reads as
+// a candidate defect, while an absent table is one clear line about us.
+const bandsFromSamples = (perCase) => {
+  const rows = Array.isArray(perCase) ? perCase : [];
+  if (!rows.length) return { bands: null, reason: 'baseline_per_case is empty' };
+  const out = {};
+  for (const row of rows) {
+    const name = row && (row.name || row.test_case_id);
+    if (!name) return { bands: null, reason: 'a baseline_per_case row has no route name' };
+    if (out[name] != null) return { bands: null, reason: `route ${name} appears twice` };
+    const raw = row.samples_ms;
+    if (!Array.isArray(raw)) {
+      return { bands: null, reason: `route ${name} carries no samples_ms array, so how much this ` +
+        'tree wanders on it was never measured (a band cannot be inferred from one latency)' };
+    }
+    const vals = [];
+    for (const v of raw) {
+      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+        return { bands: null, reason: `route ${name} has a non-positive or non-finite sample (${v})` };
+      }
+      vals.push(v);
+    }
+    if (vals.length < BAND_MIN_REPEATS) {
+      return { bands: null, reason: `route ${name} has ${vals.length} sample(s), need at least ` +
+        `${BAND_MIN_REPEATS}` };
+    }
+    const sorted = vals.slice().sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    const med = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    if (!(med > 0)) return { bands: null, reason: `route ${name} has a non-positive median` };
+    out[name] = Math.max((sorted[sorted.length - 1] - sorted[0]) / med, BAND_MIN);
+  }
+  return { bands: out, reason: '' };
 };
 // Budget cost of ONE `deep_explore` direction. The deep-explore engineer does far more than a single
 // specialist — broad rewrite authority, its own multi-iteration measure→profile→rewrite loop — so it
@@ -515,6 +578,33 @@ const perCase = {
     required: ['name', 'speedup'],
   },
 };
+// The INCUMBENT arm as re-measured in the candidate's OWN session. A deliberately narrower shape
+// than `perCase`: a control arm has no speedup (it is the denominator measuring itself, so the
+// number would be 1.0 by construction), and requiring a meaningless field is how a contract teaches
+// an agent to omit the whole object.
+//
+// Why the lane needs this at all. `route_gate.py`'s header names the exposure and declines to guard
+// it: "the same unchanged tree measures 1.5-3% differently between invocations, and the candidate
+// and the incumbent it is compared against come from different invocations on whichever pool GPU was
+// free. That exposure is real and larger than the per-round gains being judged... the tighter fix is
+// not a device check but comparing against a control measured in the candidate's own session."
+// The verifiers on this lane ALREADY build that arm -- interleaved, independently rebuilt -- and one
+// of them caught a session-level -6.8% shift present in both arms. They just had nowhere to put it,
+// so the gate went on comparing this round's candidate against a table measured in an earlier round.
+const controlPerCase = {
+  type: 'array',
+  items: {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      // The time THIS arm measured. Named `optimized_ms` so `routeGate`/`route_gate.py` read a
+      // control row with the same accessor they use for a candidate row -- one reader, not two.
+      optimized_ms: { type: 'number' },
+      samples_ms: { type: 'array', items: { type: 'number' } },
+    },
+    required: ['name', 'optimized_ms'],
+  },
+};
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 
 const SETUP_SCHEMA = obj({
@@ -801,6 +891,10 @@ const VERIFY_SCHEMA = obj({
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
+  // The incumbent arm re-measured in THIS verification's session (see controlPerCase). Declared,
+  // never required: absent it, the gate falls back to the stored table from an earlier round and
+  // says which one it used, so a verifier that cannot afford the arm still produces a usable result.
+  control_per_case: controlPerCase,
   // See ENG_SCHEMA. The verifier's value is the one the commit gate uses, because the verifier's
   // per_case is what becomes `bestPerCase`.
   target_routes: { type: 'array', items: { type: 'string' } },
@@ -1154,6 +1248,40 @@ if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed:
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
+
+// --- The per-route commit gate's band table --------------------------------
+// Resolved HERE rather than beside the other args because it is a MEASUREMENT, and the measurement
+// does not exist until the benchmark engineer has run the baseline three times. `args.route_bands`
+// stays an override for a caller that has a better table (e.g. an 8-repeat per-epoch sweep); with no
+// override the lane derives its own from `baseline_per_case[].samples_ms`.
+//
+// Honest limitation, recorded rather than hidden: this table prices the tree the wave STARTED from.
+// Insight (49) found floors sort by TREE more than by box (up to 4.3x between trees several waves
+// apart), so after a round commits, the band describes the parent's parent. Within one wave the tree
+// moves by small patches and the drift is far below the 7x error a single default band would carry,
+// and the sharper fix for the residual is not a wider band but comparing against a control measured
+// in the candidate's OWN session -- which is what `control_per_case` does at the gate below.
+const ROUTE_BAND_DERIVED = ROUTE_BANDS_ARG ? { bands: null, reason: '' }
+  : bandsFromSamples(BASELINE_PER_CASE);
+const ROUTE_BANDS = ROUTE_BANDS_ARG || ROUTE_BAND_DERIVED.bands;
+const ROUTE_BANDS_SOURCE = ROUTE_BANDS_ARG ? 'args.route_bands'
+  : (ROUTE_BANDS ? 'derived from baseline_per_case[].samples_ms' : 'none');
+if (ROUTE_BANDS) {
+  const n = Object.keys(ROUTE_BANDS).length;
+  const span = Object.values(ROUTE_BANDS);
+  log(`Commit gate: PER-ROUTE, ${n} bands (${ROUTE_BANDS_SOURCE}), ` +
+      `${(Math.min(...span) * 100).toFixed(2)}%-${(Math.max(...span) * 100).toFixed(2)}% across routes. ` +
+      'A single-route mechanism is judged on its own route\'s absolute time; the suite geomean is ' +
+      'reported but does not decide.');
+} else {
+  // Never silent. A run that falls back to the suite gate is a run whose single-route wins are
+  // being divided by the route count, and that has to be visible in the log it produced.
+  log(`Commit gate: SUITE GEOMEAN at MIN_IMPROVE=${MIN_IMPROVE} -- the per-route gate is OFF because ` +
+      `no band table could be built (${ROUTE_BAND_DERIVED.reason || 'no reason recorded'}). ` +
+      'Every single-route win this run produces will reach the gate divided by the route count. To ' +
+      'fix it, have the benchmark engineer report samples_ms (>=3 primed repeats per case), or pass ' +
+      'args.route_bands.');
+}
 
 // ===========================================================================
 // PHASE: Baseline profile (Profile Engineer)
@@ -1985,6 +2113,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch, seed_dir: r.d.seed_dir,
+    // The incumbent as re-measured beside THIS candidate. Preferred over the stored `bestPerCase`
+    // at the gate below, because both arms then come from one session and the drift between
+    // sessions -- which is larger than the gains being judged -- cancels instead of being scored.
+    control_per_case: Array.isArray(r.ver.control_per_case) && r.ver.control_per_case.length
+      ? r.ver.control_per_case : null,
     // Carried for the per-route commit gate. The VERIFIER's value wins over the engineer's: its
     // per_case is the table the gate compares and the one that becomes `bestPerCase`.
     target_routes: Array.isArray(r.ver.target_routes) ? r.ver.target_routes
@@ -2042,17 +2175,40 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
   // SELECTION is unchanged: the winner is still the highest measured paired speedup. Only the
-  // COMMIT decision below can change, and only when a measured band table was supplied.
+  // COMMIT decision below can change, and only when a band table exists for it to read.
   const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
   let improved = legacyImproved;
   let routeVerdict = null;
   if (winner && ROUTE_BANDS) {
-    routeVerdict = routeGate(winner.per_case, bestPerCase, ROUTE_BANDS, {
+    // Prefer the incumbent arm re-measured in the candidate's OWN session. Both arms then come from
+    // one invocation, so the 1.5-3% a single unchanged tree wanders BETWEEN invocations cancels
+    // instead of being scored as the patch's effect -- and that drift is larger than the per-round
+    // gains being judged, which makes this the difference between a gate and a coin flip on a
+    // marginal round. Falling back to `bestPerCase` is still much better than the suite geomean, so
+    // its absence degrades the gate rather than disabling it; which side was used is always logged,
+    // because "compared across sessions" is a caveat a reader of the verdict has to be handed.
+    const sameSession = !!winner.control_per_case;
+    const incumbentSide = sameSession ? winner.control_per_case : bestPerCase;
+    routeVerdict = routeGate(winner.per_case, incumbentSide, ROUTE_BANDS, {
       targetRoutes: winner.target_routes,
     });
     if (routeVerdict.applicable) {
       improved = routeVerdict.accepted;
       log(`  [gate r${round}] per-route: ${routeVerdict.accepted ? 'ACCEPT' : 'REFUSE'} -- ${routeVerdict.reason}`);
+      log(`  [gate r${round}] incumbent side: ${sameSession
+        ? 'the verifier\'s SAME-SESSION control arm (both arms from one invocation)'
+        : 'the stored best_per_case from an earlier round -- NO same-session control was returned, so '
+          + 'this verdict carries the between-invocation drift (1.5-3% on an unchanged tree) that a '
+          + 'control arm would have cancelled. Read a marginal verdict with that in mind.'}`);
+      // A win banked without a declared target route is a win nobody attributed. Not refused --
+      // refusing correct work over a missing label is the defect this codebase keeps having to fix --
+      // but never silent either, because "the mechanism landed" and "something moved" are different
+      // claims and only one of them is evidence.
+      if (routeVerdict.accepted && !(Array.isArray(winner.target_routes) && winner.target_routes.length)) {
+        log(`  [gate r${round}] NOTE: accepted with no declared target_routes, so the improvement on ` +
+            `${routeVerdict.improved.join(', ') || '(none named)'} was not checked against a claimed ` +
+            'mechanism. An incidental gain and a realized mechanism are indistinguishable here.');
+      }
       if (routeVerdict.accepted !== legacyImproved) {
         // Logged on every disagreement, in both directions, so the change of gate is auditable
         // against the number every prior round was judged on rather than silently replacing it.
@@ -2065,8 +2221,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     } else {
       log(`  [gate r${round}] per-route gate NOT APPLICABLE (${routeVerdict.reason}); ` +
           'falling back to the legacy suite-geomean gate. A missing band must not stall the lane, ' +
-          'but it must not look like a pass either -- regenerate the table with ' +
-          'scripts/route_gate.py:bands_from_repeats() on this host/epoch.');
+          'but it must not look like a pass either -- have the benchmark engineer report ' +
+          'samples_ms (>=3 primed repeats per case), or pass args.route_bands.');
     }
   }
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
