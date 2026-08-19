@@ -505,3 +505,89 @@ to 16.44%"——这是 §13.6 的**加速比**那一列，而本模块在 §13.6
 
 **没有改**：band 的统计量、`MIN_REPEATS`、`MIN_BAND`、回归否决、`bandsFromSamples`、
 `benchmark_engineer.md` 的重复次数。判据在本 lane 跑完前保持冻结。
+
+---
+
+## 2026-08-19 16:5x — round 2 更正与补强：本轮**握着一个能过闸门的候选，却会两手空空**
+
+上一条我写 round 2 只看了那个 0.924。查 journal 才发现本轮有**两个** verified 候选，
+而且第三个 engineer 16:49 还在跑（`last_round` 仍是 1，本轮**尚未结算**）。
+用 baseline 自己的 5 次样本导出 band，对两个候选各判一次：
+
+```
+=== geomean=0.924  targets=['prefill_m2048_square']
+   REFUSE -- regressed past its own band on: decode_m2_square (+2.40% vs band 1.31%)
+   （11 条路里 10 条改善 +24%~+50%，见上一条的表）
+
+=== geomean=0.632  targets=['decode_m32_down','prefill_m2048_square','prefill_m512_up']
+   ACCEPT -- improved past band on: decode_m32_down (+12.92% vs band 3.05%),
+                                    prefill_m2048_square (+0.32% vs band 0.27%)
+     decode_m16_square    0.03342 -> 0.03094   +7.42%  band 1.29%  imp
+     decode_m2_square     0.02522 -> 0.02510   +0.48%  band 1.31%  flat
+     decode_m32_down      0.08932 -> 0.07778  +12.92%  band 3.05%  imp
+     decode_m64_square    0.14162 -> 0.14016   +1.03%  band 0.48%  imp
+     decode_m8_up         0.06130 -> 0.05938   +3.13%  band 0.54%  imp
+     decode_m96_up        0.13490 -> 0.13576   -0.64%  band 3.16%  flat
+     prefill_m1024_down   0.89757 -> 0.89143   +0.68%  band 0.89%  flat
+     prefill_m128_square  0.07480 -> 0.06866   +8.21%  band 4.53%  imp
+     prefill_m2048_square 0.63156 -> 0.62954   +0.32%  band 0.27%  imp
+     prefill_m256_down    0.27872 -> 0.27940   -0.24%  band 14.86% flat
+     prefill_m512_up      0.48512 -> 0.48400   +0.23%  band 1.29%  flat
+```
+
+### 结构性发现：闸门只作用于 `candidates[0]`，而选 winner 用的是另一套判据
+
+`kernel_lane.js:2358  const winner = candidates[0] || null;`
+候选按 geomean 排序，**只有排头那个进闸门**。于是 round 2 的结局是：
+
+- 0.924 geomean 更高 → 当选 winner → 被逐路闸门以 0.0006 ms 的回退否决；
+- 0.632 逐路闸门**判 ACCEPT**、无任何 route 越界回退 → 因为不是排头，**从未被送进闸门**。
+
+**本轮预计不提交任何东西，尽管手里就有一个通过闸门的候选。** 这不是 band 太紧造成的，
+band 换成 §13.6 那张宽表也一样：选 winner 用 suite geomean、判提交用逐路 band，
+两套判据不一致，而中间没有回退。L2359 的注释写 "SELECTION is unchanged: the winner is
+still the highest measured paired speedup. Only the ACCEPTANCE test changed."——
+话是对的，但**正因为只改了后半截**，才出现"选出来的过不了、能过的没被选"。
+以前两截用同一个 geomean，这个洞不存在；它是把闸门换成逐路制**引入的新失效模式**，
+不是老问题的遗留。
+
+修法很便宜且不动判据本身：候选按 geomean 降序**逐个**过闸门，取第一个 ACCEPT 的；
+全都不过再回落到现有的 suite 路径。语义上仍是"最好的那个能过的"，
+而不是"最好的那个，如果它恰好能过"。**本 lane 跑完前不改**——理由同上一条，
+判据和它的取用方式都是本 lane 的被测对象，这次两手空空就是它要产出的数据。
+
+### 对 0.632 那个 ACCEPT 本身的诚实标注
+
+它的 ACCEPT 建立在两条路上，其中 **prefill_m2048_square 的 +0.32% vs band 0.27% 不可信**——
+正是上一条记录的那个飞点抽样产物（同一条路 24 次重复测到 3.16%）。
+另一条 **decode_m32_down +12.92% vs band 3.05%** 是真的，无论用哪张 band 表都过。
+所以这个 ACCEPT 结论成立，但它只应被读作"decode_m32_down 上有一个真实改进"，
+而不是两条路都动了。engineer 自己的报告也是这么写的（"declared claim is supported on
+decode_m32_down only"，且主动拒绝把 target_routes 扩到没预测到的
+decode_m16_square/prefill_m128_square，"that would be a fabricated mechanism"）——
+这个自我约束是对的，记一笔。
+
+### round 1 的另一半账：两个方向死在我后来修好的那个扫描器上
+
+`STATE.json` ledger 显示 round 1 三个方向里有**两个**是 `policy_failed`、`actual: null`：
+- `r1_d0`（macro-tile register blocking，claimed 0.6049）—— 步骤 2c，
+  `lds_cast_alignment.py` exit 2，4 条 unparseable，findings **空**，原因是补丁自己的
+  `shortx4_t` typedef 不在闭表 `CAST_WIDTH` 里；
+- `r1_d1`（staging pipeline，claimed 0.8292）—— 同样步骤 2c exit 2，
+  原因是补丁把三个 typed `__shared__` 换成一个 `__shared__ __align__(16) char smem[]` 竞技场，
+  `char` 不在 `ELEM_SIZE` 里。
+
+两条都**没有拿过 GPU 锁，一次都没测过**。这正是 `8efab858` 修的两个缺陷
+（文件内 vector typedef 解析 + 字节型元素类型入表），修复发生在 round 1 结算之后，
+所以 round 1 白白丢了两个方向、只剩 `r1_d2` 一个候选。round 2 起生效：
+本轮 policy_failed 归零，两个候选都走完了验证。**代价已经付过一次，记在这里免得被当成偶然。**
+
+### 本 lane 当前状态
+
+| 项 | 值 |
+|---|---|
+| cumulative | **0.6114**（round 1 的 `r1_d2`） |
+| canonical | `8d9bee7 round 1 winner: engineer r1_d2 (0.61x)` |
+| last_round | 1（round 2 尚未结算，第三个 engineer 在跑） |
+| 已提交轮次 | 1 / budget 12 |
+| 测试 | 875 全绿 |
