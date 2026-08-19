@@ -2390,8 +2390,22 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // in the wrong direction is refused however good its suite number looks, because that number is
       // an average and the regression is a fact about a route.
       //
-      // This also means the change of default cannot make any run STRICTER than it was, which
-      // matters: the entire complaint against the old gate was that it refused real work.
+      // So the union WIDENS what commits, but the veto NARROWS it, and the veto is not subject to
+      // the union -- which means turning this default on CAN make a run stricter. An earlier version
+      // of this comment claimed it could not; wave coldstart_newgate_20260819 round 2 falsified that
+      // in the first round the gate was ever reachable. A candidate at 0.6114 -> 0.924 improved ten
+      // of eleven routes by +24%..+50% (prefill_m2048_square +46.66%, a 0.294 ms gain) and was
+      // refused on decode_m2_square giving back 2.40%, i.e. 0.0006 ms. `legacyImproved` was true, so
+      // with ROUTE_BANDS off that round commits and with it on it does not.
+      //
+      // Whether that refusal is CORRECT is a question about the band, not about this union. The band
+      // is a full min-max spread over the baseline's `samples_ms`, and on that wave n was 5; a
+      // 24-repeat calibration of the same route (PIPELINE_PROGRESS_GREEDY.md 13.6, absolute-us
+      // column) put its spread at 11.55% where n=5 gave 1.31%. At n=5 min-max is close to a
+      // Bernoulli draw on whether a flyer landed in the sample, so a route can be handed a band far
+      // tighter than its real noise and veto on it. Raise the baseline repeat count before reading a
+      // single-route veto as a real regression. Do not "fix" it by dropping the veto: an averaged
+      // suite number cannot see a route-local regression at all, which is why the veto is here.
       const suiteSaysYes = legacyImproved && !routeVerdict.regressed.length;
       improved = routeVerdict.accepted || suiteSaysYes;
       log(`  [gate r${round}] per-route: ${routeVerdict.accepted ? 'ACCEPT' : 'REFUSE'} -- ${routeVerdict.reason}`);
