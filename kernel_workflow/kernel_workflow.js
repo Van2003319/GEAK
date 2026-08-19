@@ -28,6 +28,43 @@ if (!WORKFLOW_DIR) {
 const WORKER = String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() || 'optimize';
 
+// Every argument accepted at this entry point: the four the dispatcher owns, plus every argument the
+// WORKER reads (because `mode=optimize|author` forwards them all through `{...A}` below, and
+// `mode=bakeoff` forwards a chosen subset per lane).
+//
+// This has to exist HERE and not only in the worker. On the pass-through path the worker's own check
+// would catch a typo -- but on `mode=bakeoff` the dispatcher hand-builds each lane's arguments, so a
+// misspelled knob is dropped by the dispatcher and never reaches a worker at all: nothing downstream
+// can see a key that was discarded upstream. This is the same asymmetry that let the bake-off path
+// drop every gate knob unnoticed.
+//
+// `test_mode_dispatch.js` asserts this set is a SUPERSET of the worker's, derived from the worker's
+// source, so the two lists cannot drift into disagreeing about what is legal.
+const KNOWN_ARGS = new Set([
+  // Dispatcher-owned.
+  'backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script',
+  // Worker arguments, forwarded.
+  'kernel_path', 'workflow_dir', 'exp_root', 'eval_dir', 'task', 'mode', 'target_language',
+  'op_spec', 'budget', 'deep_cost', 'min_improve', 'candidate_floor', 'progress_delta',
+  'max_no_improve', 'route_bands', 'gpu_ids', 'gpu_mode', 'gpu_lock_env', 'apply_to_original',
+  'state_dir', 'incremental_analyze', 'isa_evidence', 'compiler_source_dir',
+  'workload_spec_path', 'workload', 'perf_knowledge_dir', 'use_expert_skills', 'expert_skills_dir',
+  'shared_kb', 'global_kb', 'e2e_feedback', 'harness_addendum',
+  'dra_enabled', 'dra_max_questions', 'dra_blindspot', 'dra_max_blindspots',
+  'agent_timeout_ms', 'agent_retries',
+]);
+{
+  const unknown = Object.keys(A).filter(k => !KNOWN_ARGS.has(k));
+  if (unknown.length) {
+    throw new Error(
+      `args contains ${unknown.length} key(s) no part of this workflow reads: ${unknown.map(k => `"${k}"`).join(', ')}. ` +
+      'An unrecognized argument is silently ignored, so a misspelled knob is indistinguishable from ' +
+      'an intended default -- and on mode=bakeoff it is dropped here and never reaches a lane, where ' +
+      'nothing downstream could report it. Refused before any agent or GPU work. Accepted arguments: ' +
+      [...KNOWN_ARGS].sort().join(', ') + '.');
+  }
+}
+
 // ===========================================================================
 // SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
 // the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
@@ -341,6 +378,46 @@ log(`baseline ${bake.best_known_ms != null ? bake.best_known_ms + ' ms' : '(unkn
 // baseline denominator => directly comparable speedups (anti-cheating invariant).
 // ===========================================================================
 phase('Bakeoff');
+// The knobs a bake-off lane must inherit from the caller. `mode=optimize` reaches the worker through
+// `{...A}` and gets everything; this path builds its argument object by hand and therefore DROPPED
+// every one of these, so each lane silently reverted to defaults -- a bake-off judged its languages
+// at MIN_IMPROVE=0.02 with no band table and no ISA layer however the dispatcher was invoked. The
+// asymmetry was invisible precisely because the pass-through path is the one anybody tests.
+//
+// Conditional spread, so an unset knob adds NOTHING and a bake-off that passes none of them behaves
+// exactly as before.
+//
+// Deliberately NOT forwarded, and each for a reason rather than by omission:
+//   state_dir  -- one directory shared by N language lanes would have every lane seed from, and
+//                 write over, one another's cumulative best. A bake-off is a cold comparison
+//                 between languages; per-lane continuation would need per-lane state dirs.
+//   eval_dir   -- the dispatcher assigns each lane its own `exp_root` below; a single override would
+//                 collapse all lanes into one output directory.
+//   incremental_analyze -- means "this is a continuation", which a fresh bake-off lane never is.
+//   apply_to_original   -- fixed to 'false' here on purpose: the dispatcher applies the WINNER after
+//                 ranking, so a lane that wrote back would pre-empt the comparison.
+const LANE_INHERITED = {
+  ...(A.min_improve != null ? { min_improve: A.min_improve } : {}),
+  ...(A.candidate_floor != null ? { candidate_floor: A.candidate_floor } : {}),
+  ...(A.progress_delta != null ? { progress_delta: A.progress_delta } : {}),
+  ...(A.max_no_improve != null ? { max_no_improve: A.max_no_improve } : {}),
+  ...(A.route_bands != null ? { route_bands: A.route_bands } : {}),
+  ...(A.deep_cost != null ? { deep_cost: A.deep_cost } : {}),
+  ...(A.isa_evidence != null ? { isa_evidence: A.isa_evidence } : {}),
+  ...(A.compiler_source_dir != null ? { compiler_source_dir: A.compiler_source_dir } : {}),
+  ...(A.gpu_lock_env != null ? { gpu_lock_env: A.gpu_lock_env } : {}),
+  ...(A.harness_addendum != null ? { harness_addendum: A.harness_addendum } : {}),
+  ...(A.agent_timeout_ms != null ? { agent_timeout_ms: A.agent_timeout_ms } : {}),
+  ...(A.agent_retries != null ? { agent_retries: A.agent_retries } : {}),
+  ...(A.dra_enabled != null ? { dra_enabled: A.dra_enabled } : {}),
+  ...(A.dra_max_questions != null ? { dra_max_questions: A.dra_max_questions } : {}),
+  ...(A.dra_blindspot != null ? { dra_blindspot: A.dra_blindspot } : {}),
+  ...(A.dra_max_blindspots != null ? { dra_max_blindspots: A.dra_max_blindspots } : {}),
+};
+if (Object.keys(LANE_INHERITED).length) {
+  log(`each lane inherits: ${Object.entries(LANE_INHERITED)
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? '<table>' : v}`).join(' ')}`);
+}
 const sem = makeSem(GPU_LIST);
 const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   try {
@@ -352,6 +429,7 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+      ...LANE_INHERITED,
     });
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);

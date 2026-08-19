@@ -286,6 +286,60 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       'all 3 candidates still reported for transparency', JSON.stringify(r && (r.candidates || []).length));
   }
 
+  console.log('\n# L. the dispatcher accepts exactly what it can forward, and bake-off lanes inherit the gate knobs');
+  {
+    const LANE = path.join(WF_DIR, 'kernel_lane.js');
+    const laneSrc = fs.readFileSync(LANE, 'utf8');
+    const setOf = (src, label) => {
+      const m = src.match(/const KNOWN_ARGS = new Set\(\[[\s\S]*?\n\]\);/);
+      if (!m) throw new Error(`could not extract KNOWN_ARGS from ${label}`);
+      return new Function(`${m[0]}\nreturn KNOWN_ARGS;`)();
+    };
+    const dispatcherArgs = setOf(BODY, 'kernel_workflow.js');
+    const laneArgs = setOf(laneSrc, 'kernel_lane.js');
+
+    // The dispatcher hands the worker every argument on the pass-through path, so anything the
+    // worker accepts must be legal here too -- otherwise this entry point refuses an argument the
+    // thing it delegates to was built to read.
+    const missing = [...laneArgs].filter(k => !dispatcherArgs.has(k)).sort();
+    ok(missing.length === 0,
+      'the dispatcher accepts every argument the worker accepts (superset), so the pass-through ' +
+      'path cannot refuse a legal worker knob', missing.join(', '));
+
+    // And the reverse direction is the one the worker already tolerates by name: the dispatcher's
+    // four private keys ride along through `{...A}` and must not make the worker throw.
+    const laneReads = [...new Set((laneSrc.match(/\bA\.[a-z_][a-z0-9_]*/g) || []).map(s => s.slice(2)))];
+    for (const k of ['backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script']) {
+      ok(dispatcherArgs.has(k) && laneArgs.has(k) && !laneReads.includes(k),
+        `"${k}" is dispatcher-owned: accepted by both, read only by the dispatcher`);
+    }
+
+    // The bake-off path builds its lane arguments by hand and used to drop all of these, so a
+    // bake-off judged its languages at MIN_IMPROVE=0.02 with no bands and no ISA layer no matter how
+    // the dispatcher was called. Pinned by name because the failure was one of OMISSION, and the
+    // only thing that catches an omission is naming what has to be present.
+    for (const k of ['min_improve', 'candidate_floor', 'progress_delta', 'max_no_improve',
+                     'route_bands', 'deep_cost', 'isa_evidence', 'gpu_lock_env',
+                     'harness_addendum', 'agent_timeout_ms', 'agent_retries',
+                     'dra_enabled', 'dra_max_questions', 'dra_blindspot', 'dra_max_blindspots',
+                     'compiler_source_dir']) {
+      ok(new RegExp(`\\.\\.\\.\\(A\\.${k} != null \\? \\{ ${k}: A\\.${k} \\} : \\{\\}\\)`).test(BODY),
+        `a bake-off lane inherits ${k} from the caller`);
+    }
+    ok(/\.\.\.LANE_INHERITED,/.test(BODY),
+      'the inherited block is actually spread into the lane invocation, not merely computed');
+    // Conditional spread, so a bake-off passing none of them is byte-identical to the old behavior.
+    ok(!/min_improve: MIN_IMPROVE/.test(BODY),
+      'an unset knob adds nothing rather than forwarding a resolved default -- a default forwarded ' +
+      'as an explicit value would make the lane report it as caller-supplied');
+    // The three that must NOT be forwarded, each pinned so a later "completeness" edit cannot add
+    // them without tripping this.
+    for (const k of ['state_dir', 'eval_dir', 'incremental_analyze']) {
+      ok(!new RegExp(`\\.\\.\\.\\(A\\.${k} != null`).test(BODY),
+        `${k} is deliberately NOT forwarded to a bake-off lane`);
+    }
+  }
+
   console.log(failures === 0
     ? '\nPASS: mode dispatch + bake-off lane routing behave as specified.'
     : `\nFAILED: ${failures} assertion(s).`);

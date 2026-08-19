@@ -719,6 +719,66 @@ console.log('\n# the gate compares against a SAME-SESSION control when the verif
     'not thrown away');
 }
 
+console.log('\n# an argument that does not arrive must not look like a chosen default, executed');
+{
+  // Two different failures, two different mechanisms, and neither covers the other:
+  //  * a MISSPELLED knob is silently dropped -- `search_strategy: "greedy"` sat in this lane's
+  //    canonical invocation for six waves after the QD search was deleted, matching nothing;
+  //  * an OMITTED knob takes its default -- one wave was retyped without `min_improve: 0.005`, ran
+  //    at the 0.02 default, and refused a verified +1.58% stack. No whitelist can see that one.
+  // So: a throw for the first, an effective-config echo for the second.
+  const block = grab(/const KNOWN_ARGS = new Set\(\[[\s\S]*?\n\]\);\n/, 'KNOWN_ARGS');
+  const { KNOWN_ARGS } = new Function(`${block}\nreturn {KNOWN_ARGS};`)();
+
+  // Completeness, derived from the source rather than restated: every `A.<key>` the worker actually
+  // reads must be in the set, or a legitimate caller gets thrown at. This is the assertion that
+  // keeps the list honest as the worker grows -- a restated list would just be a second thing to
+  // forget to update.
+  const readKeys = [...new Set((src.match(/\bA\.[a-z_][a-z0-9_]*/g) || [])
+    .map(s => s.slice(2)))].sort();
+  const notListed = readKeys.filter(k => !KNOWN_ARGS.has(k));
+  ok(notListed.length === 0,
+    'every argument the worker reads is in KNOWN_ARGS -- otherwise the check refuses a real caller',
+    notListed.join(', '));
+
+  // The dispatcher spreads its OWN args into the worker on the optimize path (`{...A}`), so its
+  // four private keys reach this check and must be tolerated. Without them, `mode=optimize` throws
+  // for anyone who also named a bake-off option.
+  for (const k of ['backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script']) {
+    ok(KNOWN_ARGS.has(k), `the dispatcher's forwarded key "${k}" is accepted, not refused`);
+  }
+  // Everything e2e_workflow.js passes when it calls this worker directly.
+  for (const k of ['kernel_path', 'workflow_dir', 'mode', 'target_language', 'op_spec', 'budget',
+                   'max_no_improve', 'gpu_ids', 'state_dir', 'shared_kb', 'global_kb',
+                   'incremental_analyze', 'e2e_feedback', 'task', 'exp_root', 'apply_to_original',
+                   'use_expert_skills', 'expert_skills_dir', 'perf_knowledge_dir']) {
+    ok(KNOWN_ARGS.has(k), `e2e's argument "${k}" is accepted`);
+  }
+  // The dead argument that motivated this, pinned as still dead: if a `search_strategy` is ever
+  // reintroduced it must be READ, not merely tolerated.
+  ok(!KNOWN_ARGS.has('search_strategy') && !/A\.search_strategy/.test(src),
+    'search_strategy is neither read nor silently accepted -- it now throws instead of doing nothing');
+
+  ok(/An unrecognized argument is silently ignored/.test(src) &&
+     /Accepted arguments: /.test(src),
+    'the refusal explains WHY and lists the accepted set, so the fix does not need the source');
+  ok(/did you mean \$\{near\.join\(', '\)\}\?/.test(src),
+    'the refusal suggests near misses, which is what makes a typo self-correcting');
+
+  // The echo: it has to name the knobs whose SILENT default costs a result.
+  ok(/Effective run configuration \(the knobs that decide what this run ADMITS\):/.test(src),
+    'the effective configuration is echoed before the first agent call');
+  for (const k of ['min_improve', 'candidate_floor', 'progress_delta', 'max_no_improve', 'budget',
+                   'isa_evidence']) {
+    ok(new RegExp(`shown\\('${k}'`).test(src), `the echo names ${k} and its effective value`);
+  }
+  ok(/\$\{A\[key\] == null \? ' \(default\)' : ''\}/.test(src),
+    'the echo marks which values came from a DEFAULT rather than from args -- the distinction the ' +
+    'min_improve incident turned on');
+  ok(/state_dir=\$\{STATE_DIR \|\| '\(none -- this is a COLD start, not a continuation\)'\}/.test(src),
+    'the echo says out loud when a run is a cold start, which a resumed lane must never be silently');
+}
+
 console.log('\n# the roadmap profile may not publish a ceiling it did not earn -- (89)');
 {
   const block = grab(/const SOL_SHAPED_KEY = [\s\S]*?const profileSolStrip = \(rep, where\) => \{[\s\S]*?\n\};\n/,

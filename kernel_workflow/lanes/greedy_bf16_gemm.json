@@ -1,0 +1,27 @@
+{
+  "_lane": "greedy_coldstart_20260817 -- the greedy cold-start control run on dense_bf16_gemm_fused",
+  "_protocol": "PIPELINE_PROGRESS_GREEDY.md section 2. These arguments are the EXPERIMENT DEFINITION: changing one without recording it in that file breaks comparability with the QD lane, which is the only thing this run exists to measure against.",
+  "_why_this_file_exists": "Wave 8 was launched from a hand-retyped copy of section 2 that dropped `min_improve`. It therefore ran at the 0.02 default and refused a verified, correctness-passing, policy-clean +1.58% integrated stack (absolute 1.42619 vs the 1.40084 incumbent) -- the largest result of two days of GPU time. An argument that is retyped is an argument that can be dropped, and a dropped argument is indistinguishable from a chosen default once the run has started. Validate with: python3 kernel_workflow/scripts/lane_args.py --check kernel_workflow/lanes/greedy_bf16_gemm.json",
+  "_require": {
+    "min_improve": 0.005,
+    "mode": "optimize",
+    "budget": 12,
+    "state_dir": "/home/yxh/GEAK/exp/state_greedy_coldstart_20260817"
+  },
+  "_note_min_improve": "0.005 is a RECORDED, REVERSIBLE DEVIATION from the 0.02 default, registered in PIPELINE_PROGRESS_GREEDY.md as a deliberate departure. It is a control-run parameter: do not change it mid-experiment. It matters less than it did now that the per-route band gate is the default path, but it is still the fallback threshold whenever no band table can be built.",
+  "_note_state_dir": "Its presence is what makes a wave a CONTINUATION. Launching without it is a cold reseed from the original kernel, which is the failure the user's standing 'do not start over' instruction guards against and which the lane's own resume guard caught once (see the .discarded_seeded_from_orig_ directory under exp/).",
+  "_note_gpu_ids": "Lanes 0 and 1 are excluded on purpose: this box shares GPUs with other tenants and gpu_lock.sh resolves a comma spec by flocking whichever listed lane is free AND idle.",
+  "_not_passed_on_purpose": {
+    "route_bands": "Omitted so the lane DERIVES per-route bands from this wave's own baseline repeats, on the box that will judge the candidates. Passing a table here would pin the gate to another epoch's noise -- which is how the one file on disk (route_bands_gfx942_epochQ.json) went six epochs stale.",
+    "isa_evidence": "Omitted = 'observe', the default. Do not set 'gate' until the new-symbol pairing artefact is fixed: a patch that ADDS a kernel symbol reads as mechanism_verdict=refuted by construction, and adding a specialised instantiation is this lane's most common winning shape.",
+    "search_strategy": "REMOVED. It matched nothing after the QD search was deleted and now throws. Greedy is the only strategy."
+  },
+  "kernel_path": "/home/yxh/GEAK/examples/tasks/dense_bf16_gemm_fused",
+  "workflow_dir": "/home/yxh/GEAK/kernel_workflow",
+  "mode": "optimize",
+  "budget": 12,
+  "min_improve": 0.005,
+  "gpu_ids": "2,3,4,5,6,7",
+  "state_dir": "/home/yxh/GEAK/exp/state_greedy_coldstart_20260817",
+  "task": "cold-start greedy control run against the QD lane; target the 11-case suite geomean vs direct rocblas_gemm_ex"
+}

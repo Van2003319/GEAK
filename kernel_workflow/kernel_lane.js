@@ -33,6 +33,70 @@ if (!WORKFLOW_DIR) {
   throw new Error('args.workflow_dir is required: absolute path to the directory containing ' +
     'kernel_workflow.js, roles/, knowledge/, scripts/ (i.e. the dirname of this script).');
 }
+// Every argument this worker reads, plus the four the DISPATCHER owns and forwards verbatim through
+// its `{...A}` optimize path (`backends`, `enable_fp8`, `e2e_workflow_dir`, `kernel_lane_script`) --
+// accepted here and unused, because refusing them would break `mode=optimize` for any caller that
+// also named a bake-off option.
+//
+// Why an unknown key is a HARD ERROR rather than a shrug. Every knob below changes what the run
+// admits, and a knob that does not arrive is indistinguishable from a knob whose default was
+// intended. `search_strategy: "greedy"` sat in this lane's canonical invocation for six waves after
+// the QD search was deleted, matching nothing, doing nothing, and reported by nothing -- so the
+// invocation looked like it was selecting a strategy while the argument was inert. That is the same
+// shape as the `.replace()` whose old-string was a guess (finding W-3): an edit that can quietly not
+// happen. This throw costs nothing, because it fires before the first agent call and before any GPU
+// work, and it is the only point in the run where a typo is still cheap.
+//
+// It cannot catch an OMITTED key -- nothing can, from inside. That is what the effective-config echo
+// at the Setup phase is for, and why the launch arguments belong in a committed file rather than in
+// prose that gets retyped every wave.
+const KNOWN_ARGS = new Set([
+  'kernel_path', 'workflow_dir', 'exp_root', 'eval_dir', 'task', 'mode', 'target_language',
+  'op_spec', 'budget', 'deep_cost', 'min_improve', 'candidate_floor', 'progress_delta',
+  'max_no_improve', 'route_bands', 'gpu_ids', 'gpu_mode', 'gpu_lock_env', 'apply_to_original',
+  'state_dir', 'incremental_analyze', 'isa_evidence', 'compiler_source_dir',
+  'workload_spec_path', 'workload', 'perf_knowledge_dir', 'use_expert_skills', 'expert_skills_dir',
+  'shared_kb', 'global_kb', 'e2e_feedback', 'harness_addendum',
+  'dra_enabled', 'dra_max_questions', 'dra_blindspot', 'dra_max_blindspots',
+  'agent_timeout_ms', 'agent_retries',
+  // Dispatcher-owned, forwarded verbatim, unused by the worker.
+  'backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script',
+]);
+{
+  const unknown = Object.keys(A).filter(k => !KNOWN_ARGS.has(k));
+  if (unknown.length) {
+    // Levenshtein for ordinary typos, first-token match for a wrong NAME for the right idea
+    // (`isa_mode` for `isa_evidence`) -- which edit distance alone ranks badly.
+    const dist = (a, b) => {
+      const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+      for (let i = 1; i <= a.length; i++) {
+        let diag = prev[0]; prev[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+          const tmp = prev[j];
+          prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+          diag = tmp;
+        }
+      }
+      return prev[b.length];
+    };
+    const suggest = (k) => {
+      const tok = k.split('_')[0];
+      const near = [...KNOWN_ARGS]
+        .map(c => ({ c, d: dist(k, c), tok: c.split('_')[0] === tok }))
+        .filter(x => x.tok || x.d <= 3)
+        .sort((x, y) => (x.tok === y.tok ? x.d - y.d : (x.tok ? -1 : 1)))
+        .slice(0, 3).map(x => x.c);
+      return near.length ? ` -- did you mean ${near.join(', ')}?` : '';
+    };
+    throw new Error(
+      `args contains ${unknown.length} key(s) this workflow does not read: ` +
+      unknown.map(k => `"${k}"${suggest(k)}`).join('; ') +
+      '. An unrecognized argument is silently ignored, which makes a misspelled knob ' +
+      'indistinguishable from an intended default -- so it is refused here, before any agent or GPU ' +
+      'work, where it is still free to fix. Accepted arguments: ' +
+      [...KNOWN_ARGS].sort().join(', ') + '.');
+  }
+}
 // EXP_ROOT = where timestamped run dirs are written. Default: a sibling "exp/" next to the
 // kernel_workflow dir (…/<parent>/kernel_workflow -> …/<parent>/exp). Override with args.exp_root.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
@@ -500,8 +564,11 @@ const ISA_MODE = ISA_MODE_RAW === '' || !ISA_MODES.includes(ISA_MODE_RAW)
 // A misspelled mode resolves to the default and SAYS SO. It deliberately does not
 // resolve to `off`: `isa_evidence=gat` silently becoming "no ISA layer at all" is the
 // same silent-off failure the TARGET_LANGUAGE whitelist had, and a typo is exactly
-// how it would happen. Emitted at the first log point below, because `log` is not
-// available this early in the file.
+// how it would happen. Emitted with the effective-config echo at the Setup phase,
+// because `log` is not available this early in the file.
+//
+// The unknown-argument check above cannot cover this case: `isa_evidence` is a KNOWN key here, so
+// only its VALUE is wrong, and a value can be defaulted where a key cannot.
 const ISA_MODE_WARNING = (ISA_MODE_RAW !== '' && !ISA_MODES.includes(ISA_MODE_RAW))
   ? `isa_evidence="${ISA_MODE_RAW}" is not one of ${ISA_MODES.join('|')}; using `
     + `"${ISA_MODE}". If you meant to enforce, pass "gate"; nothing is gated on this run.`
@@ -1059,6 +1126,37 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // PHASE: Setup
 // ===========================================================================
 phase('Setup');
+// The EFFECTIVE value of every knob that decides what this run admits, with `(default)` marked, and
+// emitted before the first agent call.
+//
+// This exists because of a specific, expensive failure that no whitelist can catch. This lane's
+// protocol pins `min_improve: 0.005`; one wave's invocation was retyped without that key, so the
+// wave ran at the 0.02 default and refused a verified, correctness-passing, policy-clean +1.58%
+// integrated stack -- the largest result of two days' work. Nothing in the run said which threshold
+// was live, so the omission was only recoverable afterwards by reading the refusal arithmetic
+// backwards. An argument that did not arrive looks exactly like one whose default was intended, and
+// the only cure is to print what is actually in force.
+//
+// Cheap, unconditional, and every value here is one a reader can check against the protocol they
+// meant to run -- which is the whole point: the log has to be falsifiable against the intent.
+{
+  const shown = (key, value, extra) =>
+    `${key}=${value}${A[key] == null ? ' (default)' : ''}${extra ? ` ${extra}` : ''}`;
+  log('Effective run configuration (the knobs that decide what this run ADMITS):');
+  log(`  ${shown('budget', BUDGET)}  ${shown('deep_cost', DEEP_COST)}  ` +
+      `${shown('max_no_improve', MAX_NO_IMPROVE)}`);
+  log(`  ${shown('min_improve', MIN_IMPROVE)}  ${shown('candidate_floor', CANDIDATE_FLOOR)}  ` +
+      `${shown('progress_delta', PROGRESS_DELTA)}` +
+      `${A.progress_delta == null ? ' (= min_improve)' : ''}`);
+  log(`  ${shown('isa_evidence', ISA_MODE)}  ${shown('mode', MODE)}  ` +
+      `${shown('gpu_mode', GPU_MODE)}  gpu_ids=${GPU_IDS}`);
+  log(`  route_bands=${ROUTE_BANDS_ARG ? `${Object.keys(ROUTE_BANDS_ARG).length} supplied via args`
+    : 'not supplied -- will be DERIVED from the baseline repeats after the Benchmark phase'}`);
+  log(`  state_dir=${STATE_DIR || '(none -- this is a COLD start, not a continuation)'}`);
+  log(`  workload_aligned=${HAS_WORKLOAD ? 'yes (PRIMARY metric is the time-weighted ratio-of-sums)'
+    : 'no (PRIMARY metric is the unweighted geomean)'}`);
+  if (ISA_MODE_WARNING) log(`  [isa] WARNING: ${ISA_MODE_WARNING}`);
+}
 const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, TASK_DIR: KERNEL_PATH_ORIG,
@@ -1073,7 +1171,6 @@ const CANONICAL = setup.workspace;       // canonical current-best workspace (ad
 const KERNEL_NAME = setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
-if (ISA_MODE_WARNING) log(`  [isa] WARNING: ${ISA_MODE_WARNING}`);
 
 // ---------------------------------------------------------------------------
 // Enforce a FROZEN REAL-ONLINE BASELINE in BOTH modes (author AND same-language

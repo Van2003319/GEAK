@@ -59,7 +59,13 @@ JS_TESTS = {
     # could only be hosted once `run_body` learned to pump the microtask queue
     # and to refuse a suite that never finishes -- before that it "passed" after
     # printing a single section header.
-    "test_mode_dispatch.js": (WORKFLOW,),
+    #
+    # It reads the LANE too, and not incidentally: the dispatcher's accepted-argument
+    # set has to be a superset of the worker's, and that is only checkable by
+    # deriving the worker's set from the worker's own source. A guard that could
+    # read only the dispatcher would have to restate the worker's arguments, which
+    # is the drift it exists to prevent.
+    "test_mode_dispatch.js": (WORKFLOW, LANE),
     # The two e2e guards. They live in a DIFFERENT scripts directory, which is
     # the only reason they were missed twice: a runner that resolves every test
     # against its own directory cannot even name them. Registering them is the
