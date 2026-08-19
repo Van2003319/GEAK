@@ -591,3 +591,11 @@ decode_m16_square/prefill_m128_square，"that would be a fabricated mechanism"�
 | last_round | 1（round 2 尚未结算，第三个 engineer 在跑） |
 | 已提交轮次 | 1 / budget 12 |
 | 测试 | 875 全绿 |
+
+**一个顺带确认（免得下一个人白担心）**：这次 REFUSE **不会**烧掉停滞预算。
+`suiteProgress` 判的是 `winner.geomean > bestSeen * (1+PROGRESS_DELTA)`，
+用的是 winner 的 geomean 而**不是**是否提交：0.924 > 0.6114×1.005 成立，
+所以本轮记为"搜索在推进"，`MAX_NO_IMPROVE`（默认 2）不增加。
+也就是说 wave 不会因为闸门连续拒绝而提前停摆——它会一直跑到 budget 12。
+`candidates[0]` 之后没有任何回落到次名的路径（L2357-2358 排序取头，无循环），
+所以上面那条"握着能过的候选却不提交"没有被别处兜住。
