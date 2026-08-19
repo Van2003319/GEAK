@@ -1,0 +1,87 @@
+{
+  "policy": "Research archive only. Active candidates may not call AMD high-performance libraries; rocBLAS remains only in the frozen baseline/oracle.",
+  "retained": [
+    {
+      "id": "qd_m1_vectorized",
+      "active_source": "src/dense_bf16_gemm.hip",
+      "origin": "/home/yxh/GEAK/exp/qd_bf16_gemm_budget10_gpu2/team_dense_bf16_gemm_20260813_052022_72455_8555/dense_bf16_gemm/final_patch.diff",
+      "mechanism": "uint2 loads plus four FP32 accumulator chains",
+      "status": "needs_retest_with_primed_timer"
+    }
+  ],
+  "experimental_custom_kernels": [
+    {
+      "id": "skinny_rocwmma_sync",
+      "origin": "/home/yxh/GEAK/exp/qd_bf16_gemm_budget10_gpu2/team_dense_bf16_gemm_20260813_052022_72455_8555/dense_bf16_gemm/round_1/engineer_1/workspace/src/decode_skinny_bf16.hip",
+      "status": "correct_standalone_but_slow_and_not_production_wired"
+    },
+    {
+      "id": "prefill_rocwmma_32x32x32",
+      "origin": "/home/yxh/GEAK/exp/qd_bf16_gemm_budget10_gpu2/team_dense_bf16_gemm_20260813_052022_72455_8555/dense_bf16_gemm/round_1/engineer_2/workspace/src/prefill_mfma_bf16.hip",
+      "status": "correct_standalone_but_slow"
+    }
+  ],
+  "continuation_20260813": {
+    "measurement": "GPU 2, dispatch-primed timer, all_primed=true",
+    "baseline_seed_geomean": 0.2595892076413767,
+    "active_winner": {
+      "id": "candidate_09_stage64_pad68",
+      "source": "research/retained/candidate_09_stage64_pad68.hip",
+      "geomean_speedup_vs_rocblas": 0.4352138366913456,
+      "relative_speedup_vs_library_free_seed": 1.676548309,
+      "mechanism": "M<32 selects 16x16 row tiles; larger shapes use two M fragments per wave; K stage expands from 32 to 64; LDS stride is padded to 68 BF16 values"
+    },
+    "candidates": [
+      {"id": 1, "route": "two M fragments per wave", "geomean": 0.2819002205736065, "relative_to_seed": 1.08594738253931, "status": "superseded"},
+      {"id": 2, "route": "two M fragments plus LDS stride 40", "geomean": 0.3478692274964456, "relative_to_seed": 1.3400758477487555, "status": "superseded"},
+      {"id": 3, "route": "2x2 M/N fragments per wave plus stride 40", "geomean": 0.30968290921187347, "status": "rejected_regression"},
+      {"id": 4, "route": "shape partition: 16-row tile below M32, 32-row otherwise; stride 40", "geomean": 0.3662008729829227, "status": "superseded"},
+      {"id": 5, "route": "shape partition plus LDS stride 36", "geomean": 0.3911458481963423, "status": "retained"},
+      {"id": 6, "route": "shape partition plus LDS stride 34", "geomean": 0.3686929319702413, "status": "rejected_regression"},
+      {"id": 7, "route": "shape partition plus LDS stride 38", "geomean": 0.3705856050814307, "status": "rejected_regression"},
+      {"id": 8, "route": "four M fragments per wave for M>=128", "geomean": 0.32545848915863707, "status": "rejected_regression"},
+      {"id": 9, "route": "K stage 64 plus LDS stride 68", "geomean": 0.4352138366913456, "relative_to_seed": 1.676548309, "status": "retained"},
+      {"id": 10, "route": "K stage 64 plus LDS stride 72", "geomean": 0.3161976620300917, "status": "rejected_regression"}
+    ]
+  },
+  "forbidden_library_routes": [
+    {
+      "id": "rocblas_runtime_solution_cache",
+      "origin": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_114947_25502_24287/dense_bf16_gemm/optimized",
+      "historical_score": 1.210824,
+      "reason": "candidate calls private rocBLAS/Tensile solution APIs",
+      "execution_policy": "do_not_build_do_not_run_do_not_seed"
+    },
+    {
+      "id": "hipblaslt_exact_shape_cache",
+      "origin": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_131559_36792_20083/dense_bf16_gemm/optimized",
+      "historical_score": 1.067355,
+      "reason": "candidate calls hipBLASLt",
+      "execution_policy": "do_not_build_do_not_run_do_not_seed"
+    },
+    {
+      "id": "private_tensile_qd_cell",
+      "origin": "/home/yxh/GEAK/exp/qd_bf16_gemm_budget10_gpu2/team_dense_bf16_gemm_20260813_052022_72455_8555/dense_bf16_gemm/qd_archive/cells/a2-m1-e2",
+      "reason": "private rocBLAS/Tensile solution indices and cache-sensitive ranking",
+      "execution_policy": "do_not_import",
+      "warm_start_probe_20260813": "rejected by current candidate policy before execution; historical cells are mixed candidate+rocBLAS artifacts and are not valid pure-custom seeds"
+    }
+  ],
+  "closed_or_rejected": [
+    "scalar FMA split-K",
+    "guessed raw MFMA lane and accumulator mappings",
+    "direct-global rocWMMA without LDS reuse",
+    "wrapper graph capture",
+    "M8 scalar cross-row reuse",
+    "synchronous one-fragment-per-wave rocWMMA tiles",
+    "patches containing generated sources or build metadata"
+  ],
+  "open_custom_directions": [
+    "authoritative gfx90a MFMA mapping",
+    "register-blocked multi-fragment wave tiles",
+    "bank-safe LDS staging",
+    "double-buffered K pipeline",
+    "one-dispatch Stream-K",
+    "shape-specific low-resource macrotiles"
+  ]
+}

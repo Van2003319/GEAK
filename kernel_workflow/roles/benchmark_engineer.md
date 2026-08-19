@@ -106,17 +106,41 @@ For `--correctness` in the no-runner case (no oracle at all), compare to a trust
 
 ### 3. Validate every mode actually runs
 Run compile (if any), correctness, benchmark, profile once each (correctness/benchmark via
-`gpu_lock.sh $GPU_ID`). Fix anything that errors before continuing.
+the wrapped form below). Fix anything that errors before continuing.
 
 ### 4. Write the COMMANDMENT
 Write `EVAL_DIR/COMMANDMENT.md` — the immutable contract. Fill in the EXACT commands discovered/
 created. **Run EVERY GPU command (correctness / benchmark / full-benchmark / profile) through
-`bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID ...` from inside the workspace dir** — the wrapper not
+`$GPU_LOCK_ENV bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID bash $SKILL_DIR/scripts/gpu_fence_run.sh ...` from inside the workspace dir** — `GPU_LOCK_ENV` is an optional caller-authorized prefix; omit it when absent; the wrapper not
 only serializes GPU access but also (a) isolates the torch cpp_extension build cache per workspace
 (`TORCH_EXTENSIONS_DIR=$PWD/.torch_ext`) and (b) compiles only for the local GPU arch. Both are
 essential: without (a), parallel engineers compiling `torch.utils.cpp_extension.load(name=...)`
 share ONE global cache → they serialize on a single lock and can benchmark each other's `.so`;
 without (b) every compile builds ~9 architectures. These are generic to any torch HIP extension.
+
+**Never weaken the lock's idleness gate to unblock yourself — finding (128).** When `gpu_lock.sh`
+blocks, or exits `no free+idle GPU in pool [...]`, the pool is held by a job it can see through
+sysfs and `flock` cannot: on this host that has meant a second container running all cards at
+95–100% busy with ~152 GB resident each. Setting `GEAK_GPU_REQUIRE_IDLE=0`, raising
+`GEAK_GPU_MAX_BUSY_PCT` / `GEAK_GPU_MAX_VRAM_MB`, or exporting `HIP_VISIBLE_DEVICES` around the
+lock all "work" — they hand you a GPU, your commands run, and every number you report afterwards
+was measured against someone else's load. That is strictly worse than being blocked: a blocked
+run announces itself, a contaminated one does not, and it is indistinguishable from a real
+result for as long as anyone believes it. `GEAK_GPU_POOL_WAIT` (how long to WAIT) is the only one
+of these you may raise. If the wait expires, STOP and report the contention AS your result —
+the pool was busy, for how long, and what sysfs said. "Could not measure" is a usable answer;
+a number produced under contention is not.
+
+**`gpu_fence_run.sh` goes in the command slot, always — finding (113).** `gpu_lock.sh` holds its
+flock only while the locking process lives. A child the command spawned can outlive it: when the b4b
+workflow died, two `task_runner.py profile` processes went on using GPUs 2 and 4 for another 29 and
+96 minutes with NO holder on any lock file, so the next measurement to land on those dies was
+competing with work that, as far as every lock in the system was concerned, did not exist. The
+wrapper waits for the payload, then drains the process group the payload created (TERM, grace, KILL)
+before returning — so the flock is still held while it proves nothing is left on the device. It
+passes the payload's exit status through unchanged and only ever signals the group it created
+itself, never the caller's tree. It exists because `gpu_lock.sh` is immutable and the hole is not in
+the locking anyway; see `scripts/test_gpu_fence_run.py`.
 
 The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 - `SETUP` — `cd <workspace>`. Do NOT use `rm` anywhere in the COMMANDMENT (it triggers an approval
@@ -126,7 +150,7 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
   (e.g. after editing headers), MOVE it aside instead of deleting:
   `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true` (a fresh `.torch_ext` rebuilds).
   So `SETUP` is just `cd <workspace>` (plus the env exports below) — no deletion.
-- `CORRECTNESS` — wrapped: `cd <workspace> && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <correctness cmd>`.
+- `CORRECTNESS` — wrapped: `cd <workspace> && $GPU_LOCK_ENV bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID bash $SKILL_DIR/scripts/gpu_fence_run.sh <correctness cmd>`.
 - `BENCHMARK` — wrapped in gpu_lock (quick measurement).
 - `FULL_BENCHMARK` — wrapped in gpu_lock (authoritative).
 - `PROFILE` — `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<cmd that cd's into the workspace>" <out_dir>`.
@@ -171,7 +195,7 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "benchmark_cmd": "<exact full-benchmark cmd, WITHOUT the gpu_lock wrapper>",
   "profile_cmd": "<exact profile inner cmd>",
   "parse_hint": "how to extract per-case latency + case ids (and count, when workload-aligned)",
-  "baseline_per_case": [{"name": "...", "latency_ms": 0.0,
+  "baseline_per_case": [{"name": "...", "latency_ms": 0.0, "samples_ms": [0.0, 0.0, 0.0],
                          "dims": [[1,512],[512,512]], "dtypes": ["bf16","bf16"],
                          "count": 0, "weight": 0.0, "weight_source": "trace"}],
   "baseline_geomean_ms": 0.0,
@@ -183,6 +207,22 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "notes": "anything downstream agents must know (incl. any naive-baseline / regime_prior caveats)"
 }
 ```
+`samples_ms` is the **raw per-repeat latency** for that case — at least three complete primed
+repeats, in the order measured, not a summary. `latency_ms` stays what it always was (the
+representative number the suite reports); `samples_ms` is what it was computed from.
+
+Send it whenever you have it. It is what gives the archive's seed a real measurement interval
+instead of a definitional one (95). The seed's speedup against itself is 1 by construction, so
+without repeats there is nothing to say about how much a *null* comparison on that route wanders
+— and the archive has to guess that from a table measured on other hardware. Three repeats
+replace the guess with this machine's own answer. Omitting the field is not an error and the run
+proceeds, but the seed's interval is then labelled as floored rather than measured, and every
+comparison against it inherits that.
+
+Do not synthesize the repeats from one measurement, and do not report a spread you did not
+observe. A fabricated `samples_ms` is worse than an absent one: absent is handled, fabricated
+silently narrows the bar every future candidate has to clear.
+
 When `workload_aligned` is true, `baseline_per_case[].count` is the coefficient the time-weighted
 metric uses, and `weight = count·latency_ms` is the case's time share. On an unweighted run omit the
 workload fields entirely (output is identical to before).

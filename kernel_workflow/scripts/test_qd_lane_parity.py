@@ -1070,6 +1070,16 @@ class NoiseFloorParityTest(unittest.TestCase):
                 # And the repin must actually change what admission uses --
                 # otherwise the epochs are interchangeable and the check, while
                 # honest, is guarding nothing.
+                #
+                # Two PROVISIONAL epochs are the one legitimate exception: both
+                # tables are DEFAULT_NOISE_FLOOR on every route by construction,
+                # so they are identical because neither is a measurement, which
+                # is the opposite of the copied-table defect below. Asserting
+                # otherwise would forbid a second box from ever being registered
+                # before a GPU frees -- exactly the state S was added in.
+                if (QRS.CURRENT_MACHINE in QRS.PROVISIONAL_MACHINES
+                        and other in QRS.PROVISIONAL_MACHINES):
+                    continue
                 self.assertNotEqual(
                     by_machine[other], dict(QRS.MEASURED_NOISE_FLOOR),
                     f"machine {other}'s floors are identical to "
@@ -1872,9 +1882,31 @@ class BaselineFrameAmbiguityTest(unittest.TestCase):
             raise AssertionError(
                 "the QD_BASELINE_MS construction moved; this probe is checking nothing")
         ctx = MiniRacer()
-        ctx.eval("const BASELINE_PER_CASE = %s;" % json.dumps(rows))
+        # QD_BASELINE_PER_CASE, not BASELINE_PER_CASE: the lane gates the row
+        # set on QD_ENABLED so this refusal cannot fire under greedy, where a
+        # bench frame's latency_ms/baseline_ms are two honest, different
+        # numbers. These cases exercise the block's behaviour given rows.
+        ctx.eval("const QD_BASELINE_PER_CASE = %s;" % json.dumps(rows))
         ctx.eval(match.group(0))
         return ctx
+
+    def test_the_refusal_is_gated_to_the_strategy_that_owns_it(self):
+        """A throwing bootstrap wired to an ungated row set is a QD contract
+        that kills every other search strategy. It did: a greedy run aborted
+        mid-lane on a bench frame whose `latency_ms` (candidate) and
+        `baseline_ms` (oracle) are two correct, deliberately different numbers.
+        The row set the block consumes must therefore be empty unless
+        QD_ENABLED."""
+        match = re.search(
+            r"const QD_BASELINE_PER_CASE = ([^;]+);", SOURCE)
+        self.assertIsNotNone(
+            match, "the QD gate on the authoritative-baseline row set is gone; "
+                   "an ambiguous bench frame can once again abort a non-QD lane")
+        self.assertIn("QD_ENABLED", match.group(1))
+        self.assertIn(
+            "QD_BASELINE_PER_CASE",
+            re.search(r"const QD_BASELINE_MS = new Map\(\(([^)]*)\)", SOURCE).group(1),
+            "QD_BASELINE_MS no longer reads the gated row set")
 
     def test_one_field_alone_is_read(self):
         ctx = self._ctx([{"name": "decode_m2_square", "latency_ms": 0.0271}])

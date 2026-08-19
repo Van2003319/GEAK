@@ -58,6 +58,53 @@ if [ -n "${GEAK_GPU_ALLOWED:-}" ]; then
     fi
 fi
 
+# ---- Measurement-frame fence --------------------------------------------------------------------
+# Finding (49). A snapshot restore can land mid-round with the workflow process tree still running.
+# When that happened on tw049, three engineers measured straight through the machine change against
+# the previous box's noise floors and NOTHING noticed: the frame preflight is an ENTRY gate, and the
+# lane had already passed it at launch. "The lane is still emitting reports" turned out to be no
+# evidence at all that the frame was intact -- it was emitting them against tw046's ruler.
+#
+# So the check belongs here rather than at any lane's entry, for the same reason the allocation
+# fence does: this wrapper is the single chokepoint every compile/correctness/benchmark/profile
+# command passes through, and it is re-entered for EVERY command instead of once per process. A host
+# change cannot slip past it no matter where in a round it lands.
+#
+# Only exit 4 (the host does not match the active epoch) refuses. Exit 3 -- a registered but not yet
+# measured epoch -- must be ALLOWED through: measuring a new box's floors is itself GPU work, and
+# refusing it would deadlock the one procedure that clears the state. Anything else (checker
+# missing, python broken) warns and proceeds: this is a second line of defence, and turning an
+# infrastructure fault into a total GPU outage would be the worse failure.
+if [ "${GEAK_SKIP_FRAME_CHECK:-0}" != "1" ]; then
+    _frame_script="$(dirname "${BASH_SOURCE[0]}")/check_measurement_frame.py"
+    if [ -f "$_frame_script" ]; then
+        # `set -e` is in force and the checker exits nonzero BY DESIGN (3 = provisional,
+        # 4 = wrong host, 5 = mirror drift). Without disarming it around the call, the
+        # assignment itself aborts gpu_lock.sh -- which silently killed every GPU command
+        # on a provisional epoch, i.e. exactly the state a new box starts in, and exactly
+        # the procedure that clears it. Disarm explicitly and branch on the code.
+        set +e
+        _frame_out="$(python3 "$_frame_script" 2>&1)"
+        _frame_rc=$?
+        set -e
+        # 4 = this host is not the epoch's host. 5 = the Python constants and the lane's
+        # JS mirror disagree, so the epoch verified is not the epoch that will be applied.
+        # Both mean the floors about to judge this command are not this box's floors.
+        # 3 (registered, not yet measured) passes: measuring is itself GPU work.
+        if [ "$_frame_rc" = "4" ] || [ "$_frame_rc" = "5" ]; then
+            echo "ERROR: gpu_lock.sh refuses to run: the measurement frame does not describe this box." >&2
+            echo "$_frame_out" | sed 's/^/       /' >&2
+            echo "       Register a PROVISIONAL epoch for this host (a NEW letter -- never inherit one)," >&2
+            echo "       measure its floors, then retry. Ratios within one session on one card still" >&2
+            echo "       stand; absolute microseconds do not cross a machine boundary." >&2
+            exit 1
+        fi
+    else
+        echo "WARNING: gpu_lock.sh could not find check_measurement_frame.py; running WITHOUT the" >&2
+        echo "         measurement-frame fence. Numbers from this command carry no frame guarantee." >&2
+    fi
+fi
+
 # ---- GPU selection ------------------------------------------------------------------------------
 # <gpu_spec> is either a single id ("2", the historical contract, unchanged) or a POOL ("0,1,2,3").
 # With a pool we do not pre-assign a GPU: we take the first one that is BOTH unlocked AND idle,

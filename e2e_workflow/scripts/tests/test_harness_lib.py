@@ -176,6 +176,15 @@ class _T:
         if isinstance(idx, slice):
             data = self.tolist()[idx]
             return _T((len(data),), data, dtype=self.dtype, device=self.device)
+        if isinstance(idx, int):
+            # Real torch returns a 0-d tensor for an integer index, and the poison probe uses
+            # `block.reshape(-1)[0]` to read back what the dtype actually stored. The fake used to
+            # raise TypeError here, which the probe caught and reported as status "raised" -- so
+            # fourteen tests failed describing a defect that existed only in the double. A gap in a
+            # test double is not a finding about the code under test; it is a finding about the
+            # double, and the fix belongs here rather than in a `[:1]` workaround upstream.
+            data = self.tolist()
+            return _T((), [data[idx]], dtype=self.dtype, device=self.device)
         raise TypeError("unsupported fake index %r" % (idx,))
 
     def zero_(self):
@@ -203,6 +212,33 @@ class _T:
             return _T(shape, [op(x, y) for x, y in zip(a, b)], dtype=self.dtype, device=self.device)
         return _T(self.shape, [op(x, float(other)) for x in a],
                   dtype=self.dtype, device=self.device)
+
+    # Elementwise comparison. The fake had no `__eq__` at all, so `t == 3.0` fell through to
+    # object identity and returned the plain bool False -- which the two-sentinel probe then tried
+    # to `&` and `.mean()`, and the probe's own except-clause reported that as status "raised".
+    # Ten tests failed describing a defect in the double, not in the probe. Real torch returns a
+    # mask, so the mask is what the fake returns: 1.0 where equal, 0.0 elsewhere, so `.float()`
+    # and `.mean()` behave as they do on a real bool tensor.
+    def __eq__(self, other):
+        return self._bin(other, lambda x, y: 1.0 if x == y else 0.0)
+
+    def __ne__(self, other):
+        return self._bin(other, lambda x, y: 0.0 if x == y else 1.0)
+
+    def __and__(self, other):
+        return self._bin(other, lambda x, y: 1.0 if (x and y) else 0.0)
+
+    # Defining __eq__ drops the default __hash__, and _T is used as a dict/set member in places.
+    __hash__ = object.__hash__
+
+    def __bool__(self):
+        # Real torch raises on a multi-element tensor rather than guessing. Mirror that, so a test
+        # that accidentally puts a mask in a boolean context fails loudly instead of silently.
+        n = self.numel()
+        if n != 1:
+            raise RuntimeError(
+                "Boolean value of Tensor with %d elements is ambiguous" % n)
+        return bool(self.tolist()[0])
 
     def __add__(self, other):
         return self._bin(other, lambda x, y: x + y)
@@ -428,6 +464,14 @@ class _Stack:
         torch.empty = _filled(0.0)
         torch.randperm = _randperm
         torch.equal = _equal
+
+        def _full(shape, value, **kw):
+            if not isinstance(shape, (tuple, list)):
+                shape = (shape,)
+            return _T(tuple(shape), fill=value, dtype=kw.get("dtype") or FP32,
+                      device=kw.get("device") or "cpu")
+
+        torch.full = _full
         torch.tensor = lambda data, dtype=None: _T((len(data),), list(data), dtype=dtype or FP32)
         return torch
 
@@ -448,11 +492,12 @@ class _Clock:
         return now
 
 
-def _wall_deltas(walls_ms):
-    """Deltas that make the k-th timed sample measure walls_ms[k] (each sample reads the clock twice)."""
+def _wall_deltas(walls_ms, reads=2):
+    """Deltas that make the k-th timed sample measure walls_ms[k]."""
     out = []
     for w in walls_ms:
-        out += [w / 1e3, 0.0]
+        # CUDA timing reads once after enqueue and once after event synchronization.
+        out += ([0.0, w / 1e3, 0.0] if reads == 3 else [w / 1e3, 0.0])
     return out
 
 
@@ -479,6 +524,85 @@ class _StaticOutCall:
         return self.buf
 
 
+class _Allocator:
+    """A caching allocator with the one behaviour that makes the poison probe necessary: a freed
+    block of the right size is handed straight back to the next same-size request, CONTENTS INTACT.
+
+    This is not a caricature of PyTorch — it is the mechanism behind the fused task's false pass.
+    `ref = baseline(a, b).clone()` frees rocBLAS's output, the binding's `torch::empty` immediately
+    gets that block back still holding the correct answer, and a kernel that writes nothing returns
+    it verbatim. Blocks release on refcount drop (`del`), so the tests below trigger recycling the
+    same way the real code does.
+    """
+
+    def __init__(self):
+        self.free = {}          # numel -> [(ptr, data)], most recently freed last
+
+    def _release(self, ptr, data):
+        self.free.setdefault(len(data), []).append((ptr, data))
+
+    def alloc(self, shape, fill=0.0):
+        shape = tuple(int(s) for s in shape)
+        n = 1
+        for s in shape:
+            n *= s
+        pool = self.free.get(n)
+        if pool:
+            ptr, data = pool.pop()          # recycled: whatever the last owner left is still there
+        else:
+            ptr, data = next(_PTRS), [float(fill)] * n
+        return _Block(self, shape, data, ptr)
+
+    def full(self, shape, value, **kw):
+        """Stands in for torch.full, drawing from the same pool so a poison fill can land on a
+        just-freed block -- which is the only way the probe can be conclusive."""
+        if not isinstance(shape, (tuple, list)):
+            shape = (shape,)
+        blk = self.alloc(shape)
+        blk.overwrite_([value] * blk.numel())
+        return blk
+
+
+class _Block(_T):
+    """A tensor whose storage returns to its allocator when the last reference drops."""
+
+    def __init__(self, alloc, shape, data, ptr):
+        _T.__init__(self, shape, data)
+        self._ptr = ptr
+        self._alloc = alloc
+
+    def __del__(self):
+        # Hand back (ptr, contents), never `self` -- resurrecting the object would suppress every
+        # later __del__ (CPython calls it once), and the pool would stop recycling after one cycle.
+        try:
+            self._alloc._release(self._ptr, self.tolist())
+        except Exception:
+            pass
+
+
+class _PoolCall:
+    """A launcher that allocates its output from `alloc` and writes `write_frac` of it.
+
+    write_frac=1.0 is the honest kernel; 0.0 is `dense_bf16_gemm_fused` on gfx942 (allocates, returns,
+    computes nothing); anything between is a kernel that leaves part of C untouched.
+    """
+
+    def __init__(self, alloc, write_frac=1.0):
+        self.alloc = alloc
+        self.write_frac = write_frac
+        self.calls = 0
+
+    def __call__(self, args):
+        self.calls += 1
+        out = self.alloc.alloc((len(args),))
+        n = int(round(len(args) * self.write_frac))
+        if n:
+            data = out.tolist()
+            data[:n] = [float(v) for v in args[:n]]
+            out.overwrite_(data)
+        return out
+
+
 class _HarnessTestCase(unittest.TestCase):
     """Fake torch in sys.modules, a scripted clock in place of time.perf_counter, and a pristine
     _CACHE_FLUSH_BUF (a module global the flush path mutates and would leak between tests)."""
@@ -493,11 +617,14 @@ class _HarnessTestCase(unittest.TestCase):
         self._prev_torch = sys.modules.get("torch", _MISSING)
         sys.modules["torch"] = self.torch
         self.addCleanup(self._restore_torch)
-        self.clock = _Clock(_wall_deltas(self.WALL_MS) if self.WALL_MS else (0.001,))
+        reads = 3 if self.CUDA else 2
+        self.clock = _Clock(_wall_deltas(self.WALL_MS, reads) if self.WALL_MS else (0.001,))
         self.addCleanup(setattr, hl, "time", hl.time)
         hl.time = self.clock
         hl._CACHE_FLUSH_BUF = None
+        hl._TIMING_PRIME_BUF = None
         self.addCleanup(setattr, hl, "_CACHE_FLUSH_BUF", None)
+        self.addCleanup(setattr, hl, "_TIMING_PRIME_BUF", None)
 
     def _restore_torch(self):
         if self._prev_torch is _MISSING:
@@ -886,6 +1013,8 @@ class TestTimeOpWall(_HarnessTestCase):
         self.assertEqual(got["timer"], "wall")
         self.assertAlmostEqual(got["ms"], 2.0)              # median of 3.0, 1.0, 2.0
         self.assertEqual(got["ms"], got["wall_ms"])         # no device timeline to differ from
+        self.assertEqual(got["host_ms"], got["wall_ms"])
+        self.assertFalse(got["primed"])
         self.assertEqual(box["n"], 5)                       # warmup 2 + repeats 3
 
     def test_without_detail_only_the_median_ms_is_returned(self):
@@ -949,6 +1078,20 @@ class TestTimeOpEvents(_CudaTestCase):
         # sync() before each sample plus the post-warmup sync
         self.assertEqual(self.stack.syncs, 4)
 
+    def test_detail_receipts_confirm_independent_same_stream_priming(self):
+        got = hl.time_op(lambda: None, warmup=1, repeats=2, detail=True)
+        self.assertTrue(got["primed"])
+        self.assertIsNotNone(got["host_ms"])
+        self.assertIsNotNone(hl._TIMING_PRIME_BUF)
+        self.assertIsNot(hl._TIMING_PRIME_BUF, hl._CACHE_FLUSH_BUF)
+
+    def test_prime_never_invokes_the_measured_call_or_enters_event_window(self):
+        box, call = self._counting_call()
+        hl.time_op(call, warmup=1, repeats=2)
+        self.assertEqual(box["n"], 3)
+        self.assertEqual([k for k, _ in self.stack.events],
+                         ["record", "record", "synchronize"] * 2)
+
     def test_flush_can_be_disabled_for_a_deliberately_hot_measurement(self):
         hl.time_op(lambda: None, warmup=1, repeats=2, flush_cache=False)
         self.assertIsNone(hl._CACHE_FLUSH_BUF)
@@ -1003,9 +1146,10 @@ class TestTimeOpGraph(_CudaTestCase):
 
 
 class TestTimingResult(unittest.TestCase):
-    def test_detail_exposes_both_clocks_and_which_timer_produced_them(self):
-        self.assertEqual(hl._timing_result(1.5, 2.25, "cuda_event", True),
-                         {"ms": 1.5, "wall_ms": 2.25, "timer": "cuda_event"})
+    def test_detail_exposes_clocks_timer_and_priming_receipt(self):
+        self.assertEqual(hl._timing_result(1.5, 2.25, "cuda_event", True, 0.25, True),
+                         {"ms": 1.5, "wall_ms": 2.25, "host_ms": 0.25,
+                          "timer": "cuda_event", "primed": True})
 
     def test_the_bare_form_is_the_device_ms_the_speedup_is_scored_on(self):
         self.assertEqual(hl._timing_result(1.5, 2.25, "cuda_event", False), 1.5)
@@ -1128,9 +1272,28 @@ class TestCorrect(_HarnessTestCase):
 # assert_independent_outputs -- catching the shared/persistent `static_out`
 # --------------------------------------------------------------------------- #
 class TestAssertIndependentOutputs(_HarnessTestCase):
-    def test_a_fresh_output_per_call_passes_with_no_reason(self):
-        self.assertEqual(hl.assert_independent_outputs(_echo_call, (1.0, 2.0), (3.0, 4.0)),
-                         (True, ""))
+    def test_an_honest_launcher_passes_with_no_reason(self):
+        # The write probe rides along in this function, so "no reason" now means BOTH that the
+        # outputs are independent AND that the probe conclusively saw the kernel write.
+        alloc = _Allocator()
+        self.torch.full = alloc.full
+        self.assertEqual(
+            hl.assert_independent_outputs(_PoolCall(alloc), (1.0, 2.0), (3.0, 4.0)), (True, ""))
+
+    def test_a_launcher_that_writes_nothing_is_refused_here_too(self):
+        # The path the task runners actually take: dense_bf16_gemm/scripts/task_runner.py calls this
+        # function and never calls check_correct_multi.
+        alloc = _Allocator()
+        self.torch.full = alloc.full
+        ok, reason = hl.assert_independent_outputs(_PoolCall(alloc, write_frac=0.0),
+                                                   (1.0, 2.0), (3.0, 4.0))
+        self.assertFalse(ok)
+        self.assertIn("output_never_written", reason)
+
+    def test_an_inconclusive_probe_is_surfaced_without_failing_a_sound_launcher(self):
+        ok, reason = hl.assert_independent_outputs(_echo_call, (1.0, 2.0), (3.0, 4.0))
+        self.assertTrue(ok, "an untested probe must not turn a sound launcher into a failure")
+        self.assertIn("write_probe_inconclusive", reason)
 
     def test_a_shared_return_buffer_is_named_with_its_storage_address(self):
         call = _StaticOutCall()
@@ -1174,16 +1337,22 @@ class TestCheckCorrectMulti(_HarnessTestCase):
         cases = [_case("m1", (1.0, 2.0)), _case("m8", (3.0, 4.0))]
         ok, per = hl.check_correct_multi(_echo_call, cases, 0.01)
         self.assertTrue(ok)
-        self.assertEqual(per, [
+        self.assertEqual(per[:2], [
             {"case": "m1", "correct": True, "max_rel_err": 0.0},
             {"case": "m8", "correct": True, "max_rel_err": 0.0},
-            {"case": "output_independence", "correct": True, "max_rel_err": None, "note": ""},
         ])
+        self.assertEqual([e["case"] for e in per[2:]],
+                         ["exact_agreement_alarm", "output_independence", "output_write_probe"])
+        self.assertEqual(per[3]["correct"], True)
+        # _echo_call does not allocate from a pool, so the probe riding inside the independence
+        # check could not test anything and says so instead of reporting a clean bill of health.
+        self.assertIn("write_probe_inconclusive", per[3]["note"])
 
     def test_a_single_case_skips_the_independence_check(self):
         ok, per = hl.check_correct_multi(_echo_call, [_case("only", (1.0, 2.0))], 0.01)
         self.assertTrue(ok)
-        self.assertEqual([e["case"] for e in per], ["only"])
+        # One case cannot show an independence violation, and one exact match is not a wall of them.
+        self.assertEqual([e["case"] for e in per], ["only", "output_write_probe"])
 
     def test_a_shared_buffer_return_fails_the_EARLIER_case_it_overwrote(self):
         # This is the whole point of holding every output live before comparing: the second launch
@@ -1208,6 +1377,183 @@ class TestCheckCorrectMulti(_HarnessTestCase):
         _, per = hl.check_correct_multi(_echo_call,
                                         [{"args": (1.0,), "ref": _T((1,), [1.0])}], 0.01)
         self.assertEqual(per[0]["case"], "")
+
+
+class TestAssertWritesOutput(_HarnessTestCase):
+    """The poison probe (101).
+
+    Every other correctness check here compares against an oracle that was computed and freed moments
+    earlier, which the caching allocator will happily hand straight back. On 2026-08-16 that turned a
+    kernel whose entire body sits behind `#if defined(__gfx90a__)`, built for gfx942, into 55 passing
+    draws with max_rel_err 0.0 and an 8.5x "speedup". Nothing in the gate looked at whether the
+    candidate had written a single byte.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.alloc = _Allocator()
+        self.torch.full = self.alloc.full
+
+    def test_a_kernel_that_writes_its_output_passes(self):
+        # (55): the probe has to let the sound case through, or it is just a refusal.
+        call = _PoolCall(self.alloc, write_frac=1.0)
+        self.assertEqual(hl.assert_writes_output(call, (1.0, 2.0, 3.0, 4.0)),
+                         (True, "ok", 0.0))
+
+    def test_a_kernel_that_writes_nothing_is_caught_holding_the_whole_sentinel(self):
+        call = _PoolCall(self.alloc, write_frac=0.0)
+        ok, status, frac = hl.assert_writes_output(call, (1.0, 2.0, 3.0, 4.0))
+        self.assertFalse(ok)
+        self.assertEqual(status, "never_written")
+        self.assertEqual(frac, 1.0)
+
+    def test_the_no_op_kernel_would_otherwise_have_passed_correctness(self):
+        # The point of the probe, stated as an assertion: with the oracle freed just before the call,
+        # `correct()` says PASS with error 0.0 while the kernel has done nothing at all.
+        call = _PoolCall(self.alloc, write_frac=0.0)
+        args = (1.0, 2.0, 3.0, 4.0)
+        oracle = self.alloc.alloc((4,))
+        oracle.overwrite_(args)
+        ref = oracle.clone()
+        del oracle                                   # ... exactly what `baseline(a,b).clone()` does
+        out = call(args)
+        self.assertEqual(hl.correct(out, ref, 0.01), (True, 0.0))
+        del out
+        self.assertEqual(hl.assert_writes_output(call, args)[1], "never_written")
+
+    def test_a_partially_written_output_reports_the_untouched_fraction(self):
+        call = _PoolCall(self.alloc, write_frac=0.5)
+        ok, status, frac = hl.assert_writes_output(call, (1.0, 2.0, 3.0, 4.0))
+        self.assertFalse(ok)
+        self.assertEqual(status, "partially_written")
+        self.assertEqual(frac, 0.5)
+
+    def test_a_block_the_allocator_never_returned_is_inconclusive_not_a_pass(self):
+        # (54): the probe could not test anything here, and says so. Reporting True would make every
+        # allocator that behaves differently look like a clean bill of health.
+        ok, status, frac = hl.assert_writes_output(_StaticOutCall(4), (1.0, 2.0, 3.0, 4.0))
+        self.assertFalse(ok)
+        self.assertEqual(status, "inconclusive")
+        self.assertIsNone(frac)
+
+    def test_a_probe_that_raises_is_reported_not_swallowed(self):
+        def boom(args):
+            raise RuntimeError("launch failed")
+        self.assertEqual(hl.assert_writes_output(boom, (1.0,)), (False, "raised", None))
+
+    def test_the_sentinel_is_read_back_from_the_dtype_that_stored_it(self):
+        # A sentinel the output dtype cannot represent would be compared against its own rounded
+        # value and every element would look "written". The probe reads back what was stored.
+        call = _PoolCall(self.alloc, write_frac=0.0)
+        ok, status, frac = hl.assert_writes_output(call, (1.0, 2.0), poison=hl.POISON_VALUE)
+        self.assertEqual((status, frac), ("never_written", 1.0))
+
+    def test_each_status_carries_a_note_that_names_the_cause(self):
+        self.assertEqual(hl._write_probe_note("ok", 0.0), "")
+        self.assertIn("kernel wrote nothing", hl._write_probe_note("never_written", 1.0))
+        self.assertIn("arch guard", hl._write_probe_note("never_written", 1.0))
+        self.assertIn("0.25", hl._write_probe_note("partially_written", 0.25))
+        # The note formats with %.4g, not %.4f, and the difference is load-bearing. A kernel that
+        # skips ONE element of prefill_m512_up leaves an untouched fraction of 1/5,636,096; under
+        # %.4f the note reads "0.0000 of the output survived", which is the number a reader uses to
+        # dismiss the finding as noise. The smallest defect the probe can detect must not print as
+        # zero in the message that reports it.
+        tiny = hl._write_probe_note("partially_written", 1.0 / 5636096)
+        self.assertNotIn("0.0000 of the output", tiny)
+        self.assertIn("1.774e-07", tiny)
+        self.assertIn("NOT tested", hl._write_probe_note("inconclusive", None))
+        self.assertIn("Not a pass", hl._write_probe_note("raised", None))
+
+
+class TestWriteProbeInsideCheckCorrectMulti(_HarnessTestCase):
+    """The probe wired in, not merely present (55)."""
+
+    def setUp(self):
+        super().setUp()
+        self.alloc = _Allocator()
+        self.torch.full = self.alloc.full
+
+    def _cases(self):
+        return [_case("m1", (1.0, 2.0, 3.0, 4.0)), _case("m8", (5.0, 6.0, 7.0, 8.0))]
+
+    def _seed_oracles_into_the_pool(self, cases):
+        """Put each case's oracle values into the free pool, so a candidate that allocates and writes
+        nothing returns the RIGHT ANSWER anyway. Without this the no-op kernel fails on the values and
+        the probe never gets to be the reason -- which is precisely how the fused task passed."""
+        for c in reversed(cases):                    # LIFO pool: last pushed is popped first
+            self.alloc._release(next(_PTRS), list(c["ref"].tolist()))
+
+    def test_a_no_op_kernel_fails_the_gate_even_when_every_case_compares_equal(self):
+        cases = self._cases()
+        self._seed_oracles_into_the_pool(cases)
+        call = _PoolCall(self.alloc, write_frac=0.0)
+        ok, per = hl.check_correct_multi(call, cases, 0.01)
+        # Every value comparison passes -- this is the fused task's report, reproduced.
+        self.assertTrue(all(e["correct"] for e in per if e["case"] in ("m1", "m8")))
+        self.assertTrue(all(e["max_rel_err"] == 0.0 for e in per if e["case"] in ("m1", "m8")))
+        # ... and the gate must still refuse it, on the probe's evidence alone.
+        self.assertFalse(ok, "a kernel that writes nothing must not pass check_correct_multi")
+        probe = [e for e in per if e["case"] == "output_write_probe"][0]
+        self.assertIs(probe["correct"], False)       # not None: this was tested, and it failed
+        self.assertEqual(probe["status"], "never_written")
+        self.assertEqual(probe["untouched_fraction"], 1.0)
+
+    def test_a_writing_kernel_still_passes(self):
+        call = _PoolCall(self.alloc, write_frac=1.0)
+        ok, per = hl.check_correct_multi(call, self._cases(), 0.01)
+        self.assertTrue(ok, [e for e in per if not e.get("correct")])
+        probe = [e for e in per if e["case"] == "output_write_probe"][0]
+        self.assertEqual((probe["correct"], probe["status"]), (True, "ok"))
+
+    def test_an_untested_probe_is_recorded_as_None_so_a_consumer_fails_closed(self):
+        ok, per = hl.check_correct_multi(_echo_call, self._cases(), 0.01)
+        probe = [e for e in per if e["case"] == "output_write_probe"][0]
+        self.assertEqual(probe["status"], "inconclusive")
+        self.assertIsNone(probe["correct"])
+        self.assertTrue(probe["untested"])
+        # all_ok does not fail on an untested probe, but `all(e["correct"] ...)` -- what a report
+        # naturally writes -- does. That asymmetry is the point: nothing reads it as a pass.
+        self.assertTrue(ok)
+        self.assertFalse(all(e["correct"] for e in per))
+
+    def test_a_wall_of_exact_agreement_raises_the_alarm(self):
+        call = _PoolCall(self.alloc, write_frac=1.0)
+        _, per = hl.check_correct_multi(call, self._cases(), 0.01)
+        alarm = [e for e in per if e["case"] == "exact_agreement_alarm"]
+        self.assertEqual(len(alarm), 1)
+        self.assertIn("suspicious_zero_error", alarm[0]["note"])
+        self.assertIn("all 2 cases", alarm[0]["note"])
+
+    def test_one_inexact_case_is_enough_to_silence_the_alarm(self):
+        # (55) again: an alarm that fires on every correct run is a comment. It fires on the WALL of
+        # zeros, which is the shape the shared-provenance bug actually produces.
+        cases = self._cases()
+        cases[1]["ref"] = _T((4,), [5.0, 6.0, 7.0, 8.001])
+        _, per = hl.check_correct_multi(_PoolCall(self.alloc), cases, 0.01)
+        self.assertEqual([e for e in per if e["case"] == "exact_agreement_alarm"], [])
+
+    def test_mutated_prior_output_names_the_never_wrote_cause_too(self):
+        # (54): this arm cannot distinguish "aliases a persistent buffer" from "never writes, so both
+        # returns are the same recycled block". It used to assert the first. Naming only one cause
+        # sent the fused-task investigation looking for an alias that did not exist -- the binding
+        # allocates a fresh output every call; the kernel simply never touched it.
+        class _Alias:
+            """Distinct tensor objects (distinct data_ptr) over ONE shared, in-place storage."""
+
+            def __init__(self):
+                self.storage = [0.0, 0.0]
+
+            def __call__(self, args):
+                self.storage[:] = [float(v) for v in args]
+                view = _T((2,), self.storage)
+                view._data = self.storage            # share the list: later writes show through
+                return view
+
+        ok, reason = hl.assert_independent_outputs(_Alias(), (1.0, 2.0), (3.0, 4.0))
+        self.assertFalse(ok)
+        self.assertIn("mutated_prior_output", reason)
+        self.assertIn("never writes", reason)
+        self.assertIn("assert_writes_output", reason)
 
 
 class TestCheckCorrectSequence(_HarnessTestCase):
@@ -1745,7 +2091,8 @@ class TestRunCorrectness(_HarnessTestCase):
         self.assertTrue(ok)
         self.assertEqual(set(report), {"eager", "random"})
         self.assertEqual([e["case"] for e in report["eager"]],
-                         ["m1", "m256", "output_independence"])
+                         ["m1", "m256", "exact_agreement_alarm", "output_independence",
+                          "output_write_probe"])
         self.assertEqual(report["random"], [])
 
     def test_an_eager_correctness_failure_fails_the_whole_suite(self):
@@ -1847,7 +2194,9 @@ class TestRunCorrectnessOnDevice(_CudaTestCase):
             baseline_call=_echo_call, current_call=_echo_call, random_shapes=[], tol=0.01,
             replay=replay)
         self.assertFalse(ok)
-        self.assertTrue(all(e["correct"] for e in report["eager"]))
+        # Untested entries (the write probe cannot run against this fake launcher) carry
+        # correct=None, so they are excluded rather than counted as passes.
+        self.assertTrue(all(e["correct"] for e in report["eager"] if not e.get("untested")))
         self.assertFalse(report["graph_replay"][1]["correct"])
         self.assertIn("graph_replay_raised", report["graph_replay"][1]["note"])
 

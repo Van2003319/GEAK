@@ -88,8 +88,16 @@ ok(/Save best_patch\.diff[^\n]*geomean>\$\{CANDIDATE_FLOOR_TXT\}/.test(src),
    'the Optimize prompt tells the engineer to save above CANDIDATE_FLOOR');
 ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup\(eng\) > CANDIDATE_FLOOR\)/.test(src),
    'the harvest shortcut suppresses against CANDIDATE_FLOOR');
-ok(/says\(r\.ver\.correctness, 'pass'\) && primSpeedup\(r\.ver\) > CANDIDATE_FLOOR/.test(src),
-   'the verified filter admits against CANDIDATE_FLOOR');
+// This clause used to be pinned as ONE line, `says(...correctness, 'pass') && primSpeedup(r.ver) >
+// CANDIDATE_FLOOR`. The filter has since grown a metric/oracle/policy/twin arm and spans a block, so
+// that pin stopped matching -- and nobody saw it, because this file was runnable only under node and
+// the box has none. It is now hosted by run_js_tests.py and mutated by test_js_suite.py. Pinned as
+// three clauses: the correctness gate is in the filter, the admission compares against the knob, and
+// no site admits against a hard-coded literal.
+ok(/if \(!\(r\.ver && r\.ver\.policy_pass === true &&\n\s*says\(r\.ver\.status, 'verified'\) && says\(r\.ver\.correctness, 'pass'\)\)\) return false;/.test(src) &&
+   /return primSpeedup\(r\.ver\) > CANDIDATE_FLOOR;/.test(src) &&
+   !/primSpeedup\(r\.ver\) > [0-9]/.test(src),
+   'the verified filter admits against CANDIDATE_FLOOR, behind the correctness gate');
 
 // `${1.0}` stringifies to "1", which would silently reword a prompt that has always said
 // "geomean>1.0". The default run must render byte-identically.
@@ -98,8 +106,13 @@ ok(txt({ candidate_floor: 0.5 }) === '0.5', 'and a lowered floor renders faithfu
 ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({ candidate_floor: 0.55 }));
 
 console.log('\n# the commit gate is NOT loosened by any of this');
-ok(/const improved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
+ok(/const legacyImproved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
    'banking still requires beating cumulative by MIN_IMPROVE');
+// The threshold above is the DEFAULT path; a measured `route_bands` table can overrule it
+// per-route. Pinned here too because this file's subject is "the commit gate is not loosened",
+// and an unconditional per-route verdict would loosen it while the regex above still passed.
+ok(/let improved = legacyImproved;/.test(src) && /if \(winner && ROUTE_BANDS\) \{/.test(src),
+   'the per-route gate is opt-in: no band table means the legacy threshold decides');
 ok(/const madeProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
    'the progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
 ok(!/cumulative \* \(1 \+ CANDIDATE_FLOOR\)|CANDIDATE_FLOOR\)\s*;?\s*\/\/ commit/.test(src),

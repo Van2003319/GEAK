@@ -12,10 +12,7 @@ You work in the canonical `WORKSPACE` (the author mode's empty/seed workspace bu
 from the op task dir). The op's correctness contract is an **IMMUTABLE** unittest you must not edit.
 
 ## Inputs (in your prompt)
-- `TARGET_LANGUAGE` — `triton` (always supported) | `flydsl` | `hip` | `ck` (pluggable; only if
-  requested). `flydsl` is aiter's Python kernel DSL (JIT like triton — NO build step); it is the
-  preferred author target for **dense / quantized GEMM (esp. fp8 / A4W4 / mxfp4)** because aiter ships a
-  production FlyDSL hgemm you reuse as the correct baseline, then the optimize loop tunes its knobs.
+- `TARGET_LANGUAGE` — `triton` (always supported) | `flydsl` | `hip`. `ck` is not an eligible candidate target. A FlyDSL target is eligible only when its authored code lowers to a candidate-owned kernel and does not call/import/link aiter, CK, rocBLAS, hipBLAS(Lt), Tensile, or MIOpen; packaged vendor-library wrappers are forbidden.
 - `OP_SPEC` — from the extractor's `meta.json`: `op_kind` (gemm|attn|…), `shapes` / `a_shape`/
   `b_shape`/`transpose_b`/`bias` (gemm), captured tensor spec (attn), `dtype`, `math_contract`
   (e.g. `C = A·Bᵀ + bias`), `regime` (prefill|decode|both).
@@ -44,13 +41,7 @@ Semantic dirs (resolve short names via `index/capability_index.yaml` + `index/ta
 Read, as reference, before writing:
 - **How-to / levers (durable):** `KERNEL_KNOWLEDGE_DIR/index/recipes.md` — procedures (tuning flow,
   fusion, knob dictionaries) that don't go stale.
-- **Language skeleton:** `KERNEL_KNOWLEDGE_DIR/languages/<dir>/` — map: triton→`triton_amd`, flydsl→`flydsl`,
-  hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`, tilelang→`tilelang`, gluon→`gluon`,
-  hipkittens→`hipkittens`. **The file set differs per language** — `ls` the dir and read what is there
-  (`overview.md` / `patterns.md` / `knobs.md` / `pitfalls.md` / `primitives.md`); only `triton_amd` and
-  `flydsl` carry all three of overview/patterns/knobs. For **flydsl GEMM**, the simplest
-  correct baseline is to call aiter's `flydsl_hgemm` — `out = a @ b.T (+bias)` — rather than hand-writing
-  layout algebra; commit that, the optimize loop tunes tile/split_k/preshuffle. flydsl is JIT (no build).
+- **Language skeleton:** `KERNEL_KNOWLEDGE_DIR/languages/<dir>/` — map: triton→`triton_amd`, flydsl→`flydsl`, hip→`hip_cpp`, asm→`asm_mfma`, tilelang→`tilelang`, gluon→`gluon`, hipkittens→`hipkittens`. CK/Composable Kernel cards may be read only to understand algorithms and tiling; never copy an include/import/call into a candidate. **The file set differs per language** — `ls` the dir and read what is there (`overview.md` / `patterns.md` / `knobs.md` / `pitfalls.md` / `primitives.md`). For FlyDSL GEMM, author the computation itself; calling aiter's packaged `flydsl_hgemm` is forbidden vendor delegation even if it is convenient.
   For **gluon** the dir is facts-only (`overview.md`, `programming_model.md`, `gemm_cookbook.md`); the
   fuller language surface, the TTGIR→Gluon transcription toolchain and pipeline re-injection live in the
   `gluon_authoring` expert skill and are only injected when `use_expert_skills` is on. That skill is
@@ -77,6 +68,7 @@ Read, as reference, before writing:
 > 15.7× isolated, ~0% e2e). Your seed competes against the live Triton path, not against itself.
 
 ## Rules (NON-NEGOTIABLE)
+0. The authored candidate must not include, call, import, dynamically load, or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, MIOpen, aiter-backed library kernels, or PyTorch matmul/mm/bmm/linear. The frozen real-online baseline/oracle alone may contain them. HIP runtime/language APIs, compiler/device/MFMA intrinsics, inline AMDGCN assembly, Triton, and genuinely candidate-authored DSL kernels are allowed when the resulting candidate artifact has no forbidden dependency. Run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` on candidate sources/build files before correctness and candidate ELFs after build; any finding, inspection error, or missing passing receipt means `authored:false` and must not be benchmarked.
 1. NEVER modify `TASK_DIR/unittest.py`, `meta.json`, `baseline_src/`, or `reference_io.pt` if the dir has
    one — they are the
    immutable oracle + the frozen real-online-kernel baseline (anti-cheating). You only write into
@@ -89,7 +81,19 @@ Read, as reference, before writing:
 2. Preserve the **callable signature the unittest imports/calls** (read the unittest to learn the exact
    entry point name + argument order it expects). Your implementation must be a drop-in for it.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness/benchmark via
-   `cd $WORKSPACE && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`.
+   `cd $WORKSPACE && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID bash $SKILL_DIR/scripts/gpu_fence_run.sh <cmd>`.
+   **Never weaken the lock's idleness gate to unblock yourself — finding (128).** When `gpu_lock.sh`
+   blocks, or exits `no free+idle GPU in pool [...]`, the pool is held by a job it can see through
+   sysfs and `flock` cannot: on this host that has meant a second container running all cards at
+   95–100% busy with ~152 GB resident each. Setting `GEAK_GPU_REQUIRE_IDLE=0`, raising
+   `GEAK_GPU_MAX_BUSY_PCT` / `GEAK_GPU_MAX_VRAM_MB`, or exporting `HIP_VISIBLE_DEVICES` around the
+   lock all "work" — they hand you a GPU, your commands run, and every number you report afterwards
+   was measured against someone else's load. That is strictly worse than being blocked: a blocked
+   run announces itself, a contaminated one does not, and it is indistinguishable from a real
+   result for as long as anyone believes it. `GEAK_GPU_POOL_WAIT` (how long to WAIT) is the only one
+   of these you may raise. If the wait expires, STOP and report the contention AS your result —
+   the pool was busy, for how long, and what sysfs said. "Could not measure" is a usable answer;
+   a number produced under contention is not.
 4. Correctness-first: a fast-but-wrong implementation is a FAILURE here. Do not chase performance;
    the optimize loop does that next. Aim for a clean, readable, correct first cut.
 5. Match dtype/tolerance to the oracle (the unittest already encodes bf16/fp16 rtol=atol=2e-2 etc.) —
@@ -105,7 +109,7 @@ Read, as reference, before writing:
    you provide a build command (e.g. `torch.utils.cpp_extension.load`) the unittest can invoke, OR a
    thin python wrapper that JIT-builds on import. Triton and **flydsl** need no build (both JIT —
    flydsl compiles to GPU code through its embedded MLIR runtime on first launch).
-4. **Correctness loop**: `cd $WORKSPACE && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID python3
+4. **Correctness loop**: `cd $WORKSPACE && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID bash $SKILL_DIR/scripts/gpu_fence_run.sh python3
    $TASK_DIR/unittest.py` (or the COMMANDMENT CORRECTNESS cmd). Debug until it PASSES every case.
    Correctness is judged on BOTH the frozen oracle cases AND a random-input parity check that compares
    your kernel's output to the FROZEN ONLINE baseline on several random in-regime value draws at the same

@@ -22,6 +22,52 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 
 ---
 
+## QD archive addendum (only when QD inputs are present)
+
+A QD run still uses the same immutable baseline, oracle, canonical workspace, and final validation. If a
+`QD_STATE_DIR` is supplied on setup, treat it as immutable and never write, rename, lock, initialize, build,
+or benchmark inside it. Read `manifest.json`; fail closed with `qd_import_status:"rejected"` when it is
+missing/malformed, a referenced content-addressed artifact is absent, its tree does not hash to the recorded
+`source_hash`, or a v2 `(context_id, descriptor)` does not map back to the recorded cell.
+
+A matching `QD_CLASSIFIER_VERSION=geak-qd-v2` manifest may be imported normally. A v1 or otherwise mismatched
+manifest is rejected unless `QD_RECLASSIFY=true`; explicit reclassification permits only source snapshots to
+be copied as untrusted candidates. Discard every historical cell/descriptor/route/score in that mode and set
+`needs_reclassification:true`: current-run VerifyEngineer must independently recover exact harness contexts,
+route evidence, named v2 descriptors, source hash, correctness, policy, and repeated measurements. Never map
+an ordinal v1 descriptor to v2 by position or natural-language analogy.
+
+Deduplicate manifest cells by `source_hash`. For each unique source, copy
+`QD_STATE_DIR/qd_archive/artifacts/<source_hash>/workspace` source-only into
+`EVAL_DIR/qd_archive/imported/<source_hash>/workspace` using a tar pipe that excludes `.git`, build
+directories, caches, logs/reports, generated hipify copies, `*.so`, and `*.o`; never dereference symlinks.
+Run `$SKILL_DIR/scripts/qd_v2.py hash-tree` before and after the copy and require both hashes to equal the
+manifest hash. Imported snapshots must obey the current candidate/oracle split. Do not exempt or carry a
+mixed artifact where the candidate wrapper, binding, header, source, or loader calls/links a forbidden
+library merely because that library was historically used as the oracle. An exemption is allowed only for a
+separately built immutable oracle subtree/ELF that is not part of the candidate source list or candidate
+dependency graph. Run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` on every copied
+candidate-owned source/wrapper/build path with only those narrow immutable oracle exemptions. Save one
+canonical receipt at `EVAL_DIR/qd_archive/imported/<source_hash>/policy_import.json`. Reject that source on
+any finding or inspection error. A historical mixed rocBLAS/hipBLAS/CK candidate therefore imports as
+rejected; the workflow may still use a separately reconstructed, policy-clean source route supplied through
+the current task, but must not silently rewrite the archived snapshot during import.
+
+Do not copy historical `global_best`, fitness, visits, stalls, generation, cost, challengers, capsules, or
+transitions into the live archive. Historical scores are metadata only and must not select a parent or global
+best. Return `qd_import_status:"ready"`, `qd_import_source`, a sanitized `qd_import_manifest`, and one
+`qd_import_candidate` per unique source artifact containing `source_hash`, copied `snapshot`, the eligible v2
+route/context references (empty when reclassifying), `historical_geomean`, `historical_robust`, `policy_pass`,
+receipt path, and `needs_reclassification`. If no source survives, return `qd_import_status:"rejected"` and
+an empty list. The orchestrator independently re-runs evidence classification, correctness, and at least
+three complete measurements before a copied source can enter any live cell. Multiple verified route/context
+cells may then reference that one content-addressed artifact.
+
+At final validation, audit that the final patch was materialized from an archive snapshot as a patch
+relative to the immutable original baseline. Never apply an ancestry-relative elite patch directly to the
+user's original tree. All existing correctness, timing-receipt, arbitration, and conditional writeback
+rules remain unchanged.
+
 ## PHASE=setup
 
 Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped runs),
@@ -77,7 +123,7 @@ Do this instead of the optimize-mode steps below:
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
    [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '__pycache__.*/' '*.pyc' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -138,7 +184,7 @@ Steps:
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '__pycache__.*/' '*.pyc' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
@@ -182,8 +228,104 @@ Return JSON:
   "notes": "anything unusual about the layout"
 }
 ```
+When `QD_STATE_DIR` was provided, add these fields to the same object:
+```json
+{
+  "qd_import_status": "ready|rejected",
+  "qd_import_source": "<immutable QD_STATE_DIR>",
+  "qd_import_manifest": {"version": 2, "classifier_version": "geak-qd-v2"},
+  "qd_import_candidates": [
+    {"source_hash":"sha256", "snapshot":"<copied content-addressed workspace>",
+     "route_descriptors":[{"route_id":"...", "case_ids":["exact_harness_case_id"],
+       "descriptor":{"compute_primitive":"native_mfma", "wave_schedule":"independent",
+         "k_pipeline":"lds_single", "decomposition":"tile_grid", "output_path":"direct_store",
+         "rasterization":"linear", "plan_binding":"static"}}],
+     "historical_geomean":0.0, "historical_robust":{}, "policy_pass":true,
+     "policy_receipt":"<policy_import.json>", "needs_reclassification":false}
+  ]
+}
+```
+```
 (`baseline_frozen`/`baseline_callable` are REQUIRED — the orchestrator aborts the run if `baseline_frozen`
 is false AND `baseline_callable` is empty, to avoid timing the candidate against `kernel_src/`.)
+
+**`oracle_digest` is REQUIRED (finding (67)).** Pin the immutable oracle BEFORE any engineer runs, and
+return the digest as `oracle_digest`:
+
+`TASK_DIR` is supplied to you in your inputs. **`export TASK_DIR=<that exact path>` before running the snippet** — it is the frozen original task dir, never the workspace. The snippet refuses to run without it rather than digesting wherever you happen to be standing.
+
+```bash
+# ORACLE DIGEST -- finding (81). Run this VERBATIM. It is identical in
+# roles/verify_engineer.md, and it has to stay that way: when both sides of a
+# consistency check author their own version, the check compares two different
+# functions and agreement is luck. Do NOT improvise a file list, do NOT "fix" it
+# for this task's layout, and do NOT narrow it. If it cannot run, return no
+# digest at all (the run is marked oracle:unpinned) rather than a substitute.
+#
+# The previous version named four paths from the generic task layout
+# (unittest.py meta.json reference_io.pt baseline_src). On a task that has none
+# of them, `find` matched nothing, `xargs` ran `sha256sum` with no arguments,
+# sha256sum read empty STDIN, and the pipeline returned the constant
+# abcfa6a9d4df344d...  -- a well-formed 64-hex digest covering ZERO bytes of the
+# oracle, identical before and after any modification. A digest whose file set
+# can be empty is not a digest, so the count guard below is the load-bearing
+# line, not a courtesy.
+oracle_digest() {
+  # `cd "$TASK_DIR" || return 1` is NOT a guard -- finding (119). In bash, `cd ""`
+  # is a silent no-op that returns 0, so an unset or empty TASK_DIR does not fail
+  # here: the digest is taken of whatever directory the agent happens to be in.
+  # Every role is told to work from inside the eval WORKSPACE, so the failure mode
+  # is not "no digest" but "a confident digest of the candidate tree" -- the 34
+  # files the engineers are supposed to be editing instead of the 19 immutable
+  # oracle files. It then disagrees with the pin on EVERY verification and the lane
+  # reports the oracle as rewritten mid-run. That killed round 14 after 99 minutes.
+  local dir="${TASK_DIR:-}"
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    echo "oracle:digest_no_task_dir (TASK_DIR='${dir}' is empty or not a directory;" \
+         "refusing to digest the current directory in its place)" >&2
+    return 1
+  fi
+  cd "$dir" || return 1
+  # Everything in the task tree except build output, caches and binaries (those are
+  # rebuildable and not bit-stable, so including them would produce false drift).
+  # Layout-agnostic on purpose: it covers reference_io.pt, meta.json, unittest.py,
+  # baseline_src/, harness_lib.py, config.yaml, src/ and anything a future task
+  # adds, without anyone having to remember to extend a list.
+  local find_args=( . -type f
+    ! -path './build/*' ! -path './.git/*' ! -path '*/__pycache__/*'
+    ! -name '*.pyc' ! -name '*.so' ! -name '*.o' )
+  local n; n=$(find "${find_args[@]}" | wc -l)
+  # Fail closed on an empty file set. The identity element is a valid-looking
+  # answer that means "I read nothing" and reads exactly like "nothing changed".
+  if [ "$n" -eq 0 ]; then
+    echo "oracle:digest_empty_fileset (refusing to return the hash of nothing)" >&2
+    return 1
+  fi
+  echo "oracle digest root: $PWD" >&2
+  echo "oracle files digested: $n" >&2
+  find "${find_args[@]}" | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
+}
+oracle_digest
+```
+
+Report the **root** and the **file count** it printed to stderr alongside the digest. Both sides of
+the check must name the same root: a digest taken in the workspace is a digest of the candidate,
+which is *supposed* to change, and it will read as the oracle having been rewritten.
+
+Report the file count this printed to stderr alongside the digest in your notes. Two runs of the
+same oracle must agree on **both**; a digest that matches while the count changed means the two
+sides disagreed about the subject, not about its contents.
+
+This is the denominator of every speedup in the run, the correctness reference for every candidate, and
+— because the QD archive outlives the run — the yardstick every future warm-started elite was scored on.
+The golden is shipped into each engineer workspace as an **absolute symlink** (the tars deliberately do
+not dereference it), so a write to that path inside a sandbox writes through to the one shared original.
+The VerifyEngineer recomputes this digest with the identical command on every verification and the lane
+compares them: a mismatch **fails the whole run closed**, because every measurement already taken —
+including elites already admitted to the archive — was scored against a denominator that no longer
+exists. Omitting the digest does not abort, but it marks the run `oracle:unpinned`: results are still
+reported and are permanently ineligible to win a bake-off, because nothing can show they share a
+denominator. Return the same digest again in `director_validation.json` at validate time.
 (DEEP-MODE resume only: also include `"resumed": true` and `"prior_state": {cumulative, insights, ledger,
 bottleneck_now, best_per_case}` when you seeded from `$STATE_DIR/best/`; omit both on a normal/first run.)
 
@@ -224,12 +366,14 @@ baseline latencies recorded at benchmark setup).
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
    git -c user.email=team@workflow -c user.name=team commit -q -m "validation_baseline"
+   git apply --check "$EVAL_DIR/final_patch.diff"
    git apply "$EVAL_DIR/final_patch.diff"
    # (No artifact cleanup needed — the tar copy excluded build/__pycache__/*.so; git apply adds only source.)
    ```
-3. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status
-   `flagged`, record the failure, do NOT report a speedup as accepted.
-4. Run FULL_BENCHMARK with `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <full bench cmd>`. Parse the
+3. Before executing candidate code, run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` on every candidate-owned source, wrapper, build/link file, imported/generated snapshot, and any candidate ELF in the validation workspace. Exempt only separately frozen immutable baseline/oracle paths; a mixed candidate+oracle artifact is never exempt. Candidates must not include, call, import, dynamically load, or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, MIOpen, or indirect PyTorch matmul/mm/bmm/linear. HIP runtime/language APIs, MFMA/device intrinsics, inline AMDGCN assembly, and header-only rocWMMA are allowed only with a clean candidate ELF. Store `policy_prebuild.json`; any finding, inspection/tool error, missing path, or absent passing receipt fails closed: `validation_status:"flagged"`, `policy_pass:false`, no correctness/benchmark/writeback.
+4. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status `flagged`, record the failure, do NOT report a speedup as accepted. Scan all newly built candidate ELFs and candidate source/build paths again into `policy_postbuild.json`; forbidden dependencies/symbols/strings or an absent passing receipt are flagged and benchmarking stops.
+5. Run FULL_BENCHMARK with `$GPU_LOCK_ENV bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID bash $SKILL_DIR/scripts/gpu_fence_run.sh <full bench cmd>`.
+   `GPU_LOCK_ENV` is an optional caller-authorized prefix; omit it when absent. Parse the
    per-case latencies.
 5. Compute per-case speedup = `baseline_ms / optimized_ms` using `BASELINE_TIMING`. Compute geomean
    = `exp(mean(log(speedups)))` and arithmetic mean.
@@ -262,7 +406,9 @@ baseline latencies recorded at benchmark setup).
    FULL_BENCHMARK output (see `oracle_freezer.md` step 4) and copy it verbatim into
    `director_validation.json` as `timing_receipt`. A speedup is a claim about DEVICE time; the receipt is
    the only evidence that it is one. Then:
-   - `all_primed: true` → proceed normally.
+   - `all_primed: true` → proceed normally, and set `timing_basis: "device"`. This is the ONLY clean
+     value; the three below are the unclean ones. (Finding (65): this rule required the field but named
+     no value for the passing case, so a Director that followed it literally had nothing legal to write.)
    - `all_primed: false` with `timer_unprimed: false` → at least one leg is HOST-BOUND at these dims. The
      ratio is a dispatch-latency ratio, not a kernel speedup. Still report the number, but set
      `timing_basis: "host_bound"` and name the affected cases in `arbitration_note` — a host-bound win does
@@ -276,6 +422,13 @@ baseline latencies recorded at benchmark setup).
      `status: "flagged"`. Absence is not evidence of priming.
    Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
    that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
+   The lane now enforces this rather than trusting the instruction (finding (65)): `timing_basis` is part
+   of the validate schema, a missing one defaults to `"unknown"` (absence is not evidence of priming), and
+   any basis other than `"device"` marks the lane `validation_trust: "flagged"` — reported in the table,
+   but ineligible to win the bake-off. The same applies to `correctness` (anything not leading with
+   `pass` refuses the speedup outright) and to `validation_status` (anything not leading with `accept`
+   or `validated` is flagged). Returning no verdict at all is `unverified` and publishes NO speedup: the
+   TechLead's self-report survives only as `tech_lead_reported_geomean` and never as a verified number.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
    ```bash
    cd "$KERNEL_PATH_ORIG"
@@ -285,6 +438,7 @@ baseline latencies recorded at benchmark setup).
      git -c user.email=team@workflow -c user.name=team add -A
      git -c user.email=team@workflow -c user.name=team commit -q -m "pre_team_baseline"
    fi
+   git apply --check "$EVAL_DIR/final_patch.diff"
    git apply "$EVAL_DIR/final_patch.diff"
    ```
    Otherwise leave the original untouched.

@@ -373,6 +373,11 @@ phase('Report');
 const cands = results.map(x => ({
   lang: x.lane.lang, mode: x.lane.mode, kind: 'lane', speedup: x.speedup,
   validation_status: x.r ? x.r.validation_status : 'failed',
+  // Finding (65): the lane's own verdict on whether its number is an independently-arbitrated
+  // device-time ratio. Carried onto the row so the table shows it and the ranking can gate on it.
+  validation_trust: x.r && x.r.validation_trust ? x.r.validation_trust : 'unverified',
+  timing_basis: x.r && x.r.timing_basis ? x.r.timing_basis : 'unknown',
+  validation_reason: x.r ? x.r.validation_reason : null,
   eval_dir: x.r ? x.r.eval_dir : '', patch: x.r ? x.r.final_patch : '', apply_env: '', tuning_artifact: '',
 }));
 // (b) tuned env backend candidate (only if it beat the frozen baseline)
@@ -390,7 +395,20 @@ if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend &
 // transparency but must never win "by default"; winner=null => validation_status 'no_winner' => keep
 // the original kernel. Without this, a lane that is SLOWER than baseline (e.g. the only non-failed lane
 // at 0.17x) would be mislabeled the winner and mislead downstream automation reading .winner.
-const ranked = cands.filter(c => c.speedup > 1.0).sort((a, b) => b.speedup - a.speedup);
+// Finding (65). Beating the baseline is necessary and was treated as sufficient: this filter ranked on
+// speedup alone and carried `validation_status` as a display column, so a lane whose Director validate
+// agent hung — publishing the TechLead's own self-report — could out-rank a lane that was actually
+// arbitrated, and a lane flagged `unprimed`/`host_bound` could win on a dispatch-latency ratio. A lane
+// only wins on a verdict its own arbiter stands behind; everything else stays in the table (laneRows)
+// with its reason, which is the difference between "excluded" and "found nothing" (48).
+const rankable = (c) => c.kind !== 'lane' || c.validation_trust === 'verified';
+for (const c of cands) {
+  if (c.speedup > 1.0 && !rankable(c)) {
+    log(`lane ${c.lang}:${c.mode} scored ${c.speedup.toFixed(2)}x but cannot win: ` +
+        `${c.validation_reason || `validation_trust=${c.validation_trust}`}`);
+  }
+}
+const ranked = cands.filter(c => c.speedup > 1.0 && rankable(c)).sort((a, b) => b.speedup - a.speedup);
 const winner = ranked[0] || null;
 const laneRows = cands;
 const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
@@ -416,7 +434,11 @@ const rep = await agentT(
    - The op: ${oracle.op_kind} from ${KERNEL_PATH_ORIG} (task_dir ${oracle.task_dir}).
    - The FROZEN baseline (the ONE denominator every candidate shares): the input kernel itself
      (baseline_ms = ${bake.baseline_ms != null ? bake.baseline_ms : 'unknown'} ms; op_bench best_known_ms = ${bake.best_known_ms != null ? bake.best_known_ms : 'unknown'} ms).
-   - A candidate table sorted fastest-first with columns: language | mode | kind (lane|env) | speedup vs frozen baseline | validation_status | eval_dir | patch/env.
+   - A candidate table sorted fastest-first with columns: language | mode | kind (lane|env) | speedup vs frozen baseline | validation_trust | timing_basis | validation_status | eval_dir | patch/env.
+   - Finding (65): every quoted speedup MUST carry its \`timing_basis\` — an unlabelled number is read as
+     a clean device-time win, and \`host_bound\`/\`unprimed\`/\`unknown\` are not one. A row whose
+     \`validation_trust\` is not \`verified\` is ineligible to win no matter how fast it is; state its
+     \`validation_reason\` in the table or a footnote rather than dropping the row.
    - The WINNER (fastest verified) and a one-paragraph rationale. All speedups are directly comparable
      because every candidate — the input-language optimize lane, each authored language, AND the tuned
      env backend — was scored against the SAME frozen input kernel.

@@ -1,0 +1,108 @@
+{
+  "task": "dense_bf16_gemm_fused",
+  "base_task": "/home/yxh/GEAK/examples/tasks/dense_bf16_gemm",
+  "canonical_compile_source": "src/dense_bf16_gemm.hip",
+  "gpu": 2,
+  "candidate_library_policy": {
+    "amd_high_performance_libraries": "forbidden",
+    "baseline_oracle_exception": true,
+    "allowed_candidate_primitives": [
+      "HIP runtime",
+      "HIP language and compiler intrinsics",
+      "AMD ISA intrinsics",
+      "rocWMMA header-only fragment abstraction"
+    ],
+    "forbidden_candidate_dependencies": [
+      "rocBLAS",
+      "hipBLAS",
+      "hipBLASLt",
+      "Tensile",
+      "Composable Kernel",
+      "MIOpen"
+    ]
+  },
+  "frozen_harness": {
+    "path": "harness_lib.py",
+    "sha256": "51404cf55a03d961b3e18a0e5376a6eaa412710ee94229c90718e604c7fd8725",
+    "timer_contract": "dispatch-primed-v1",
+    "contains_write_probe": true,
+    "repin_note": "Re-pinned from be423efd1c934a84. The previous pin named a harness WITHOUT assert_writes_output, while scripts/task_runner.py imported a different (uncommitted) copy that had it -- so the no-op gate was carried by an import-order accident, not by the pin. The task now carries the probe in its own harness and the pin names that file.",
+    "write_probe": "two_sentinel",
+    "repin_note_2": "Re-pinned again after the single-sentinel write probe was proven to false-fail: the rocBLAS oracle itself contains an element exactly equal to POISON_A on prefill_m512_up (1 of 5,636,096), so 'still equals the sentinel' does not imply 'not written'. The probe now poisons twice with two different sentinels and intersects the survivors; coincidence is excluded by construction rather than by threshold. Proof: e2e_workflow/scripts/tests/test_write_probe_coincidence.py (6/6)."
+  },
+  "active_candidate": {
+    "id": "qd_m1_vectorized",
+    "source": "/home/yxh/GEAK/exp/qd_bf16_gemm_budget10_gpu2/team_dense_bf16_gemm_20260813_052022_72455_8555/dense_bf16_gemm/final_patch.diff",
+    "mechanism": "exact M=1 uint2 BF16 loads with four independent FP32 accumulators",
+    "historical_score": 1.009643,
+    "historical_score_status": "untrusted_old_timer",
+    "uses_forbidden_candidate_library": false
+  },
+  "historical_experiments": [
+    {
+      "id": "20260812_083856",
+      "path": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_083856_7014_28514/dense_bf16_gemm",
+      "historical_score": 1.05484,
+      "route": "remove duplicate Python input validation",
+      "classification": "experimental"
+    },
+    {
+      "id": "20260812_112433",
+      "path": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_112433_21598_21480/dense_bf16_gemm",
+      "historical_score": 1.0,
+      "route": "no retained candidate",
+      "classification": "rejected"
+    },
+    {
+      "id": "20260812_114947",
+      "path": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_114947_25502_24287/dense_bf16_gemm",
+      "historical_score": 1.210824,
+      "route": "rocBLAS solution enumeration and cache",
+      "classification": "forbidden_library_route",
+      "execution_policy": "archive_only_do_not_build_or_run"
+    },
+    {
+      "id": "20260812_121819",
+      "path": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_121819_29597_26406/dense_bf16_gemm",
+      "historical_score": 1.0,
+      "route": "no retained candidate",
+      "classification": "rejected"
+    },
+    {
+      "id": "20260812_123801",
+      "path": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_123801_32181_1710/dense_bf16_gemm",
+      "historical_score": 1.0,
+      "route": "no retained candidate",
+      "classification": "rejected"
+    },
+    {
+      "id": "20260812_131559",
+      "path": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260812_131559_36792_20083/dense_bf16_gemm",
+      "historical_score": 1.067355,
+      "route": "cached exact-shape hipBLASLt",
+      "classification": "forbidden_library_route",
+      "execution_policy": "archive_only_do_not_build_or_run"
+    },
+    {
+      "id": "20260813_052022_qd",
+      "path": "/home/yxh/GEAK/exp/qd_bf16_gemm_budget10_gpu2/team_dense_bf16_gemm_20260813_052022_72455_8555/dense_bf16_gemm",
+      "historical_score": 1.009643,
+      "route": "M1 uint2 loads and four FP32 accumulator chains",
+      "classification": "retained_source_seed"
+    },
+    {
+      "id": "20260813_064839",
+      "path": "/home/yxh/GEAK/exp/team_dense_bf16_gemm_20260813_064839_84255_27347/dense_bf16_gemm",
+      "historical_score": null,
+      "route": "incomplete run",
+      "classification": "incomplete"
+    },
+    {
+      "id": "budget30_state",
+      "path": "/home/yxh/GEAK/exp/dense_bf16_gemm_budget30_state",
+      "historical_score": 1.0673546031944496,
+      "route": "cross-wave retained state and dead-end ledger",
+      "classification": "research_state_only"
+    }
+  ]
+}

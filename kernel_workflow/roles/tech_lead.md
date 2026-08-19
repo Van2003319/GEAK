@@ -139,6 +139,31 @@ passes them):**
 - `HARNESS_ADDENDUM` — path to an e2e-refined harness addendum (which cases to weight, a cudagraph-capture
   wrapper, hard constraint gates). Plan toward the addendum's weighted target.
 
+<a id="isa-evidence-hooks"></a>
+**ISA evidence hooks — unlike the deep-mode hooks above, these are the NORMAL case** (present whenever
+the lane runs `isa_evidence=observe|gate`, and `observe` is the default):
+- `ISA_EVIDENCE_DEPTH` — what the ladder actually REACHED, never what it asked for. `pattern` = nothing
+  deeper ran. `isa` / `compiler` = an analysis at that depth returned a diagnosis.
+  `pattern_after_failed_escalation` = machine-code evidence was requested and produced nothing, so you
+  are planning at the cheap level; say so rather than citing evidence that does not exist.
+- `ISA_ESCALATION_REASON` — why the ladder spent the run's most expensive evidence.
+- `ISA_ANALYSIS_SKIPPED` — a depth was requested and could not run (normally: the canonical tree carries
+  no archive yet). Treat the round as `pattern` and do not describe it as machine-code-informed.
+- `ISA_ATTRIBUTION` — the analysis itself, when one came back. Two of its fields BIND this round's plan:
+  - `ruled_out` is a refusal list, not a suggestion. Do not issue a direction it already killed. If you
+    think one is still live, name it and name the new evidence — an unexplained re-issue spends a build
+    rediscovering what was just paid for, which is the specific waste this ladder exists to prevent.
+  - `source_change_required` is the CONDITION the next edit must meet — a precondition, not a rewrite
+    ("the destination stride must be a multiple of 16", never "use `uint4`"). At least one direction
+    must state how it satisfies that condition, or `reasoning` must say why you are declining it.
+  - `status:"inconclusive"` carries neither obligation, but it is still a finding: record that the
+    machine code did not explain the plateau, so the next round does not re-request the same depth
+    expecting a different answer.
+
+Why these bind rather than merely inform: this ladder earns its cost mainly by REJECTING plausible
+directions before they are paid for in benchmark rounds, not by discovering the winner. A planner that
+reads `ruled_out` as advice turns the whole layer into a per-round tax that buys nothing.
+
 **Workload-aligned runs (COMMANDMENT METRIC = time-weighted ratio-of-sums):** `CUMULATIVE_SPEEDUP` is
 then the time-weighted speedup, and the per-case table carries each case's `count` / time-share. Steer
 toward the cases that DOMINATE that weighted metric (high `count·latency` share) — a big win on a
@@ -230,12 +255,33 @@ Rules:
    | rasterization / L2 traffic (`prefill_m1024_down`, `prefill_m256_down` only) | −36% and −25% DRAM traffic, +12/+16 pts L2 hit rate → **+6.8% slower** and flat; control `decode_m8_up` unmoved | (38) | the compute side changes enough that traffic could become binding |
    | prefetch depth / `s_waitcnt` placement | exposure is 0.05–0.27 of `VmemLatency`; the pipeline already hides 73–95% of memory latency | (73) | a variant pushes exposure above ~0.4 |
    | barrier count | one extra barrier per stage = **+0.9% geomean**; the kernel has one barrier | (74) | a variant introduces several barriers per stage |
+   | register prefetch depth **PF>1 on an already-resident tile** (the 5 decode routes `m2`/`m8`/`m16`/`m32`/`m64`, plus `prefill_m1024_down` / `prefill_m2048_square`) | the round-7 sweep that *shipped* `PF=4` on `128x64_bk64` swept the sibling tiles too and measured **`PF=1` optimal on both**. PF buys in-flight bytes per CU, so it pays only where residency starves them, and the result is monotone in CTA/CU: `128x64_bk64` 26 112 B = **2 CTA/CU won** (`decode_m96_up` 66.48→60.34 µs, +10.2%); `64x64_bk64` 17 408 B = 3 CTA/CU **lost**; `32x64_bk64` 13 312 B = 4 CTA/CU **lost**. **Registers were never the binding term** — every tile has 17–42 spare VGPR+AGPR and holds occupancy through PF=4, so *an occupancy screen says yes to all three and is not evidence of a prize*. **Round 8 closed the last untested residency point**, the BK=32 `128x128` body at 18 432 B = 3 CTA/CU, with `PF=2` (`PF=4` costs an occupancy wave): `prefill_m1024_down` 300.0→302.2 µs = −0.72% against a **measured** 0.97% floor (no effect, sign unstable across cycles) and `prefill_m2048_square` 187.3→192.5 µs = **−2.79%** against a 0.72% floor (regression, both cycles agreeing, Welch p≈0.008), replicated in a second 8-block full-suite run. Same-session control build, one-line resource diff (VGPR 74→86), zero sibling drift. **Four residency points, no untested member left — do not spend another slot on prefetch depth anywhere on this kernel** | (round 7 of this lane, extended by round 8) | a variant raises a tile's LDS bill to ≤2 CTA/CU, the only residency class PF has won in; or PF is aimed at a **compute-bound** route (AI above the ~247 flop/byte ridge) — **unreachable on this kernel**, whose CTA-level AI is `BM*BN/(BM+BN)` = 64 and tops out at 128 inside the LDS budget |
    | MFMA shape 16×16×16 → 32×32×8 | reaching the axis worked; taking it is a **13–16% loss** | (41)-(43) | a toolchain actually *selects* the large shape instead of emulating it |
    | active-CU fraction as the clock residual | p = 0.134 against 20 000 relabelings; n = 22 | (45) | the sample grows well past n = 22 |
    | `output_path` on split-K routes | closed **both** directions: `direct_store` 0.8267 suite, `atomic_fixup` 1.0533 vs incumbent 1.0970. Replicated far harder as v78: **−43.6% geomean**, every split-K route −63% to −132%, while the two routes that never split K moved −0.80%/+0.29%. The cost is *not* the 4.7 µs dispatch: winner-take-all collapses reduction parallelism by a factor of `slices` and spends it at the tail, and the handoff fence is device-scope on an 8-XCD part so every strided partial read misses L2 | run 16 | slice counts drop to ~1–2 |
    | raising the split-K slice count to fill idle CUs | `prefill_m128_square` is the **only** route that leaves CUs idle (256 CTAs on 304 CUs); every other route already runs 1.54–2.26 CTAs/CU because `plan_slices` targets `cu+cu/2`. Forcing s=4→8 fills it to 1.68 CTAs/CU and costs **+18%** (37.0/37.1/37.0 → 43.5/44.0/43.8 µs, ABBA, oracle flat at 33.9–34.4). The shipped autotuner reaches the same answer independently: its ladder covers s=8 and keeps 4 | run 17 | a tile change drops a route below one CTA/CU for a reason *other* than slice count |
    | shortening the N-strip to raise CU occupancy | all 6 changed routes readably **slower** (+8.3% to +79.6%); 5 byte-identical control routes moved ≤0.44% against a ±2.48% bound. The N-strip is a *reuse* axis: 4→1 waves quadruples A-tile loads, and the penalty tracks reuse lost, not CUs gained | (67) | CTA count can be raised *without* cutting per-CTA N reuse — of the two candidates this once named, **split-K with reduction is now closed too** (row above, run 17), leaving an A tile resident in LDS and shared across CTAs |
    | `buffer_load` + SGPR resource descriptor instead of a 64-bit VGPR address in the inner loop | suite geomean **time 1.0100x — 1.00% slower**. 3/11 separated slower (`prefill_m1024_down` +4.3%), 0/11 faster; oracle arm ≤1.52% across the rotation. Closed **against four static screens that all said yes**: clean compile, the intended `buffer_load_dwordx4` in the ISA, −2 to −20 VGPR on 16/17 routes with zero spills, one route's CTA/CU doubling. (i) `v_lshl_add_u64` hit 0 in all 17 loops but the compiler refilled the slots — loop length flat or *worse* (m128 169→175). (ii) The one route whose CTA/CU doubled, `<96,128,2,2,64>`, **is not reached by any of the 11 cases**. The static loop metric is sign-inverted on the worst regression | (147) | LDS per CTA falls far enough that residency stops being pinned at 1 block/CU by the 50,688 B panel, so freed registers can buy something; or a suite shape actually takes the `<96,128,2,2,64>` arm; or a formulation where measured loop length actually falls |
+
+   | raising workgroup count / machine fill on `prefill_m2048_square` by moving the dispatch gate onto the narrower BN=64 tile (`kWideTileGate` 400 → 512) | **+24.8% SLOWER** (186.1 → 232.2 µs, 8 interleaved `--case` blocks, ~34× the measured 0.72% floor); the gate change is provably pure — 12/12 offline gate test, whole-tree resource diff over 14 kernels × 8 fields byte-identical. Fill *is* fixed (56% → 84% of one wave) and it still loses: on this route the 128×128 tile's arithmetic efficiency binds, not fill. Halving BN costs ~2× what it does at M=1024 because the A panel is re-read across 16 tile-rows. **`kWideTileGate` = 400 is now measured optimal on its upper side** | (round 9 r2_d0 of this lane) | the BN=64 body's A stream stops doubling under a halved BN (LDS-resident or cross-CTA-shared A tile) |
+   | LDS bank-conflict removal (swizzle / pad / stride) in the BK=32 macro bodies | `SQ_LDS_BANK_CONFLICT` = **exactly 0** on `macro_gemm_128x128_kernel` and `macro_gemm_128x64_kernel`, with a hand-written positive control at 96.9% in the same session proving the counter live. Nothing to remove; the prize is bounded at zero by construction, and `kMacroLdsStride=36` is already the unique legal stride at BK=32 | (round 9 r2_d1 of this lane) | a variant changes these bodies' LDS layout or fragment access pattern and re-measures the counter above zero |
+   | direct-to-LDS async global loads (delete the `ds_write` half of every K stage) | **refuted statically, zero GPU seconds**. `__builtin_amdgcn_global_load_lds(size=4)` compiles for gfx942 and emits `global_load_lds_dword`; `size=16` is a HARD COMPILE ERROR on gfx942 and compiles clean on gfx950 — the hardware path moves 4 B/lane where the incumbent's `global_load_dwordx4` already moves 16. Replacement inflates the 128-instruction `128x128` inner loop to ≥136 and realistically ≥144 (+12.5%) to delete a `ds_write` surface of 4 instructions = **3.1%**; the `128x64` body agrees in sign (74 → 80). Layout is independently fatal: the DMA destination is `M0 + inst_offset + lane*4`, 256 contiguous bytes, and the panel is a 72-byte padded row — the incumbent's PAIRED `ds_write2_b64` is the ISA corroboration. Bounded at zero by **arithmetic**, not by a floor | (51)/(52), round 10 r1_d0 of this lane | the target is gfx950; or a loop whose global reads are already 4 B/lane |
+   | instruction-scheduling hints inside the BK=64 macro body (`iglp_opt` / `sched_group_barrier`) | −0.31% / −0.03% / +0.75% on `decode_m96_up` / `prefill_m128_square` / `decode_m64_square`, all inside the epoch-T floor with fully overlapping arm ranges; `iglp_opt(2)` is the only resource-free value (whole-tree diff, 14 kernels × 8 fields, 0 changed). Closed by **construction**: `SQ_WAIT_INST_LDS` is 0.050 of wave cycles, so at most 5 of the 35 exposed-dependency-wait points sit on the `ds_read`→`mma` chain a hint can reorder inside an `s_barrier`-bounded region; the other ~30 are on the global→LDS staging edge, fenced by `__syncthreads()` on BOTH sides and unreachable by any intra-region hint | (54)/(55), round 10 r1_d1 of this lane | the **barrier structure** of `macro_gemm_body_bk64` changes so the staging edge falls inside one scheduling region |
+   | four split-K slices | `decode_m96_up` 72.89 / 60.34 / **68.26** / 60.97 / 64.84 µs for splits 2/3/4/5/6 — four is 13.1% worse than three and 12.0% worse than five **despite having fewer workgroups than five** (688 vs 860); `prefill_m128_square` (the 2 CTA/CU route, swept at 4 for the first time) loses 1.3% to the incumbent 8. Same binary across all arms. Runtime is NON-MONOTONE in workgroup count, so the exposed-fraction model is a diagnostic, not a cost function — the third model in this lane to fail that way. On the BK=64 routes the dominant term is **slice-length quantisation**: counts that divide the stage count cost 34.15/33.71 µs, ragged ones 37.11/36.82 µs, at identical residency | (57), round 10 r1_d2 of this lane | a tile or K-stage change makes 4 divide the stage count evenly where the incumbent count does not |
+   | cross-N-tile **A-panel reuse** (stage the A macro-panel in LDS once, sweep several N tiles per CTA) on the `128x128` BK=32 body | priced by two source probes that give the **ceiling**, not the sweep: collapsing all 8 A tile-rows onto one slab (A footprint 22.5 MB → 2.8 MB, permanently L2-resident, instruction stream untouched) buys **−3.05%**; the symmetric B probe buys **−8.26%**; both together **−16.9%**. The whole A substream is 9.3 µs of a 306 µs call, so the ideal A-reuse ceiling is 261.1 µs against a 245 µs target and an S-way sweep captures only (1−1/S) of it — 4.6 µs at S=2, 7.0 µs at S=4, missing by 16 µs at its unreachable limit *before* costs. Costs: grid(32,8,3)=768 CTAs on 912 slots already fills the machine in one round, so ÷S gives a ragged tail at S=2 and 37% idle CUs at S=4; the barrier-efficient form is arithmetically the 128×256 tile already measured at −39%. **CARRY THIS FORWARD: B, not A, is the binding operand stream on this route by 2.7×** — freeing B alone puts the GEMM at 245.2 µs, exactly the round target | (70)/(71), round 11 r2_d0 of this lane | the mechanism is aimed at **B** instead (an M-sweep, priced ceiling 12.6 µs at S=2 / 18.9 µs at S=4) **and** the same engineer also holds the split-K slice count, so the grid division can be paid back |
+   | the fixed **per-call cost outside the two kernels** (host prefix, inter-dispatch gap, call-cost-aware split count) | the books close exactly on `decode_m96_up`: warm GEMM 49.02 + warm finalize 5.84 + dispatch gap **0.00** (30/30 pairs at 0 ns) + host prefix **0.00** + un-overlapped event frame 0.82 + cold-cache ramp 3.40 = 59.08 µs = full_cold. **Ceiling on any host edit is 0.82 µs** against a −3 µs target; `prefill_m1024_down`'s 19.4 µs residue is 100% cold-cache. Call-cost-aware split counts move **zero** routes (the count minimising the GEMM already minimises the call on all four swept), and `splits=1` costs +35% / +123% / +55% / +75%. Corrections: the ~4.3 µs empty-frame floor is **not additive** (only 0.82 µs survives real work); host sensitivity is slope 1.0 above ~1 µs; the "5.5 µs finalize floor" overstates it — suppressing the dispatch recovers 3.0–5.6 µs. **Subtract the cold-cache term before quoting any residue** | (72)/(73)/(74), round 11 r2_d1 of this lane | the harness stops flushing caches between timed samples, or a measured inter-dispatch gap above zero appears |
+   | **LDS-neutral half-stage double buffering** of `macro_gemm_body_bk64` (26 112 B BK=64 panel split into two BK=32 slots) | all three demanded properties **held and proven** — LDS 26 112 B in every arm, residency 2 CTA/CU by `-Rpass-analysis`, 2 barriers per 64 K counted in the ISA — and the arms still lost: load-map re-cut alone **+31.5% / +14.7%**, re-cut + restructure **+35.1% / +22.7%** (with total issued *lower* at 470 vs 577), parent-map lane-predicated form +5–8% because the compiler duplicates the store stream (`ds_write2_b64` 24→48, loop 577→760). Arithmetic obstruction: a BK=64 row contributes 128 B per stage and half of it is 64 B, so either the half-store is lane-predicated (duplicated instructions in a 41%-issue-wait body) or per-instruction contiguity halves. **With (55) and (67) this closes the LAST live mechanism on the ~30% of wave cycles behind the staging-edge `__syncthreads()`** | (75)/(76), round 11 r2_d2 of this lane | the body's global reads for ONE K-half are already a full contiguous line (BK ≥ 128), or the arch has a free lane-predicated LDS store |
+   | **B-side M-sweep** on the `128x128` BK=32 body (stage the B macro-panel in LDS once, sweep S of the 8 M tiles per CTA) — the successor (70)/(71) named | closed by **register-file arithmetic**, zero GPU seconds. Occupancy is `floor(512/(roundup(VGPR,8)+roundup(AGPR,8)))`; the parent is 80 VGPR + 64 AGPR = 144 → **3 waves/SIMD**. S=2 doubles accumulators to 128 AGPR, so holding 3 waves/SIMD needs VGPR ≤ 40 against **74** in use with the 8 A fragments and staging registers unpaid. The forced configuration — `128x128` at 2 CTA/CU — is exactly what round 7 r4_d0 measured at **−6%**. The LDS cap does not rescue it (B-only staging is 9216 B and still 2 CTA/CU): the collapse is the **register file**. Escapes priced too: BM=256/BN=64 doubles `tiles_n` for a 9.3 µs A stream against a 12.6 µs prize; the 8-wave 256×128 form gives 1 CTA/CU = 8 waves/CU against today's 12. The redirection from A to B was right about **which stream binds** (B by 2.7×, ~25 µs) and wrong that a sweep can take it | (82), round 12 r3_d0 of this lane | a per-SIMD register file above 512, or a formulation raising B reuse **without** raising the per-wave accumulator count |
+   | **epilogue store width / LDS-staged CShuffle transposed write-out** | the mechanism **reached the machine code** (`mechanism_realized=true` for `widen_global_store`, max store 2 B → 16 B per lane, K-loop census byte-for-byte unchanged, LDS high-water and occupancy unchanged) and was still **time-neutral**: the two routes it changes move −0.43% / +0.14% against an interleaved same-session control, an earlier variant gave the **opposite** sign, suite +0.12%. The epilogue is ~11% of issued instructions on `prefill_m2048_square` and returns ≤1% of call time — the per-element stores were **already** coalescing at the cache line. Reachable surface is two routes wide: gfx942 exposes **no packed f32 atomic add** (settled by compile probe: `unsafeAtomicAdd(float2*)` = no matching function), so split-K routes are out, and non-exact-tiled routes never fire the specialisation. **Transferable: dead code is not free** — instantiating the wide path in the BK=64 bodies where it is unreachable grew a kernel 550 → 752 instructions and cost **+6.18%** with the executed path unchanged | (84), round 12 r3_d1 of this lane | an arch with a packed f32 atomic add, or a body measured issue-limited in its epilogue window |
+   | **de-predication / exec-mask guard deletion** in the BK=64 macro bodies | mechanism REALIZED and the ISA gate passed wide (`128x64_bk64_nt` K-loop 577 → 335 issued, `s_and_saveexec` 64 → 0; memory/mfma counts, barriers and occupancy unchanged; 15 sibling kernels byte-identical) and it is **SLOWER** on both decode routes, non-overlapping with a same-session control across three rounds. The payer is guard deletion, not `__builtin_assume`: arm A (zero exec regions) drives loop `s_waitcnt` **up** 17 → 22 and 5 → 7; arm B (assume added, guards kept) removes 62–67% of the exec regions with `s_waitcnt` flat and measures neutral. The exec-masked staging region is a **scheduling block boundary** separating the global load from the LDS write. Corollary: issue-count reduction is **body-specific** — positive on the BK=32 `128x128` body, negative here | (99) | a formulation that PRESERVES that block boundary (arm B is the neutral form to build on), or a body where guard removal is measured not to raise loop `s_waitcnt` |
+   | **MFMA-register-native (unpadded) LDS staging** for the BK=32 macro bodies | realized — LDS 18432 → 16384 B, `ds_read2_b64` → `ds_read2st64_b64` — with **instruction prize 0** (77 issued both sides, byte-identical histogram) and **occupancy prize 0** on the register-limited `128x128` (88 VGPR + 64 AGPR = 152 → 3 waves/SIMD both sides). Suite null (A-B-A 1.38890 / 1.39218 / 1.37870; the candidate's own A1-A2 spread exceeds the candidate-parent gap). Premise refuted in the compiled code: the stride-36 address is entirely loop-invariant and its offsets already fit the `ds_read2` immediate field, which also closes the "fragment index arithmetic" motivation | (101) | the `128x128` body stops being register-limited so an LDS saving can buy a wave; or a body whose staged address is measured NOT loop-invariant |
+   | **slice-length quantisation as a PREDICTOR** of the best split count (on `decode_m96_up`) | the rule predicts 4 (64 stages ÷ 4 = 16/16/16/16, exact) and 4 is the **slowest point of the sweep** — 0.069685 ms against the ragged winner 3 (22/22/20) at 0.056645 ms, +23%. Same binary, isolated same-session `--case` sweep: 2/3/4/5/6/8 = 0.067663 / 0.056645 / 0.069685 / 0.065058 / 0.065078 / 0.071347 ms. The binding term here is the **per-slice fp32 atomic image** (4.23 MB each, 20.8% of the route's DRAM bytes), not tail quantisation; 3 is pinned and measured, so do not re-sweep splits on this route | (97) | a route whose per-slice fp32 image is small relative to its operand traffic, where tail quantisation can again bind |
+   | **split-K fp32 partial-plane DRAM locality** (XCD-affine slice mapping, tile-major workspace, non-temporal finalize) on the split-K decode routes | the mechanism LANDED (an `s_getreg HW_REG_XCC_ID` probe confirms the XCD rule is exactly `lin % 8`, 516/516 and 528/528 blocks; the pad makes a tile's three partial streams share one XCD's L2) and measured **null**: `decode_m96_up` +0.3% vs a 3.2% floor, `decode_m8_up` −1.2% vs a 4.6% floor, PMC byte-identical to pre-patch (`RDREQ_DRAM` 756705, `WRREQ_DRAM` 198144, L2 hit 51.98%). **ORACLE A** — a throwaway build aliasing every epilogue atomic into a 1 MB L2-resident window, i.e. the plane's 12.68 MB of DRAM writes driven to ~0, a strict upper bound on ANY workspace-locality mechanism — is **0.0%** on `decode_m96_up` and −0.8% (inside its 4.0% floor) on `prefill_m1024_down`. **ORACLE B** (zero-restore stores deleted, invariant broken) bounds the rest at −2.1% / −2.0%, below both floors. Sub-lever bookkeeping: NT finalize was already in the tree; a tile-major workspace cannot cut requests because write amplification is already ZERO (198144 × 64 B = 12.68 MB = exactly 3 × 4.23 MB). **Bounded at zero by an oracle, not by a floor** | (109)-(112) | a route where the fp32 reduction image is a materially larger share of DRAM traffic than 20.8% **and** whose operand read stream is shown not to bind; or an epilogue that eliminates the intermediate reduction buffer altogether rather than relocating it (the winner-take-all form of that is separately closed at −43.6%) |
+   | **issue-count / ILP levers on `macro_gemm_128x128_exact`** (MFMA reordering, longer dependency chains, 32-bit global offsets / the (101b) `v_lshl_add_u64` prize) | the regime was NAMED from counters and both levers then failed their own preconditions. The body is **neither** MFMA-issue-limited (2.23×/2.24× above its MFMA-issue lower bound; ~45% MFMA busy on the maximally-loaded CUs after clock correction) **nor** DRAM-bandwidth-limited (807 GB/s = 15% of the measured HBM roof; (38) already measured a 36% traffic cut at +6.8% slower). It is **latency exposure at 2-3 waves/SIMD**: 84% (m1024) / 79% (m2048) of every wave-cycle is spent not issuing. Reordering has zero headroom in the COMPILED code (29 consecutive `v_mfma` with nothing between them; 256-pipe-cycle accumulator reuse distance against 16-cycle latency). The 8 `v_lshl_add_u64` are 10.4% of issued and issue is 16.1% of wave-cycles → the whole prize is **1.7% of wave-cycles against a 4.0% route floor**, structurally unmeasurable. ISA fact: `v_mfma_f32_16x16x16_bf16` costs exactly 16.000 SIMD-cycles here and `v_mfma_f32_16x16x32_bf16` does not exist on gfx942, so no opcode swap can halve the floor | (113)-(116) | the body's waves/SIMD rises above 3 (registers 152 → ≤128 buys a 4th wave) or its barrier structure is decoupled (ping-pong / 8-wave interleave); or a route whose grid supplies well above 3 CTA/CU |
+   | **loop issue-count / exec-mask collapse / statically-countable global→LDS staging** on `macro_gemm_body_bk64` | mechanism REALIZED and then some — arm4 cuts the loop 479 → 259 instructions (−46%), `s_and_saveexec_b64` 48 → 0, `vmcnt(0)` 18 → 1, MFMA density 20.0% → 37.1%, VGPR 152 → **148 (below the parent)** — and measures **0.0%** on `decode_m96_up`. The aimed-at counter moved (`SQ_ACTIVE_INST_ANY` 6,963,387 → 4,547,869, −34.7%, identical `SQ_INSTS_MFMA`) and the freed slots were re-absorbed as instruction wait (`SQ_WAIT_INST_ANY` 26.91% → 48.62%). The parent's (114) partition is exact: **19.27% issuing / 26.91% instruction wait / 53.81% other wait at a measured 1.806 GHz**. **STEP-0 GATE, now mandatory:** price any issue-count edit as `(target instrs / loop instrs) × SQ_ACTIVE_INST_ANY share` BEFORE building — 5.8% for the stated mechanism, 8.9% for the cut actually achieved, both upper bounds on a wave that is 80.7% idle. Sub-levers priced: collapsing exec regions without replacing the scheduling boundary costs **2.6%** (VGPR 152 → 160, 40 accvgpr moves appear) and one `__builtin_amdgcn_sched_barrier(0)` at the seam restores it free — reusable wherever (99) applies; a clamped unconditional tail prefetch costs **5.0%** because `PF*BK` = 256 K-elements is 18–20% of this route's split-K slice | (122)-(126) | the route's issue share rises well above 19.27%, or a formulation whose priced upper bound clears the route floor with margin |
+   | **machine fill on `prefill_m2048_square` / split-K on the BN=128 wide tile / raising CTA/CU by adding slices** on `macro_gemm_128x128_exact` | closed by three oracles on one binary. ORACLE 1: the minimum split `s=2` — the cheapest member, so it bounds the family — is **−38.7% on the GEMM side alone** (0.26597 vs 0.19183 ms) before a measured 25.1 µs finalize. ORACLE 3 is the decisive one: at a **constant** 512-WG grid, changing ONLY the output path to the fp32 atomic workspace costs **+38.3%**, and going 512 → 1024 WGs on top then costs a further **+0.4%** — so the machine-fill hypothesis measures **0.0%** and the 1.68 CTA/CU figure is not a gap. This retroactively explains why `kWideTileGate` 400 → 512 (+24.8%) and raising a split count (+18%) lost: the fill they bought was worth nothing to begin with. Premise correction: `prefill_m512_up` is also `splits=1` | (127)-(129) | a mechanism raising resident WAVES without adding CTAs and without touching the output path (that is the 8-wave body, which WON here), or an arch with a packed f32 atomic add |
+   | **8-wave (512-thread) re-wave of `macro_gemm_128x128_exact` on grids already supplying ≳2.5 CTA/CU** | the losing half of the round-15 winner. Same body, 6 waves/SIMD against 3, 24 waves/CU against 12, whole-tree resource diff shows the new kernel is the ONLY changed line: **+9.2% SLOWER on `prefill_m1024_down` (2.53 CTA/CU)**, more than 2× its floor — while being **−4.7%** on `prefill_m2048_square` (1.68 CTA/CU) and −2.4% (inside floor) on `prefill_m512_up` (1.13 CTA/CU). **The ordering of the three routes is exactly their CTA/CU.** The tax is arithmetic and unconditional: at FM×FN = 4×2 a wave reads 6 fragments per 16-deep K step to issue 8 MFMA against 8 reads for 16 MFMA at 4 waves = **1.5× the LDS read traffic per MFMA**; the wave-count benefit is collected only where the grid starves the machine. **Latency exposure on this body is a property of the ROUTE's grid, not of the body** | (130) | a formulation raising waves/SIMD without raising LDS reads per MFMA (the untried register cut 152 → ≤128 on the 4-wave body, ceiling 4 waves/SIMD); or a route below ~1.7 CTA/CU, where this is already a measured win needing only a dispatch predicate |
+
 
    Note what this table does *not* say: it does not say those routes are finished. `prefill_m1024_down`
    is still the richest route in the suite by raw slack. It says the listed *mechanisms* have been
@@ -333,6 +379,12 @@ requires a structural transition; medium gap permits one measurable mechanism ch
 SOL permits local/parameter tuning or ending the visit; low-confidence/unknown evidence requires a small
 discriminating experiment rather than a confident bottleneck claim. SOL only steers the selected route —
 it does not alter archive selection or fitness.
+
+**The ISA evidence hooks bind here exactly as they do in `PHASE=plan_round`** (see *ISA evidence hooks*
+there; the rule is stated once on purpose). `ISA_ATTRIBUTION.ruled_out` refuses mutations, and
+`source_change_required` is a condition at least one mutation must meet or `reasoning` must decline.
+A mutation that a machine-code attribution already killed is refused for the same reason
+`mutation-verdict` exit 3 refuses one: the round has already been told it loses.
 
 **Then check every `target_descriptor` you are about to return.** A direction whose descriptor is not a
 legal tuple is discarded downstream, and until now that discard was silent — for weeks every descriptor
@@ -718,6 +770,28 @@ them as JSON so the script can thread them into the next `plan_round`:
   (confirmed / partial / dead-end), and a one-line lesson. Re-planning must avoid confirmed
   dead-ends.
 
+**A `mechanism` field on a result forbids one particular ledger row (only present when the lane runs
+with `isa_evidence`).** Each result may carry `mechanism: realized|refuted|indeterminate` — the
+verifier's reading of the AMDGCN that was actually timed, not of the candidate's source.
+
+- `refuted` means the edit's declared mechanism **never reached the machine code**: the compiler undid
+  it, or the codegen is byte-identical to the parent's. Such a round is **not** a dead-end and must
+  never be written as one. `dead-end` is the strongest claim this ledger makes and the only one that
+  removes a technique from future planning; spending it on a mechanism that was never executed
+  discards the technique on the strength of an experiment that did not happen. Record it as
+  `not-realized`, keep the direction live, and make the next attempt's lesson about *why the compiler
+  refused* — an alignment it could not prove, a builtin it lowered back, a tile too small for the
+  wider access — not about whether the idea works.
+- `indeterminate` means the evidence to judge was missing (no parent archive yet, tool unavailable,
+  nothing captured). Draw no conclusion from it in either direction. It is not weak support for the
+  result and it is not a defect in the candidate.
+- `realized` is the only value that licenses a normal verdict: the mechanism was in the binary that
+  was timed, so a null result really is a null result, and `dead-end` is available if it earned it.
+
+This distinction is the whole reason the field exists. In greedy search the ledger is the only memory
+the run has, so a single row that reads "tried X, no effect" for an X that was never compiled closes
+that direction for the rest of the session.
+
 **DEEP-MODE persistence + sharing (do these ONLY if the named input is present; a normal run passes
 none of them, so skip this whole block then):**
 - `STATE_DIR` (+ `CANONICAL`, `CUMULATIVE_SPEEDUP`, `BEST_PER_CASE`): persist this wave's progress so a
@@ -735,10 +809,26 @@ none of them, so skip this whole block then):**
   [ -e "$STATE_DIR/best" ] && mv "$STATE_DIR/best" "$STATE_DIR/best.old_$(date +%s)_$$" 2>/dev/null || true
   mv "$TMP" "$STATE_DIR/best"
   ```
-  Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger,
+  Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_VS_SEED>, cumulative_frame:
+  "vs the original seed", wave_local_cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger,
   bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full carried-forward state).
   Do this EVERY round (even non-improving) so a kill mid-wave never loses the ledger; only refresh
   `best/` when the cumulative best actually advanced this wave.
+
+  **`cumulative` MUST come from `CUMULATIVE_VS_SEED`, not from `CUMULATIVE_SPEEDUP`** — finding (127).
+  The two inputs are different denominators and the next wave reads `cumulative` back as the lane total:
+  - `CUMULATIVE_SPEEDUP` is **wave-local** — vs `BASELINE_PER_CASE`, which was measured on the tree this
+    wave was seeded from. It is 1.0 at the top of every wave, including a resumed one, *by construction*
+    and not because progress was lost.
+  - `CUMULATIVE_VS_SEED` = the prior waves' lane total × this wave's `CUMULATIVE_SPEEDUP`. It is the only
+    one of the two that is comparable across waves.
+
+  Writing the wave-local number into `cumulative` silently truncates the lane history to the last wave
+  (a 4.35× lane becomes 1.01×). Writing the vs-seed number into any *comparison* against a verifier's
+  `verified_geomean` is the mirror-image error and is what suppressed `IMPROVED` for a whole wave.
+  If `CUMULATIVE_VS_SEED` is absent from your inputs (an older lane script), write
+  `cumulative: <CUMULATIVE_SPEEDUP>` and add `cumulative_frame: "wave-local; vs-seed total unavailable"`
+  — say which frame you wrote rather than leaving the number unlabelled.
 - `SHARED_KB` (+ `TARGET_LANGUAGE`): APPEND this wave's distilled, EVIDENCE-BACKED findings for your
   backend into the shared blackboard file so the OTHER backends learn from you next wave — each entry:
   technique → measured effect (Xx on which shape class) → your backend → and dead-ends with evidence.
@@ -755,6 +845,79 @@ Return JSON:
   "bottleneck_now": "memory|compute|latency|lds|overhead|...",
   "suggest_next": "one-line steer for next round (or 'consider stopping')"
 }
+```
+
+---
+
+## PHASE=synthesize_isa_lessons
+
+Runs once, after the last round, and only when the lane collected machine-code evidence. This is the
+slow half of the loop: the per-round work spends evidence, this pass turns what was spent into
+something the CHEAP layer knows next time, so the deep levels get rarer rather than becoming a fixed
+tax on every run.
+
+Inputs: full `HISTORY` (every round's `evidence_depth`, `escalation_reason`, per-candidate `mechanism`
+verdicts), `ISA_ATTRIBUTIONS` (the round attribution documents that were written), `EVAL_DIR`,
+`KERNEL_KNOWLEDGE_DIR`, `OUTPUT_PATH`.
+
+### What you are looking for
+
+Three kinds of durable finding, and the second two are the ones nobody else in the run can produce:
+
+1. **Confirmed triples** — `{ISA signal → source change → validated speedup}`, where the change was
+   made, the machine code moved (`mechanism: realized`), and the benchmark agreed. This is a candidate
+   rule for the cheap layer.
+2. **Anti-signals** — a rule card fired, the suggested direction was taken, and it did NOT help or
+   regressed. This is worth more per byte than a confirmed triple, because it is the half no card can
+   contain by construction: an advisory rule reports its own false positives as findings until someone
+   writes down when it is wrong.
+3. **Compiler preconditions** — a `refuted` mechanism whose cause the compiler role identified. "The
+   backend declines to widen this unless X" is reusable across every kernel that hits the same pass.
+
+### Admission criteria — append a lesson ONLY when all hold
+
+- It generalises to a family of AMD kernels, not just this operator and this shape.
+- It is backed by evidence in this run that a reader can go re-check: name the round, the signal, and
+  the archive path.
+- It is written as a reusable rule, mapping or heuristic — not as a narrative of what happened.
+- It states where it applies AND what limits it. A rule with no stated boundary becomes a rule someone
+  applies where it is false.
+- It could plausibly be promoted into a rule card later.
+
+Round narrative, one-off command failures, shape-specific numbers, and "we tried X and it was slow"
+belong in the round records, not here. A synthesis file that accumulates those stops being read, and an
+unread knowledge file is indistinguishable from an absent one.
+
+### How to write it
+
+**Append** to `KERNEL_KNOWLEDGE_DIR/isa_signals/learned_rules.md`, creating it with a `# Learned ISA
+rules` heading if absent. Do not edit the existing rule cards or the symptom index: those are reviewed
+artifacts, and a lane that rewrites its own knowledge base mid-flight makes every later run
+irreproducible. Promotion from this file into a card is a human step, and the file exists to make that
+step cheap.
+
+One entry per lesson:
+
+```markdown
+## <short rule name>
+- **Signal**: <the isa_signals field and value that identified it>
+- **Change**: <the source condition that satisfied it>
+- **Outcome**: <realized/refuted + the validated speedup, or the regression>
+- **Applies when**: <preconditions>
+- **Does NOT apply when**: <the boundary; required>
+- **Evidence**: round N, archive <path>, attribution <path>
+```
+
+If nothing in this run meets the criteria, write nothing and return `promoted: 0` with the reason. A
+run that produced no durable lesson is the normal case, and inventing one to fill the file is how a
+knowledge base fills with rules nobody validated.
+
+### Return
+
+```json
+{"promoted": 0, "anti_signals": 0, "path": "<file written, or empty>",
+ "reason": "required when promoted is 0",
+ "entries": ["<one short title per appended lesson>"]}
 ```
 
 ---

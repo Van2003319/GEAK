@@ -196,6 +196,14 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      - name: kernel candidate-floor regression
+        run: node kernel_workflow/scripts/test_candidate_floor.js
+      - name: kernel mode-dispatch regression
+        run: node kernel_workflow/scripts/test_mode_dispatch.js
+      - name: kernel QD-archive regression
+        run: node kernel_workflow/scripts/test_qd_archive.js
+      - name: kernel QD-v2 helper regressions
+        run: python3 -m unittest discover -s kernel_workflow/scripts -p 'test_qd_*.py'
 
   dry-run:
     name: run_e2e dry-run mapping

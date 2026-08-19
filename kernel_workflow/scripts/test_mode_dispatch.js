@@ -30,7 +30,14 @@ const ok = (cond, msg, detail) => {
 };
 
 // Rebuild the script body with stubbed runtime globals. `stubs.agent` decides what each phase's agent
-// returns; `stubs.lane` maps a lane's target_language to its final_speedup.
+// returns; `stubs.lane` maps a lane's target_language to its final_speedup, and `stubs.trust` maps it to
+// the lane's `validation_trust` (default 'verified' — the ordinary case of an arbitrated lane).
+//
+// That default is load-bearing and was missing. Finding (65) made `validation_trust === 'verified'` a
+// precondition for a lane to be RANKABLE at all, and this stub still returned the pre-(65) shape, so
+// every lane arrived 'unverified', the ranked list was empty, and section J's winner was null. The suite
+// was runnable only under node, so nobody saw it go red. The fix is on the stub, not on the gate: the
+// gate is the thing under test, and section J2 below now exercises its refusal path directly.
 function build(argsObj, stubs) {
   const s = stubs || {};
   const trace = { phases: [], logs: [], lanes: [], workflowCalls: [], agentLabels: [] };
@@ -42,7 +49,8 @@ function build(argsObj, stubs) {
       trace.workflowCalls.push({ scriptPath: ref.scriptPath, args: a });
       trace.lanes.push({ lang: a.target_language, mode: a.mode, gpus: a.gpu_ids });
       const sp = s.lane && s.lane[a.target_language] !== undefined ? s.lane[a.target_language] : 1.0;
-      return { validation_status: 'validated', final_speedup: sp };
+      const tr = s.trust && s.trust[a.target_language] !== undefined ? s.trust[a.target_language] : 'verified';
+      return { validation_status: 'validated', validation_trust: tr, timing_basis: 'device', final_speedup: sp };
     },
     agent: async (p, o) => {
       const label = (o && o.label) || '';
@@ -238,6 +246,27 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     const w = r && r.winner;
     ok(w && w.lang === 'hip' && Math.abs(w.speedup - 1.85) < 1e-9, 'winner = hip @1.85x', JSON.stringify(w));
     ok(w && w.mode === 'author', 'winner.mode = author', JSON.stringify(w));
+  }
+
+  // -------------------------------------------------------------------------
+  console.log('\n# J2. the FASTEST lane still cannot win on an unarbitrated number (65)');
+  {
+    // Same shapes as J, but hip's number is the TechLead's self-report rather than an arbitrated
+    // device-time ratio. Beating the baseline is necessary, not sufficient: hip drops out of the ranking
+    // and the slower arbitrated lane wins. The excluded lane must still appear in the table with its
+    // reason -- "excluded" and "found nothing" are different outcomes (48).
+    const { run } = build({ ...BASE, mode: 'bakeoff', gpu_ids: '0,1,2' }, {
+      agent: healthy('triton', [{ language: 'hip', route: 'author' }, { language: 'ck', route: 'author' }]),
+      lane: { triton: 1.10, hip: 1.85, ck: 1.42 },
+      trust: { hip: 'unverified' },
+    });
+    const r = await run();
+    const w = r && r.winner;
+    ok(w && w.lang === 'ck' && Math.abs(w.speedup - 1.42) < 1e-9,
+      'the unverified 1.85x lane loses to the verified 1.42x one', JSON.stringify(w));
+    const row = (r && r.candidates || []).find((c) => c.lang === 'hip');
+    ok(!!row && Math.abs(row.speedup - 1.85) < 1e-9 && row.validation_trust === 'unverified',
+      'and is still reported, at its real speedup, with the reason it was excluded', JSON.stringify(row));
   }
 
   // -------------------------------------------------------------------------

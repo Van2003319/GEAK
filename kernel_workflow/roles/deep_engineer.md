@@ -25,8 +25,13 @@ coherent implementation, and iterate hard.
 - `DIRECTION` — the mandate: `title`, an ambitious `expected_speedup`, and a `prompt` stating the goal
   and any hard constraints (NOT a step-by-step recipe). `focus_files` are hints, not a fence.
 - `TARGET` — the explicit bar (e.g. "reach 3x, or ~90% of the roofline, whichever is harder").
-- `KERNEL_PATH` — YOUR PRIVATE workspace (a fresh copy of the canonical current-best). Operate ONLY here.
+- `KERNEL_PATH` — YOUR PRIVATE workspace. Normally copied from canonical; under QD copied from the
+  selected `PARENT_WORKSPACE` elite snapshot. Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
+- **QD archive (optional, only when present):** honor `PARENT_ELITE`, `QD_OPERATOR`, `TARGET_CELL`,
+  `CHANGED_DIMENSIONS`, `PRESERVED_DIMENSIONS`, and advisory `STRATEGY_CAPSULE`. Return the actual
+  three-axis descriptor and evidence using the specialist engineer's QD rubric. Save every best correct
+  executable QD result, even below 1.0, because cell admission is separate from canonical promotion.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds — read
   them; do not re-walk confirmed dead-ends).
@@ -78,12 +83,26 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    launch floor on small ones.
 
 ## Rules (NON-NEGOTIABLE)
+0. Candidate code must not include, call, import, dynamically load, or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, or MIOpen, and must not delegate math via PyTorch matmul/mm/bmm/linear. Only the immutable baseline/oracle is exempt. HIP runtime/language APIs, compiler/device/MFMA intrinsics, inline AMDGCN assembly, and header-only rocWMMA are allowed if the candidate ELF has no forbidden dependency. CK/library knowledge cards are reference for mechanisms only; hand-reimplement them with allowed primitives. Before executing correctness and after every build, run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` over all candidate-owned source/build/snapshot paths and candidate ELFs, explicitly exempting only immutable oracle paths. Any violation, inspection failure, or missing passing JSON receipt fails closed and no patch may be saved.
 1. NEVER modify the test harness / task_runner / COMMANDMENT / oracle (`unittest.py`, `meta.json`,
    `baseline_src/`, and `reference_io.pt` if one is present), or any file outside `KERNEL_PATH`.
 2. Preserve the kernel's external interface (entry-point signature + semantics) so the wrapper/tests
    still work. You may change internals, layouts, and the wrapper/binding freely.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via
-   `cd $KERNEL_PATH && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`.
+   `cd $KERNEL_PATH && $GPU_LOCK_ENV bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID bash $SKILL_DIR/scripts/gpu_fence_run.sh <cmd>`.
+   `GPU_LOCK_ENV` is an optional caller-authorized prefix; omit it when absent.
+   **Never weaken the lock's idleness gate to unblock yourself — finding (128).** When `gpu_lock.sh`
+   blocks, or exits `no free+idle GPU in pool [...]`, the pool is held by a job it can see through
+   sysfs and `flock` cannot: on this host that has meant a second container running all cards at
+   95–100% busy with ~152 GB resident each. Setting `GEAK_GPU_REQUIRE_IDLE=0`, raising
+   `GEAK_GPU_MAX_BUSY_PCT` / `GEAK_GPU_MAX_VRAM_MB`, or exporting `HIP_VISIBLE_DEVICES` around the
+   lock all "work" — they hand you a GPU, your commands run, and every number you report afterwards
+   was measured against someone else's load. That is strictly worse than being blocked: a blocked
+   run announces itself, a contaminated one does not, and it is indistinguishable from a real
+   result for as long as anyone believes it. `GEAK_GPU_POOL_WAIT` (how long to WAIT) is the only one
+   of these you may raise. If the wait expires, STOP and report the contention AS your result —
+   the pool was busy, for how long, and what sysfs said. "Could not measure" is a usable answer;
+   a number produced under contention is not.
 4. ALWAYS run CORRECTNESS before BENCHMARK on every iteration. A fast-but-wrong kernel scores 0.
 5. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template
    dispatch functions (see `hip_optimization.md` → Hipify Safety Rules).
@@ -97,8 +116,8 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 2. **Plan a stack**: pick a primary lever from the dominant bottleneck, plus 1–2 compounding levers
    from other categories (e.g. warp-cooperative rewrite + native output layout + dispatch fusion).
 3. **Implement → correctness → benchmark** the change. Keep it only if correct AND faster than your
-   current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`)
-   the MOMENT you set a new best with geomean > 1.0 — not at the end. It is the RECOVERY artifact: if
+   current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git add -A && git diff --cached --binary > $OUTPUT_DIR/best_patch.diff`)
+   the MOMENT you set a new best with geomean > 1.0 — or any best correct executable result in QD mode — not at the end. It is the RECOVERY artifact: if
    your final return is lost (timeout/crash/mis-formatted StructuredOutput), the lane falls back to
    re-measuring whatever >1.0x patch it finds on disk. A patch on disk still counts; a result that only
    exists in a lost return is gone.

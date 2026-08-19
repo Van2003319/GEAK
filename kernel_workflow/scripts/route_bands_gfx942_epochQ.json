@@ -1,0 +1,21 @@
+{
+ "bands": {
+  "decode_m16_square": 0.08455463986585596,
+  "decode_m2_square": 0.11545867039514303,
+  "decode_m32_down": 0.02031495234995447,
+  "decode_m64_square": 0.03568529019263845,
+  "decode_m8_up": 0.04646721661531647,
+  "decode_m96_up": 0.03229029287351131,
+  "prefill_m1024_down": 0.03970265967229771,
+  "prefill_m128_square": 0.015554897900105778,
+  "prefill_m2048_square": 0.03164482938839909,
+  "prefill_m256_down": 0.05185341924745136,
+  "prefill_m512_up": 0.042311140653693256
+ },
+ "derivation": "full min-max spread over repeats of ONE unchanged tree, as a fraction of the median",
+ "epoch": "Q",
+ "host": "tw003",
+ "n_repeats": 24,
+ "schema": "geak.route-bands/v1",
+ "tree": "exp/state_greedy_coldstart_20260817/best (round-7 canonical, custom_gemm.hip af70782a)"
+}

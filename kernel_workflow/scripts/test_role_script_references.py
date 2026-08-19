@@ -59,6 +59,18 @@ def scripts_roots() -> list[Path]:
     tasks = REPO_ROOT / "examples" / "tasks"
     if tasks.is_dir():
         roots += sorted(p / "scripts" for p in tasks.iterdir() if (p / "scripts").is_dir())
+    # The expert-skills packs are a real scripts root and were simply missing from
+    # this list, so a prompt naming e.g. `asm_loop_audit.py` failed here while the
+    # file sat on disk one directory over. Discovered the same way the task roots
+    # are, rather than hardcoded, so a new pack is covered without another edit.
+    #
+    # This WIDENS what the check can resolve; it does not weaken what it asserts. A
+    # name that resolves in neither tree still fails, which is the property that
+    # matters: the message below is right that a missing script surfaces as a gate
+    # quietly skipped rather than as a broken pipeline.
+    packs = REPO_ROOT / "perf_knowledge" / "expert_skills" / "skills"
+    if packs.is_dir():
+        roots += sorted(p / "scripts" for p in packs.iterdir() if (p / "scripts").is_dir())
     return [r for r in roots if r.is_dir()]
 
 
