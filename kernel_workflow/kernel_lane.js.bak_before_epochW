@@ -1663,43 +1663,13 @@ const QD_NOISE_FLOOR_BY_MACHINE = new Map([
     ['prefill_m256_down', 0.0120],
     ['prefill_m512_up', 0.0107]
   ])],
-  // machine W -- tw042. MEASURED: 8 complete same-variant primed repeats, source_hash f87a1ccd45be3f3ee060ce401f8119845ffd68efe9c45b2cc8475b97253d6786.
-  // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
-  ['W', new Map([
-    ['decode_m16_square', 0.0101],
-    ['decode_m2_square', 0.0083],
-    ['decode_m32_down', 0.0045],
-    ['decode_m64_square', 0.0042],
-    ['decode_m8_up', 0.0043],
-    ['decode_m96_up', 0.0121],
-    ['prefill_m1024_down', 0.0042],
-    ['prefill_m128_square', 0.0136],
-    ['prefill_m2048_square', 0.0092],
-    ['prefill_m256_down', 0.0181],
-    ['prefill_m512_up', 0.0091]
-  ])],
-  // machine X -- tw036. MEASURED: 8 complete same-variant primed repeats, source_hash f87a1ccd45be3f3ee060ce401f8119845ffd68efe9c45b2cc8475b97253d6786.
-  // Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
-  ['X', new Map([
-    ['decode_m16_square', 0.0058],
-    ['decode_m2_square', 0.0047],
-    ['decode_m32_down', 0.0061],
-    ['decode_m64_square', 0.0084],
-    ['decode_m8_up', 0.0092],
-    ['decode_m96_up', 0.0033],
-    ['prefill_m1024_down', 0.0076],
-    ['prefill_m128_square', 0.0033],
-    ['prefill_m2048_square', 0.0039],
-    ['prefill_m256_down', 0.0107],
-    ['prefill_m512_up', 0.0047]
-  ])],
 ]);
 // The machine whose floors apply. One line, set deliberately; nothing infers it.
 // Finding (126): it used to be a remembered constant with the hostname only in
 // a comment, and it read 'P' (tw008) while the process was running on tw003.
 // `test_the_epoch_letter_matches_the_host` now checks this letter against the
 // box, via MACHINE_HOSTNAME in qd_robust_stats.py.
-const QD_CURRENT_MACHINE = 'X';
+const QD_CURRENT_MACHINE = 'V';
 const QD_NOISE_FLOOR = QD_NOISE_FLOOR_BY_MACHINE.get(QD_CURRENT_MACHINE);
 // Epochs whose table is a fail-closed PLACEHOLDER rather than a measurement:
 // structurally complete so that every code path behaves, every route at the
@@ -1723,7 +1693,7 @@ const qdFloorIsMeasured = (contextId) =>
 // `null` for the two gfx90a-era epochs, which pre-date the convention -- an
 // unrecorded host is stated as unrecorded, not backfilled with a guess.
 const QD_MACHINE_HOSTNAME = new Map([
-  ['L', null], ['M', null], ['N', 'tw035'], ['O', 'tw054'], ['P', 'tw008'], ['Q', 'tw003'], ['R', 'tw008'], ['S', 'tw054'], ['T', 'tw046'], ['U', 'tw049'], ['V', 'tw051'], ['W', 'tw042'], ['X', 'tw036'],
+  ['L', null], ['M', null], ['N', 'tw035'], ['O', 'tw054'], ['P', 'tw008'], ['Q', 'tw003'], ['R', 'tw008'], ['S', 'tw054'], ['T', 'tw046'], ['U', 'tw049'], ['V', 'tw051'],
 ]);
 const QD_EPOCH_STAMP = (() => {
   const host = QD_MACHINE_HOSTNAME.get(QD_CURRENT_MACHINE);

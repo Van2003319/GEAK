@@ -235,9 +235,6 @@ MACHINE_HOSTNAME = {
     "S": "tw054",     # same box as O, second container; see the S table below
     "T": "tw046",     # wave 4 restore; a box this lane had never run on before
     "U": "tw049",     # wave 5 restore, MID-ROUND: see the U block below
-    "V": "tw051",     # wave 6 restore; a box this lane had never run on before
-    "W": "tw042",     # wave 7 restore; another box new to the lane
-    "X": "tw036",     # wave 8 restore; another box new to the lane
 }
 
 # Epochs whose table was never measured. Their floors are the fail-closed
@@ -374,57 +371,11 @@ def machine_for_host(hostname: str | None = None) -> str | None:
     return latest
 
 
-# machine V -- tw051. MEASURED: 8 complete same-variant primed repeats, source_hash c4b6dba073440f108e3f07585272b1488850df3f95f8c7e3c926dccc1fc96355.
-# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
-MEASURED_NOISE_FLOOR_BY_MACHINE["V"] = {
-    "decode_m16_square": 0.0087,
-    "decode_m2_square": 0.0020,  # clamped to MIN_FLOOR
-    "decode_m32_down": 0.0225,
-    "decode_m64_square": 0.0132,
-    "decode_m8_up": 0.0223,
-    "decode_m96_up": 0.0090,
-    "prefill_m1024_down": 0.0121,
-    "prefill_m128_square": 0.0216,
-    "prefill_m2048_square": 0.0093,
-    "prefill_m256_down": 0.0120,
-    "prefill_m512_up": 0.0107,
-}
-
-
-# machine W -- tw042. MEASURED: 8 complete same-variant primed repeats, source_hash f87a1ccd45be3f3ee060ce401f8119845ffd68efe9c45b2cc8475b97253d6786.
-# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
-MEASURED_NOISE_FLOOR_BY_MACHINE["W"] = {
-    "decode_m16_square": 0.0101,
-    "decode_m2_square": 0.0083,
-    "decode_m32_down": 0.0045,
-    "decode_m64_square": 0.0042,
-    "decode_m8_up": 0.0043,
-    "decode_m96_up": 0.0121,
-    "prefill_m1024_down": 0.0042,
-    "prefill_m128_square": 0.0136,
-    "prefill_m2048_square": 0.0092,
-    "prefill_m256_down": 0.0181,
-    "prefill_m512_up": 0.0091,
-}
-
-# machine X -- tw036. MEASURED: 8 complete same-variant primed repeats, source_hash f87a1ccd45be3f3ee060ce401f8119845ffd68efe9c45b2cc8475b97253d6786.
-# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
-MEASURED_NOISE_FLOOR_BY_MACHINE["X"] = {
-    "decode_m16_square": 0.0058,
-    "decode_m2_square": 0.0047,
-    "decode_m32_down": 0.0061,
-    "decode_m64_square": 0.0084,
-    "decode_m8_up": 0.0092,
-    "decode_m96_up": 0.0033,
-    "prefill_m1024_down": 0.0076,
-    "prefill_m128_square": 0.0033,
-    "prefill_m2048_square": 0.0039,
-    "prefill_m256_down": 0.0107,
-    "prefill_m512_up": 0.0047,
-}
-
-
-CURRENT_MACHINE = "X"
+# The machine whose floors apply unless a caller names another. Still one line
+# set deliberately -- inferring it from the host would mean a new box silently
+# selects a table nobody chose -- but now cross-checked against the host, and
+# against `PROVISIONAL_MACHINES`, by the test named above.
+CURRENT_MACHINE = "U"
 
 MEASURED_NOISE_FLOOR = MEASURED_NOISE_FLOOR_BY_MACHINE[CURRENT_MACHINE]
 

@@ -281,6 +281,15 @@ class VerdictTest(unittest.TestCase):
                 # tree, landing in the tight group again alongside R/U/V rather
                 # than with Q/T's 943b1583. (49) is now 2-for-2 as a forecast.
                 "W": "decode_m16_square",
+                # tw036, measured 2026-08-19. SEVENTH in a row, and the
+                # cleanest test (49) has had: X runs the SAME tree as W
+                # (source_hash f87a1ccd), so tree is held fixed and only the box
+                # varies. Floor 0.0058 against W's 0.0101 -- same tight group,
+                # and the spread between two boxes on one tree (1.7x) is far
+                # smaller than the spread between two trees on comparable boxes
+                # (943b1583's 0.0470 vs f3da61b3's 0.0110, 4.3x). Tree dominates
+                # box, which is what (49) claims.
+                "X": "decode_m16_square",
             }
             expected_route = tightest_by_epoch.get(robust.CURRENT_MACHINE)
             self.assertIsNotNone(
