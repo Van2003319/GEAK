@@ -998,3 +998,79 @@ ids 1/4 是 +29%/+56%"——tile 轴上最后一个具名例外关闭。
 
 已关闭且不得重开（五条，均带 receipt）：tile-chooser、slice-count、
 LDS bank-conflict、stage-depth、register-prefetch。
+
+---
+
+## wave2_r2：**canonical 动了，1.21x** —— 以及**我上一条结论被我自己的复测推翻**
+
+```
+cdb7932 round 2 winner: integrated (1.21x)
+bc1e462 baseline (resumed from STATE best, cumulative 1.0916)
+```
+
+僵局破了。1.21 对种子 = 比在册 1.0916 高 **+10.8%**，越过了卡了三次的 1.15。
+改动面：`custom_gemm.hip` +631（**hip 孪生同步了**，`custom_gemm_hip.hip` 同为 +631）、
+`dense_bf16_gemm.hip/.h`、`gemm_bindings.cpp`、`gemm_wrapper.py`。
+`gemm_bindings.cpp` 被动了，说明 `suggest_next` 的 (a)（GEMV 路径上那个没用的 per-call fp32 workspace 分配）被采纳了。
+
+**STATE 仍停在 `last_round 1 / 1.0916`**——就是记录在案的 ~40 分钟滞后。
+commit 是权威，STATE 不是错，只是晚。
+
+### ⚠️ 更正：我说的 "m256_down 的真实底噪是 7.02%" 是错的
+
+wave 自己在同一台 tw035、同一个纪元 Z、同样 8 次重复，**又测了一遍底噪**
+（`noise_floor_epochZ_tw035_secondsweep.json`）。两次对比：
+
+| route | 我的 sweep | 第二次 sweep | 比值 |
+|---|---|---|---|
+| decode_m8_up | **7.64%** | **0.66%** | 0.09x |
+| prefill_m256_down | **7.02%** | **1.02%** | 0.15x |
+| prefill_m1024_down | 2.10% | 0.21% | 0.10x |
+| decode_m64_square | 0.99% | 0.20% | 0.20x |
+| decode_m96_up | 0.93% | 0.57% | 0.61x |
+| prefill_m128_square | 1.40% | 0.89% | 0.64x |
+| decode_m2_square | 0.88% | 0.90% | 1.02x |
+| prefill_m512_up | 1.26% | 1.32% | 1.04x |
+| decode_m16_square | 0.27% | 0.30% | 1.14x |
+
+**安静的路两次吻合到 15% 以内；吵的路差 7-11 倍。**
+
+所以我在 `f65ce302` 里写的"纪元 Z 独立证实了那条注释，m256_down 的真实底噪是 7.02%，
+Y 那个 0.20% 是离群值"——**这个结论站不住**。这条路现在有三个读数：
+0.20%（Y，被 MIN_FLOOR 夹）、7.02%（我）、1.02%（复测）。
+**我的 7.02% 和 Y 的 0.20% 是同一种东西：一个会话模态。**
+我把自己的那个会话模态当成了"这条路的性质"，
+而这正是我批评那条 0.20% 注释时指出的同一个错误。
+
+**站得住的是更强的那个版本**（d0 测出来的，不是我推的）：
+这条路的方差在 **oracle 臂**里、在**小时量级上漂移**，
+所以**任何单会话的 floor——包括我的——都是模态而不是性质**。
+n=8 的 MAD 在双模路上根本定不住底噪。这跟 band 那条发现是**同一个病**
+（n=5 极差是抽签），只不过这次是在**另一套噪声机制**（per-epoch MAD floor）里复现，
+而且这回我有**两次可直接对比的 sweep** 当证据，不是推断。
+
+一个没排除的替代解释，要写下来：**我那次 sweep 是快照恢复后这台机器上的第一个 GPU 负载**，
+时钟/功耗状态可能还在爬。它跑在更干净的条件下（8 卡全空、单卡锁）却测出更吵的数——
+这跟"争用"相反，但跟"冷启动瞬态"一致。**不能只凭两次 sweep 就断言是双模。**
+
+### 附带：那条过期的 epoch-Y insight **真的造成了一次错误操作**
+
+第二次 sweep 的 verdict 里 `ok: **false**`：
+
+```
+"verdict was taken on tw035 (epoch Z), but would be installed as epoch Y (tw053).
+ Floors do not pool across a machine boundary"
+```
+
+也就是 agent **传了 `--machine Y`**——它信了 insight 里那句 "BOX/TOOLING FACTS (epoch Y, tw053)"。
+这正是我在 `8908d954` 里说的"箱子事实以散文跨机中继"的失效方式，现在有了实例。
+**守卫拦住了，没有装进表里**，所以无害；那次测量本身仍然是 tw035 上的真实计时，可以拿来对比。
+两条都记：**过期 insight 会驱动错误命令**，以及 **`deprovisionalize`/`measure` 的跨机守卫是有效的**。
+
+### 待对账
+
+`prefill_m512_up` 之前是唯一阻塞点（-2.27% vs 1.26% floor）。第二次 sweep **没有被安装**，
+所以这一轮的门用的仍是我那张表，m512_up 的 floor 仍是 1.26%。
+既然提交发生了，**这一轮应该是真的修好了 m512_up**，而不是把它蒙混过关。
+等 STATE 追上后核对 per-case，确认 m512_up ≥ 1.0。
+我"原样重投会再被否"的预测**没有被检验**——他们没有原样重投。
