@@ -79,7 +79,90 @@ ELEM_SIZE = {
     "half": 2, "__half": 2, "_Float16": 2, "rocwmma::float16_t": 2,
     "float": 4, "int": 4, "unsigned": 4, "unsigned int": 4, "uint32_t": 4,
     "double": 8, "long": 8,
+    # Byte-sized element types, i.e. a raw LDS arena: `__shared__ __align__(16)
+    # char smem[kSmemBytes];` with typed views placed into it by hand. Omitting
+    # them did not make the scan conservative, it made it VACUOUS AND LOUD: an
+    # unknown element type is never registered in `arrays`, so every cast
+    # against that arena hits the `name not in arrays` continue and no finding
+    # can be produced -- yet `passed` goes false on the unparseable entry alone.
+    # Observed twice on this task (round 1, engineer_1): findings [] and four
+    # unparseable rows for one `char smem[]`, refusing a candidate before its
+    # build, correctness run, or a single timing. A 1-D arena is doubly
+    # undecidable here, since the stride loop walks `strides[:-1]` and there is
+    # no outer stride to walk. `char` is 1 byte by definition, so this resolves
+    # the size rather than guessing it; the arena still gets the same
+    # innermost-index caveat every other array gets.
+    "char": 1, "int8_t": 1, "uint8_t": 1, "std::byte": 1, "std::int8_t": 1,
 }
+
+# sizeof for the scalar bases a vector typedef can be built on. Same closed-table
+# discipline as ELEM_SIZE: a base that is not here leaves the typedef unresolved.
+SIZEOF = {
+    "char": 1, "signed char": 1, "unsigned char": 1, "int8_t": 1, "uint8_t": 1,
+    "short": 2, "unsigned short": 2, "int16_t": 2, "uint16_t": 2,
+    "_Float16": 2, "half": 2, "__half": 2, "Bf16": 2, "__hip_bfloat16": 2,
+    "int": 4, "unsigned": 4, "unsigned int": 4, "int32_t": 4, "uint32_t": 4,
+    "float": 4,
+    "long": 8, "unsigned long": 8, "int64_t": 8, "uint64_t": 8, "double": 8,
+}
+
+# A vector typedef declared IN THE FILE BEING SCANNED, in either of the two
+# spellings these kernels use:
+#   typedef __attribute__((__vector_size__(4 * sizeof(short)))) short shortx4_t;
+#   typedef short shortx4_t __attribute__((ext_vector_type(4)));
+VEC_SIZE_TYPEDEF = re.compile(
+    r"typedef\s+__attribute__\(\(\s*_*vector_size_*\s*\(\s*(?P<expr>[^)]*(?:\([^)]*\))?[^)]*)\)\s*\)\)"
+    r"\s+(?P<base>[\w:]+(?:\s+\w+)?)\s+(?P<name>\w+)\s*;")
+EXT_VEC_TYPEDEF = re.compile(
+    r"typedef\s+(?P<base>[\w:]+(?:\s+\w+)?)\s+(?P<name>\w+)\s*"
+    r"__attribute__\(\(\s*ext_vector_type\s*\(\s*(?P<n>\d+)\s*\)\s*\)\)\s*;")
+_SIZEOF_CALL = re.compile(r"sizeof\s*\(\s*([\w:]+(?:\s+\w+)?)\s*\)")
+
+
+def _vector_size_bytes(expr: str) -> int | None:
+    """Bytes for a `__vector_size__` argument, or None if not decidable here.
+
+    Accepts an integer literal, `sizeof(T)`, and products of those. Anything
+    else -- a named constant, a division, arithmetic we have not seen -- is
+    left unresolved so the cast is reported unknown rather than assumed.
+    """
+    resolved = _SIZEOF_CALL.sub(
+        lambda m: str(SIZEOF[m.group(1).strip()]) if m.group(1).strip() in SIZEOF else "?",
+        expr)
+    if "?" in resolved or not re.fullmatch(r"[\d\s*]+", resolved or ""):
+        return None
+    total = 1
+    for factor in resolved.split("*"):
+        factor = factor.strip()
+        if not factor:
+            return None
+        total *= int(factor)
+    return total or None
+
+
+def vector_typedefs(text: str) -> dict[str, int]:
+    """Cast-target widths for vector typedefs the scanned file declares itself.
+
+    Why this is not a loosening. The tool's rule is resolve-or-report, and it
+    already resolves `constexpr` array dimensions out of the same source rather
+    than keeping a table of them. A vector typedef is the same kind of fact,
+    written a few lines above the cast that uses it, and leaving it out did not
+    make the scan conservative -- it made it refuse a candidate on which it had
+    produced no finding, three times in one round on this task. The width is
+    READ here, never defaulted: an expression this cannot evaluate yields no
+    entry, and the cast stays unparseable exactly as before.
+    """
+    out: dict[str, int] = {}
+    for m in VEC_SIZE_TYPEDEF.finditer(text):
+        width = _vector_size_bytes(m.group("expr"))
+        if width:
+            out[m.group("name")] = width
+    for m in EXT_VEC_TYPEDEF.finditer(text):
+        base = SIZEOF.get(m.group("base").strip())
+        if base:
+            out[m.group("name")] = base * int(m.group("n"))
+    return out
+
 
 DECL = re.compile(
     r"__shared__\s+(?:__align__\(\d+\)\s+)?"
@@ -155,6 +238,10 @@ def scan(path: Path) -> tuple[list[dict], list[dict]]:
     """(findings, unparseable). Both are reported; neither is inferred."""
     text = path.read_text(encoding="utf-8", errors="replace")
     known = constants(text)
+    # Module table first, then widths this file declares for itself. A file-local
+    # typedef wins on a name clash: it is the definition actually in scope here.
+    widths = dict(CAST_WIDTH)
+    widths.update(vector_typedefs(text))
     findings: list[dict] = []
     unknown: list[dict] = []
 
@@ -183,7 +270,7 @@ def scan(path: Path) -> tuple[list[dict], list[dict]]:
         name = m.group("name")
         if name not in arrays:
             continue  # not an array this file declares; nothing decidable here
-        width = CAST_WIDTH.get(m.group("type").strip())
+        width = widths.get(m.group("type").strip())
         line = text[:m.start()].count("\n") + 1
         if width is None:
             unknown.append({"path": str(path), "line": line, "array": name,
