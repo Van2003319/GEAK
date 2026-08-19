@@ -206,20 +206,32 @@ class RouteGateStillOverridesTheSuiteGate(unittest.TestCase):
     Written when `const improved` became `legacyImproved` plus a per-route gate. Retargeting the
     extractor at `legacyImproved` keeps every resume-frame test meaningful, but on its own it would
     leave the suite asserting hard about a rule the lane can overrule and nothing at all about the
-    rule that overrules it. These three lines are the minimum that notices if the override is
-    deleted, stops being authoritative, or stops being logged.
+    rule that overrules it. These lines are the minimum that notices if the override is deleted,
+    stops being authoritative, or stops being logged.
+
+    The relationship is now a UNION rather than a replacement, because each test sees a win the other
+    cannot: a per-route band catches a single-route win an eleven-route geomean divides by eleven,
+    while the suite number catches a broad thin gain that clears no single band. A banded regression
+    vetoes both arms, and that veto is the property worth guarding.
     """
 
     def test_the_route_gate_can_overturn_the_suite_gate(self):
         self.assertIn("improved = routeVerdict.accepted", SOURCE,
                       "the per-route gate no longer overrides the suite-geomean verdict")
 
+    def test_the_suite_gate_survives_as_the_other_arm_of_the_union(self):
+        self.assertIn("const suiteSaysYes = legacyImproved && !routeVerdict.regressed.length", SOURCE,
+                      "the suite verdict must remain a route to acceptance, minus banded regressions")
+        self.assertIn("improved = routeVerdict.accepted || suiteSaysYes", SOURCE)
+
     def test_the_suite_gate_is_still_computed_so_disagreements_are_auditable(self):
         # The override is only auditable if the number every prior round was judged on is still
         # computed alongside it. If legacyImproved stops existing, this file's extractor is not the
-        # only thing that breaks -- the audit log below loses its comparison.
+        # only thing that breaks -- the audit log below loses its comparison. The comparison is made
+        # against the FINAL decision (`improved`), not against one arm of it, or a round the suite
+        # test carried would be reported as an overturn of itself.
         self.assertIn("const legacyImproved =", SOURCE)
-        self.assertIn("routeVerdict.accepted !== legacyImproved", SOURCE)
+        self.assertIn("improved !== legacyImproved", SOURCE)
 
     def test_the_override_is_logged_in_both_directions(self):
         self.assertIn("OVERTURNS the legacy suite-geomean gate", SOURCE)

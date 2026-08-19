@@ -1509,6 +1509,11 @@ let noImprove = 0;
 // report confident, wrong claim verdicts, which is strictly worse than the honest
 // `indeterminate` a null produces.
 let isaCanonicalArchive = null;
+// The source hash of the tree `isaCanonicalArchive` actually describes, tracked BESIDE the path so
+// the pairing can be checked rather than assumed. Without it the archive is a path with a claim
+// attached to it by position in the code, and the stale-parent failure the comment above warns about
+// is invisible; with it, a verifier reporting a different parent hash makes the disagreement loud.
+let isaCanonicalSourceHash = null;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
@@ -2173,6 +2178,63 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       if (receipt.exit_code === 2) parts.push('(archive HOLE: nothing was captured)');
       log(`  [isa] ${id}: ${parts.join(' ')}`);
     }
+    // Adopt a parent archive the verifier captured itself, when we have none.
+    //
+    // This is what turns the ISA layer from decorative into live. `isaCanonicalArchive` used to be
+    // assigned in exactly ONE place -- inside the committed-winner branch -- so it stayed null until
+    // the first commit landed, and on a lane where most rounds commit nothing it stayed null for the
+    // whole run. No parent archive means no diff, which means every `mechanism_verdict` is
+    // `indeterminate`, which means the layer answers nothing in precisely the situation it was built
+    // for: a plateau where you need to know whether the mechanism reached the machine code. Across
+    // seven waves of the greedy lane, 11 clean captures produced 0 machine-readable verdicts.
+    //
+    // The verifier is the right source because it already builds the parent tree in its own session
+    // for the control arm, so capturing its ISA is nearly free -- and one verifier on this lane did
+    // exactly that unprompted, leaving a `verify/isa_parent_canonical/` directory behind.
+    //
+    // The safety property is unchanged and is why this keys on the hash: a WRONG parent is strictly
+    // worse than none, because it yields confident, wrong claim verdicts instead of an honest
+    // `indeterminate`. So an archive is adopted only when the verifier says which tree it describes,
+    // and any later disagreement drops the pointer rather than picking a side.
+    if (!isaCanonicalArchive) {
+      for (const r of clean) {
+        const receipt = r.ver && r.ver.isa_evidence;
+        if (!receipt || typeof receipt !== 'object') continue;
+        if (typeof receipt.parent_archive !== 'string' || !receipt.parent_archive) continue;
+        if (typeof receipt.parent_source_hash !== 'string' || !receipt.parent_source_hash) {
+          log('  [isa] a verifier returned a parent_archive with no parent_source_hash; NOT adopting '
+            + 'it as the canonical parent. An archive whose tree is unnamed cannot be checked against '
+            + 'the next round\'s parent, and an unnoticed stale parent produces confident wrong '
+            + 'verdicts -- worse than the indeterminate a missing parent produces.');
+          continue;
+        }
+        isaCanonicalArchive = receipt.parent_archive;
+        isaCanonicalSourceHash = receipt.parent_source_hash;
+        log(`  [isa] adopted the parent archive captured by ${r.d && r.d.id ? r.d.id : 'a verifier'} `
+          + `(tree ${isaCanonicalSourceHash.slice(0, 12)}). Mechanism claims can now be DIFFED from `
+          + 'round 1 instead of reported indeterminate until something commits.');
+        break;
+      }
+    } else {
+      // Disagreement check. Every candidate in a round forks from the same canonical tree, so every
+      // verifier that names a parent must name the same one. If one does not, either canonical moved
+      // under the round or an archive belongs to another tree -- and both make the pointer unsafe.
+      const conflict = clean.find((r) => {
+        const rec = r.ver && r.ver.isa_evidence;
+        return rec && typeof rec.parent_source_hash === 'string' && rec.parent_source_hash
+          && isaCanonicalSourceHash && rec.parent_source_hash !== isaCanonicalSourceHash;
+      });
+      if (conflict) {
+        const rec = conflict.ver.isa_evidence;
+        log(`  [isa] DROPPING the canonical parent archive: ${conflict.d && conflict.d.id ? conflict.d.id : 'a verifier'} `
+          + `reports its parent tree as ${rec.parent_source_hash.slice(0, 12)} while the stored parent `
+          + `is ${isaCanonicalSourceHash.slice(0, 12)}. Two trees cannot both be the parent of one `
+          + 'round, so the pointer is not trustworthy and is cleared rather than guessed at. Verdicts '
+          + 'go back to indeterminate until a parent is re-established.');
+        isaCanonicalArchive = null;
+        isaCanonicalSourceHash = null;
+      }
+    }
   }
   const verified = clean.filter(r => {
     if (!(r.ver && r.ver.policy_pass === true &&
@@ -2226,6 +2288,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // attribution this field exists to make impossible.
     isa_archive: r.ver.isa_evidence && typeof r.ver.isa_evidence.archive === 'string'
       ? r.ver.isa_evidence.archive : null,
+    // The tree that archive describes. Carried so that when this candidate becomes canonical, the
+    // parent pointer records WHICH tree it is the parent of, and the next round can check rather
+    // than trust the pairing.
+    isa_source_hash: r.ver.isa_evidence && typeof r.ver.isa_evidence.source_hash === 'string'
+      ? r.ver.isa_evidence.source_hash : null,
   }));
 
   let integrate = null;
@@ -2290,8 +2357,33 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       targetRoutes: winner.target_routes,
     });
     if (routeVerdict.applicable) {
-      improved = routeVerdict.accepted;
+      // UNION, with the regression veto as the safety property -- not a replacement.
+      //
+      // The two tests answer different questions and both are real evidence: the per-route test asks
+      // "did a named route get faster beyond its own noise", the suite test asks "did the whole suite
+      // get faster by more than the threshold". Each sees a win the other cannot. The per-route test
+      // exists because an eleven-route geomean divides a single-route win by eleven. But the reverse
+      // blind spot is just as real and was nearly shipped here: eleven routes each improving 0.4% is
+      // a genuine suite win of ~4.4% that the per-route test scores as "all flat", because no single
+      // route clears its own band. Replacing one test with the other would have traded a known
+      // false refusal for a new one.
+      //
+      // What is NOT unioned is the regression veto. A candidate that pushed some route past its band
+      // in the wrong direction is refused however good its suite number looks, because that number is
+      // an average and the regression is a fact about a route.
+      //
+      // This also means the change of default cannot make any run STRICTER than it was, which
+      // matters: the entire complaint against the old gate was that it refused real work.
+      const suiteSaysYes = legacyImproved && !routeVerdict.regressed.length;
+      improved = routeVerdict.accepted || suiteSaysYes;
       log(`  [gate r${round}] per-route: ${routeVerdict.accepted ? 'ACCEPT' : 'REFUSE'} -- ${routeVerdict.reason}`);
+      if (!routeVerdict.accepted && suiteSaysYes) {
+        log(`  [gate r${round}] committing anyway on the SUITE test (${winner.geomean.toFixed(5)} vs ` +
+            `cumulative ${cumulative.toFixed(5)} at MIN_IMPROVE=${MIN_IMPROVE}), with no route ` +
+            'regressed past its band. A broad gain spread thinly across routes clears no single ' +
+            'band while still being a real win; that is the per-route test\'s own blind spot, not a ' +
+            'reason to discard the candidate.');
+      }
       log(`  [gate r${round}] incumbent side: ${sameSession
         ? 'the verifier\'s SAME-SESSION control arm (both arms from one invocation)'
         : 'the stored best_per_case from an earlier round -- NO same-session control was returned, so '
@@ -2306,14 +2398,16 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
             `${routeVerdict.improved.join(', ') || '(none named)'} was not checked against a claimed ` +
             'mechanism. An incidental gain and a realized mechanism are indistinguishable here.');
       }
-      if (routeVerdict.accepted !== legacyImproved) {
+      if (improved !== legacyImproved) {
         // Logged on every disagreement, in both directions, so the change of gate is auditable
         // against the number every prior round was judged on rather than silently replacing it.
         log(`  [gate r${round}] this OVERTURNS the legacy suite-geomean gate ` +
             `(${legacyImproved ? 'it would have committed' : 'it would have refused'}: ` +
             `winner ${winner.geomean.toFixed(5)} vs cumulative ${cumulative.toFixed(5)} ` +
-            `at MIN_IMPROVE=${MIN_IMPROVE}). The per-route test is authoritative: a suite geomean ` +
-            'divides a single-route win by the route count, which is what this table exists to undo.');
+            `at MIN_IMPROVE=${MIN_IMPROVE}). ${improved
+              ? 'A suite geomean divides a single-route win by the route count, which is what the '
+                + 'band table exists to undo.'
+              : 'A route regressed past its own band, which an averaged suite number cannot see.'}`);
       }
     } else {
       log(`  [gate r${round}] per-route gate NOT APPLICABLE (${routeVerdict.reason}); ` +
@@ -2326,7 +2420,34 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
   // A round with NO candidate is never progress, so a dead round still counts against MAX_NO_IMPROVE.
-  const madeProgress = !!(winner && bestSeen > 0 && winner.geomean > bestSeen * (1 + PROGRESS_DELTA));
+  const suiteProgress = !!(winner && bestSeen > 0 && winner.geomean > bestSeen * (1 + PROGRESS_DELTA));
+  // ...and the same unit error, in the stall counter. This one does not refuse a candidate, it ends
+  // the WAVE: `MAX_NO_IMPROVE` defaults to 2, so two rounds scored as stalls stop the loop with
+  // budget unspent. Measured cost on the greedy lane: wave 6 stopped after 3 rounds having used 8 of
+  // 12 directions.
+  //
+  // Why it misfires. `PROGRESS_DELTA` defaults to `MIN_IMPROVE`, and it is applied to the SUITE
+  // geomean against the best suite number ever seen. A single route improving 7% moves an unweighted
+  // eleven-route geomean by roughly 0.6%, so a round that produced a real, banded, independently
+  // verified route win is scored as "not advancing" and counted toward stopping the search -- while
+  // the same round's candidate may be getting committed by the gate above. A loop that commits a
+  // round and simultaneously counts it as a stall is measuring two different things and calling both
+  // progress.
+  //
+  // So a round that cleared a route's own band counts as progress. This is strictly more permissive,
+  // which is the correct direction for a STOPPING rule: the cost of a false "advancing" is one more
+  // round of a budget the caller already authorised, while the cost of a false "stalled" is every
+  // remaining round of the wave.
+  const routeProgress = !!(routeVerdict && routeVerdict.applicable && routeVerdict.improved.length
+    && !routeVerdict.regressed.length);
+  const madeProgress = suiteProgress || routeProgress;
+  if (routeProgress && !suiteProgress) {
+    log(`  [gate r${round}] the search ADVANCED on route evidence (${routeVerdict.improved.join(', ')}) ` +
+        `even though the suite geomean ${winner.geomean.toFixed(5)} did not clear bestSeen ` +
+        `${bestSeen.toFixed(5)} by PROGRESS_DELTA=${PROGRESS_DELTA}. Scored as progress: a stalled ` +
+        'round ends the wave, and one route of many moving cannot shift an unweighted geomean far ' +
+        'enough to register.');
+  }
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
@@ -2388,10 +2509,19 @@ matter how the rest of the run looked.`,
       // `bestPerCase`, applied to the evidence pointer.
       if (ISA_ENABLED) {
         isaCanonicalArchive = winner.isa_archive || null;
+        // Moved together with the path, always, including when both go null. A hash left behind by a
+        // cleared archive would make the next round's disagreement check compare a fresh parent
+        // against a retired tree and clear a pointer that was correct.
+        isaCanonicalSourceHash = isaCanonicalArchive ? (winner.isa_source_hash || null) : null;
         if (!isaCanonicalArchive) {
           log(`  [isa] the new canonical (${winner.source}) carries no ISA archive, so next round's `
             + 'mechanism claims will be reported indeterminate rather than diffed against a stale '
             + 'parent. Expected for an integrated winner.');
+        } else if (!isaCanonicalSourceHash) {
+          log(`  [isa] the new canonical (${winner.source}) carries an ISA archive but no source hash, `
+            + 'so the next round cannot check that its parent is this tree. The archive is still used '
+            + '-- it was captured from the tree that just became canonical -- but the disagreement '
+            + 'check is inert until a verifier names a parent tree.');
         }
       }
     } else {

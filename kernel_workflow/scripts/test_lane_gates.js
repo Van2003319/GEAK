@@ -577,8 +577,9 @@ console.log('\n# the budget, the commit threshold and the correctness gate');
   ok(/let improved = legacyImproved;/.test(src),
     'the legacy threshold is the starting commit decision, not one branch of two');
   ok(/if \(winner && ROUTE_BANDS\) \{/.test(src) &&
-     /if \(routeVerdict\.applicable\) \{\s*improved = routeVerdict\.accepted;/.test(src),
-    'the per-route gate overrules the suite threshold when bands exist AND it is applicable');
+     /if \(routeVerdict\.applicable\) \{/.test(src) &&
+     /improved = routeVerdict\.accepted \|\| suiteSaysYes;/.test(src),
+    'the per-route verdict joins the suite threshold as a union when bands exist AND it is applicable');
   // Finding (62) split this from one conjunction into a gate plus a named metric
   // refusal, so the shape changed; the threshold it enforces did not.
   ok(/says\(r\.ver\.correctness, 'pass'\)\)\) return false;/.test(src) &&
@@ -717,6 +718,90 @@ console.log('\n# the gate compares against a SAME-SESSION control when the verif
   ok(/accepted with no declared target_routes/.test(src),
     'a win banked with no declared target route is NOTED rather than refused -- unattributed, but ' +
     'not thrown away');
+}
+
+console.log('\n# the two gates are a UNION with a regression veto, and a route win is progress, executed');
+{
+  // Two separate unit errors, one cause: a suite geomean was being used to judge single-route work.
+  //   * at the COMMIT gate it refused verified route wins (what the band table was added to fix);
+  //   * at the STALL counter it ends the WAVE -- MAX_NO_IMPROVE defaults to 2, so two rounds scored
+  //     as stalls stop the loop with budget unspent. Wave 6 stopped after 3 rounds on 8 of 12.
+  // The commit gate had to become a union rather than a replacement, because the per-route test has
+  // the mirror-image blind spot: eleven routes each +0.4% is a real ~4.4% suite win that clears no
+  // single band.
+  const gateBlock = grab(/const routeGate = \(candPerCase, incPerCase, bands, opts\) => \{[\s\S]*?\n\};\n/,
+    'routeGate');
+  const { routeGate } = new Function(`${gateBlock}\nreturn {routeGate};`)();
+  const routes = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k'];
+  const bands = Object.fromEntries(routes.map(r => [r, 0.02]));
+  const rows = (f) => routes.map(r => ({ name: r, optimized_ms: 0.100 * f(r), speedup: 1 / f(r) }));
+  const inc = rows(() => 1);
+
+  // The union's reason for existing, as arithmetic rather than assertion.
+  const broad = routeGate(rows(() => 0.996), inc, bands);      // every route -0.4%
+  ok(broad.applicable && !broad.accepted && !broad.regressed.length,
+    'a broad thin gain clears NO band, so the per-route test alone would refuse a real suite win',
+    broad.reason);
+  const single = routeGate(rows(r => (r === 'a' ? 0.93 : 1)), inc, bands);
+  ok(single.applicable && single.accepted,
+    'a single-route win clears its band, which the suite geomean divides by the route count');
+
+  // The veto is what is NOT unioned.
+  const mixed = routeGate(rows(r => (r === 'a' ? 0.80 : (r === 'b' ? 1.10 : 1))), inc, bands);
+  ok(mixed.applicable && !mixed.accepted && mixed.regressed.join() === 'b',
+    'a route regressed past its band is refused however good the average looks');
+
+  ok(/const suiteSaysYes = legacyImproved && !routeVerdict\.regressed\.length;/.test(src),
+    'the suite test survives as a second route to acceptance, minus any banded regression');
+  ok(/improved = routeVerdict\.accepted \|\| suiteSaysYes;/.test(src),
+    'the commit decision is the UNION -- so making the per-route gate the default cannot make any ' +
+    'run STRICTER than it was, which was the entire complaint against the old gate');
+  ok(/committing anyway on the SUITE test/.test(src),
+    'a commit that only the suite test justifies says so, rather than looking like a route win');
+
+  // The stall counter.
+  ok(/const suiteProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
+    'the old suite progress test is preserved under its own name');
+  ok(/const routeProgress = !!\(routeVerdict && routeVerdict\.applicable && routeVerdict\.improved\.length\s*&& !routeVerdict\.regressed\.length\)/.test(src),
+    'a round that cleared a route band counts as progress');
+  ok(/const madeProgress = suiteProgress \|\| routeProgress;/.test(src),
+    'progress is the union of the two, so a route win cannot be scored as a stall');
+  ok(/if \(madeProgress \|\| committedThisRound\) \{ noImprove = 0; \} else \{ noImprove\+\+; \}/.test(src),
+    'the stall counter still also resets on a landed commit -- (127) unchanged');
+  ok(/the search ADVANCED on route evidence/.test(src),
+    'a round rescued from being scored a stall says which routes rescued it');
+  // routeProgress is deliberately BROADER than the commit gate: it ignores target narrowing, because
+  // the cost of a false "stalled" is every remaining round of the wave.
+  ok(!/routeProgress = .*targetRoutes/.test(src),
+    'progress does not require the win to be on the DECLARED route -- a stopping rule errs toward ' +
+    'continuing, since a false stall costs the whole remaining wave');
+}
+
+console.log('\n# the ISA parent archive follows the TREE, not the commit event, executed');
+{
+  // `isaCanonicalArchive` was assigned in exactly one place: inside the committed-winner branch. On a
+  // lane where most rounds commit nothing it therefore stayed null for the whole run, no diff was
+  // possible, and every mechanism_verdict came back `indeterminate` -- 11 clean captures across seven
+  // waves produced 0 machine-readable verdicts. The layer was self-disabling in exactly the situation
+  // it exists for.
+  ok(/let isaCanonicalSourceHash = null;/.test(src),
+    'the parent archive now carries the hash of the tree it describes, so the pairing is checkable');
+  ok(/if \(!isaCanonicalArchive\) \{\s*for \(const r of clean\) \{/.test(src),
+    'a parent archive is adopted from a verifier when the lane has none, instead of waiting for a commit');
+  ok(/typeof receipt\.parent_source_hash !== 'string' \|\| !receipt\.parent_source_hash/.test(src) &&
+     /NOT adopting/.test(src),
+    'an archive that does not name its tree is REFUSED -- a stale parent gives confident wrong ' +
+    'verdicts, which is worse than the indeterminate a missing parent gives');
+  ok(/DROPPING the canonical parent archive/.test(src),
+    'two verifiers disagreeing about the parent tree clears the pointer rather than picking a side');
+  ok(/isaCanonicalSourceHash = isaCanonicalArchive \? \(winner\.isa_source_hash \|\| null\) : null;/.test(src),
+    'on a commit the hash moves WITH the path, including to null -- a hash left behind would make ' +
+    'the next round clear a pointer that was correct');
+  ok(/isa_source_hash: r\.ver\.isa_evidence && typeof r\.ver\.isa_evidence\.source_hash === 'string'/.test(src),
+    'a candidate carries the tree its own archive describes, ready to become the next parent');
+  // The safety property the original comment names, still true: nothing invents a parent.
+  ok(/\.\.\.\(isaCanonicalArchive \? \{ ISA_PARENT_ARCHIVE: isaCanonicalArchive \} : \{\}\)/.test(src),
+    'a null parent is still simply absent from the verifier prompt -- no substituted tree');
 }
 
 console.log('\n# an argument that does not arrive must not look like a chosen default, executed');

@@ -108,13 +108,24 @@ ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({
 console.log('\n# the commit gate is NOT loosened by any of this');
 ok(/const legacyImproved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
    'banking still requires beating cumulative by MIN_IMPROVE');
-// The threshold above is the DEFAULT path; a measured `route_bands` table can overrule it
-// per-route. Pinned here too because this file's subject is "the commit gate is not loosened",
-// and an unconditional per-route verdict would loosen it while the regex above still passed.
+// The suite threshold above is the FALLBACK and also one half of a union: a per-route band table
+// (derived from the baseline repeats by default) can accept a candidate the suite test refuses, and
+// the suite test can accept one no single band clears. Pinned here because this file's subject is
+// "the commit gate is not loosened", and the thing that would loosen it is the REGRESSION VETO going
+// missing -- not either test accepting.
 ok(/let improved = legacyImproved;/.test(src) && /if \(winner && ROUTE_BANDS\) \{/.test(src),
-   'the per-route gate is opt-in: no band table means the legacy threshold decides');
-ok(/const madeProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
-   'the progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
+   'the suite threshold is where the commit decision starts, before any per-route verdict');
+ok(/const suiteSaysYes = legacyImproved && !routeVerdict\.regressed\.length;/.test(src) &&
+   /improved = routeVerdict\.accepted \|\| suiteSaysYes;/.test(src),
+   'the union can only ACCEPT via a test that passed; a banded regression vetoes both arms');
+ok(/const suiteProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
+   'the suite progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
+// A route win is progress too, because the suite geomean divides a single-route win by the route
+// count and a round scored as a stall ends the WAVE at MAX_NO_IMPROVE. That is a STOPPING rule, so it
+// errs toward continuing: a false "advancing" costs one authorised round, a false "stalled" costs all
+// the remaining ones.
+ok(/const madeProgress = suiteProgress \|\| routeProgress;/.test(src),
+   'progress is the union, so a verified single-route win is not counted toward stopping the search');
 // The other half of the stall counter, and the half that decides whether a lane can ever stop.
 // `improved` is settled BEFORE the commit is attempted, so resetting on it let a winner that
 // never LANDED clear the counter every round while `cumulative` stood still -- and the next
@@ -163,7 +174,9 @@ function legacy({ budget, deepCost, maxNoImprove }, traj) {
 
 console.log('\n# at the defaults the loop is EXHAUSTIVELY equivalent to the pre-knob one');
 // The `bestSeen > 0` guard is what makes this hold: without it a first-round winner in (1.0, 1.02]
-// makes `madeProgress` trivially true (bestSeen is 0), resetting a stall counter main would advance.
+// makes `suiteProgress` trivially true (bestSeen is 0), resetting a stall counter main would advance.
+// This replay models the SUITE arm only; `routeProgress` needs a band table, and the equivalence
+// being pinned here is with the pre-knob loop, which had none.
 // Values below straddle 1.0 and the 1.02 commit margin, and include no-candidate rounds.
 {
   const VALS = [0.0, 0.5, 0.99, 1.0, 1.005, 1.01, 1.02, 1.021, 1.05, 1.1, 1.3];

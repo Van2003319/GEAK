@@ -124,8 +124,34 @@ absolute per-case latencies. The script trusts only your numbers.
         --scan <your ws build dir> ${ISA_ARCH:+--arch "$ISA_ARCH"}
     ```
 
-    Then, when `ISA_PARENT_ARCHIVE` is present, diff against the parent and pass the engineer's claims
-    through **verbatim**:
+    **When `ISA_PARENT_ARCHIVE` is NOT supplied, capture the parent yourself.** You have already built
+    the unpatched canonical tree in this session for `control_per_case` (step 7), so its code objects
+    are sitting in your control workspace and capturing them costs one more CPU-only call:
+
+    ```
+    python3 "$ISA_CAPTURE_HELPER" --out "$ISA_ARCHIVE_DIR/../isa_parent" \
+        --source-root <your CONTROL ws src dir> --scan <your CONTROL ws build dir> \
+        ${ISA_ARCH:+--arch "$ISA_ARCH"}
+    ```
+
+    Then diff against it and return its path as `parent_archive` and its manifest `source_hash` as
+    `parent_source_hash`. The orchestrator adopts that pair as the canonical parent for later rounds,
+    but only if you name the tree: an archive whose tree is unnamed cannot be checked against the next
+    round's parent, and a stale parent produces confident WRONG verdicts, which is worse than the
+    honest `indeterminate` that no parent produces.
+
+    Why this is worth the call. The orchestrator can only hand you a parent archive once some round has
+    committed a winner that carried one. On a lane where most rounds commit nothing, that never
+    happens, so every round reports `indeterminate` and the whole layer answers nothing in exactly the
+    case it exists for — a plateau where the open question is whether the mechanism reached the machine
+    code at all. Seven waves of one lane produced eleven clean captures and zero usable verdicts this
+    way. Capture the parent, and a claim can be judged from round 1.
+
+    Capture the parent from the tree you MEASURED, never from a path handed to you as "canonical"
+    without checking it: the point is that the diff describes the two binaries you timed.
+
+    Then, with a parent archive in hand — supplied or your own — diff against it and pass the
+    engineer's claims through **verbatim**:
 
     ```
     python3 "$ISA_SIGNALS_HELPER" diff --from "$ISA_PARENT_ARCHIVE" --to "$ISA_ARCHIVE_DIR" \
@@ -151,10 +177,14 @@ absolute per-case latencies. The script trusts only your numbers.
     `false` -> `refuted`, `null` -> `indeterminate`. `high_findings` is the `high` count from `checks`.
 
     **`indeterminate` is a real answer and you must use it rather than rounding.** It is what the tool
-    reports when the evidence needed to judge a claim was not in the archive: no `ISA_PARENT_ARCHIVE`
-    this round (normal on round 1, and after any canonical that carries no archive), no kernel symbol
-    present in both builds, `llvm-readelf` unavailable so register and scratch budgets could not be
-    read, or an archive HOLE where no code object was found. Reporting any of those as `refuted` blames
+    reports when the evidence needed to judge a claim was not in the archive: no parent archive at all
+    (neither supplied nor capturable), no kernel symbol present in both builds, `llvm-readelf`
+    unavailable so register and scratch budgets could not be read, or an archive HOLE where no code
+    object was found. It is also the correct answer when your patch ADDS a kernel symbol rather than
+    editing one: the new symbol has no counterpart to diff against, so a claim the pre-existing symbols
+    do not carry is unjudged, not contradicted. `isa_signals.py` handles that case for you and reports
+    `indeterminate` — do not override it to `refuted`, which is the error that already cost this project
+    a verified, correctness-passing −4.72% patch. Reporting any of those as `refuted` blames
     the engineer for a gap on our side and manufactures the exact false negative this step exists to
     prevent. Reporting them as `realized` is worse.
 

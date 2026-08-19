@@ -242,10 +242,14 @@ FLOOR_MUTANTS = [
     ("the commit gate is loosened to the candidate floor",
      "const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));",
      "const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + CANDIDATE_FLOOR));"),
+    # `madeProgress` is now the union of this suite arm and a per-route arm, so the guard being
+    # mutated lives on `suiteProgress`. The invariant is unchanged: without `bestSeen > 0` a
+    # first-round winner just above the floor makes progress trivially true (bestSeen is 0) and
+    # resets a stall counter the pre-knob loop would have advanced.
     ("the progress signal drops its bestSeen > 0 guard",
-     "const madeProgress = !!(winner && bestSeen > 0 && "
+     "const suiteProgress = !!(winner && bestSeen > 0 && "
      "winner.geomean > bestSeen * (1 + PROGRESS_DELTA));",
-     "const madeProgress = !!(winner && "
+     "const suiteProgress = !!(winner && "
      "winner.geomean > bestSeen * (1 + PROGRESS_DELTA));"),
     # The one hole the first multi-suite audit reported: the Optimize prompt is
     # the only one assembled by hand rather than through `roleAgent()`, so
