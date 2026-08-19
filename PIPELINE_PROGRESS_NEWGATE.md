@@ -1275,3 +1275,23 @@ gate 判的是**同会话、交错配对**的 candidate vs control（r2_d1 的 l
 死掉那一波的 agent 缓存里是 **tw035** 上的计时，在 tw040 上重放就是把别的箱子的数当本箱的数。
 run `wf_90377108-25c`，monitor `bidbyqz4t`。
 起点是 canonical `cdb7932` / **1.2054**（已修正的 cumulative）。
+
+### 我在波边界漏掉了一件事：BOX insight 又是过期的
+
+新波已从 `best @ 1.2054` 起跑（`3b2a746`，banked_commit `cdb7932`）——**修正后的 cumulative 生效了**。
+但同一个波边界上我只修了 `cumulative`，**没修 BOX insight**，它现在写着：
+
+> BOX/TOOLING FACTS (**epoch Z, tw035**): 11 unclamped floors 0.27%-3.37% ...
+
+我们在 **tw040 / 纪元 A**，实测热表是 **0.20%-0.80%**。这是**同一个缺陷第二次发生**，
+而这一次我本来有机会顺手修掉（STATE 当时无人占用、我正在编辑它）。**这是我的疏漏，不是机器的。**
+
+危害有界，两个原因：(1) 传错 `--machine` 会被跨机守卫拦住（上一波已验证）；
+(2) 方向是**保守**的——agent 以为 m256_down 的 floor 有 1.0-3.4%，实际门用的是 0.20%，
+所以它们会低估自己能拿到的判定分辨率，而不是高估。比反过来安全。
+
+**强制动作项（下一个波边界，和 `cumulative` 一起做）：把 BOX insight 换成当前箱子的事实。**
+
+顺带一条**给 agent 记功**的观察：那条 insight 把我的 sweep 和第二次 sweep 调和成了
+"prefill_m256_down 1.0-3.4%，且其双模在 ORACLE 臂"——**记的是跨两次 sweep 的区间，不是单个数**。
+这比我第一次写的"真实底噪是 7.02%"更谨慎、也更正确。**在这一点上 tech_lead 比我做得好。**
