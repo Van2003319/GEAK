@@ -2132,6 +2132,24 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
             // not an independent check. Absent when the engineer declared none.
             ISA_MECHANISM_CLAIMS: eng && Array.isArray(eng.mechanism_claims)
               ? eng.mechanism_claims : [],
+            // ...and the same claim's ON-DISK copy, for the recovery path only.
+            // A lost StructuredOutput used to take the mechanism claim with it: `eng`
+            // is null, this list renders as `[]`, and the verifier -- correctly
+            // refusing to substitute a claim of its own -- reports `indeterminate`.
+            // Observed on this task the first time the lane ever committed: the
+            // engineer had declared ['reduce_lds'] and written it to
+            // <out_dir>/worker_result.json at 13:32; the recovered verify at 15:02
+            // was handed [] and the ISA layer answered nothing about the one patch
+            // that got banked. That is the identical failure the patch harvest above
+            // already refuses to make -- an engineer that died can still have left a
+            // good artefact on disk -- and the identical remedy applies, because
+            // worker_result.json is written by the engineer BEFORE verify measures
+            // anything, so reading it is not fitting the claim to the evidence. We
+            // cannot stat it from the workflow sandbox, so, exactly as with the
+            // patch, the file is named and the decision is delegated. Sent ONLY when
+            // the return was lost: a live `eng` is the authority and a file must
+            // never get to override it.
+            ...(recovered ? { ISA_MECHANISM_CLAIMS_FILE: `${d.out_dir}/worker_result.json` } : {}),
             // Null on round 1, and null again after any canonical with no archive.
             // Both mean the same thing to the verifier: diff-based claims are
             // indeterminate this round; report that, do not substitute another tree.
