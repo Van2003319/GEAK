@@ -256,7 +256,7 @@ MACHINE_HOSTNAME = {
 # in it belongs beside that epoch's own table, not here: installing a measured
 # table has to be able to retire the claim and the sentence in one edit, and
 # `deprovisionalize_epoch.py` can only own text it can anchor to.
-PROVISIONAL_MACHINES = {"A", "S"}
+PROVISIONAL_MACHINES = {"S"}
 # machine Q -- tw003. MEASURED: 8 complete same-variant primed repeats, source_hash 943b15834616ca9b857a59b94c548a7392c621b89093a792b69c6d6cf8a5db75.
 # Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
 MEASURED_NOISE_FLOOR_BY_MACHINE["Q"] = {
@@ -466,17 +466,20 @@ MEASURED_NOISE_FLOOR_BY_MACHINE["Z"] = {
 }
 
 
-# machine A -- tw040. PROVISIONAL: this box has never been measured for this
-# lane, so every route sits at DEFAULT_NOISE_FLOOR and nothing narrower than
-# that is admissible. This is the correct fail-closed state for a new box, not
-# a fault. Registered as a NEW letter rather than by inheriting one this host
-# may already have carried: a re-used box gets a new epoch, and reinstating the
-# old letter's floors is finding (126). The FIRST GPU work here must be
-# measure_noise_floor.py (8 same-variant full-suite primed repeats, the (105)
-# debiased harness, 2*MAD/median), then deprovisionalize_epoch.py --apply,
-# which replaces this comment and the table below it in a single edit.
+# machine A -- tw040. MEASURED: 8 complete same-variant primed repeats, source_hash 268f64799d01d923f675e83091e2f4df37b2ec95ad609d4db0965a2a442d6745.
+# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
 MEASURED_NOISE_FLOOR_BY_MACHINE["A"] = {
-    route: DEFAULT_NOISE_FLOOR for route in MEASURED_NOISE_FLOOR_BY_MACHINE["Z"]
+    "decode_m16_square": 0.0031,
+    "decode_m2_square": 0.0066,
+    "decode_m32_down": 0.0020,  # clamped to MIN_FLOOR
+    "decode_m64_square": 0.0034,
+    "decode_m8_up": 0.0046,
+    "decode_m96_up": 0.0056,
+    "prefill_m1024_down": 0.0032,
+    "prefill_m128_square": 0.0080,
+    "prefill_m2048_square": 0.0020,  # clamped to MIN_FLOOR
+    "prefill_m256_down": 0.0020,  # clamped to MIN_FLOOR
+    "prefill_m512_up": 0.0020,  # clamped to MIN_FLOOR
 }
 
 
