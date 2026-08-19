@@ -243,6 +243,7 @@ MACHINE_HOSTNAME = {
     "V": "tw051",     # wave 6 restore; a box this lane had never run on before
     "W": "tw042",     # wave 7 restore; another box new to the lane
     "X": "tw036",     # wave 8 restore; another box new to the lane
+    "Y": "tw053",     # coldstart_newgate lane, first allocation of this box
 }
 
 # Epochs whose table was never measured. Their floors are the fail-closed
@@ -429,7 +430,24 @@ MEASURED_NOISE_FLOOR_BY_MACHINE["X"] = {
 }
 
 
-CURRENT_MACHINE = "X"
+# machine Y -- tw053. MEASURED: 8 complete same-variant primed repeats, source_hash 268f64799d01d923f675e83091e2f4df37b2ec95ad609d4db0965a2a442d6745.
+# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+MEASURED_NOISE_FLOOR_BY_MACHINE["Y"] = {
+    "decode_m16_square": 0.0087,
+    "decode_m2_square": 0.0069,
+    "decode_m32_down": 0.0056,
+    "decode_m64_square": 0.0020,
+    "decode_m8_up": 0.0032,
+    "decode_m96_up": 0.0085,
+    "prefill_m1024_down": 0.0020,  # clamped to MIN_FLOOR
+    "prefill_m128_square": 0.0124,
+    "prefill_m2048_square": 0.0020,  # clamped to MIN_FLOOR
+    "prefill_m256_down": 0.0020,  # clamped to MIN_FLOOR
+    "prefill_m512_up": 0.0046,
+}
+
+
+CURRENT_MACHINE = "Y"
 
 MEASURED_NOISE_FLOOR = MEASURED_NOISE_FLOOR_BY_MACHINE[CURRENT_MACHINE]
 
