@@ -162,6 +162,22 @@ absolute per-case latencies. The script trusts only your numbers.
     Do **not** re-derive, edit, extend or drop the claims. They are the hypothesis under test; a
     verifier that rewrites the claim to match the evidence has verified nothing.
 
+    **When `ISA_MECHANISM_CLAIMS` is empty and `ISA_MECHANISM_CLAIMS_FILE` is set**, read
+    `mechanism_claims` out of that JSON file and use it verbatim. That variable appears only on the
+    recovery path -- the engineer's structured return was lost, so the orchestrator has no claim in
+    hand to forward, but the engineer wrote the same declaration to `worker_result.json` before you
+    measured anything. Reading it is therefore not re-deriving the claim and not fitting it to your
+    evidence; it is recovering the hypothesis from the only surviving copy, exactly as you already
+    verify a `best_patch.diff` left on disk by an engineer that never returned. It cost a real verdict
+    once: a banked patch whose engineer had declared `reduce_lds` on disk was diffed with no claim at
+    all and the ISA layer reported `indeterminate` about the only commit of the wave.
+
+    Two limits, both load-bearing. A non-empty `ISA_MECHANISM_CLAIMS` always wins -- the live return is
+    the authority and the file must never override it. And if the file is missing, unreadable, or has
+    no `mechanism_claims`, run the diff with no claim and say so in `notes`; do not invent one. Either
+    way, say in `notes` which source the claims came from, so a reader can tell a claim the engineer
+    made from a claim nobody made.
+
     Return `isa_evidence` transcribed from those two outputs:
 
     ```json
