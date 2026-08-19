@@ -725,3 +725,8 @@ mtime 停在 15:53，而 canonical git 里 `aa71ba0` 已经落地。
 | 已提交轮次 | 2 / budget 12 |
 | 闸门判决 | r1 ACCEPT、r2 ACCEPT，均零回归；一次预演性 REFUSE（0.924，未成为 winner） |
 | 测试 | 875 全绿 |
+
+**滞后量已测**：`STATE.json` 于 17:44 刷新，`last_round 2 / cumulative 1.0916`，
+与 canonical git 和我的逐路复算完全一致。所以它**不是错的，只是慢**——本轮实测滞后约
+40 分钟（git 提交 ~17:05，STATE 刷新 17:44）。结论不变：mid-wave 要判断轮次是否落地，
+看 canonical git log；`STATE.json` 事后会对上，但不能用来判断"现在到哪了"。
