@@ -859,3 +859,58 @@ decode_m2_square   -1.26%  /  0.88%  = -1.42 floors   -> 仍否决
 这是把假 band 换成真 band 必然要付的价：Y 上它们"可读但可能在撒谎"，
 Z 上它们"诚实地不可读"。后者更好，但要写下来——
 接下来如果有候选在这两条路上宣称收益，那个收益**不能计入**。
+
+## 新一波已起（`wf_4afd016a-76f`），以及一个换机暴露出来的中继缺陷
+
+`lane_args.py --check` exit 0（9 参数、6 个协议值对上），`--print` 渲染后原样调用，没手抄。
+monitor 第一条事件就确认了中继正确：
+
+```
+CANONICAL HEAD MOVED: bc1e462 baseline (resumed from STATE best, cumulative 1.0916)
+```
+
+**从 lane 自己的累计最优起跑，没有退回种子。**
+
+### 被拒的补丁没有变成孤儿——但靠的是散文，不是结构
+
+先查了一下 round 3 那个 1.15 的补丁会不会丢。结论是不会，但路径比想象的脆：
+
+- `refused_candidate` 这个键**在整个 repo 的源码里一次都没出现**（只在 STATE.json 里）。
+  它是 tech_lead 的 memory JSON 里带出来的自由键，`update_memory` 原样写盘。
+- resume 只导入 `cumulative`（仅供报告）、`insights`、`ledger`、`bottleneck_now`。
+  **`suggest_next` 和 `refused_candidate` 都不导入。**
+- 补丁之所以还活着，是因为 tech_lead 把它写进了 **insights 的散文**里
+  （"ROUND 3'S RESULT IS A +5.3% SUITE WIN THAT THE PER-ROUTE BAND GATE REFUSED,
+  AND THE PATCH IS PRESERVED..."），而 insights 是导入的。
+
+也就是说：**结构化的那份（`refused_candidate` + patch_path）是只写不读的，
+真正承载中继的是同一事实的散文副本。** 现在能用，但它依赖 agent 每轮自觉复述。
+
+### 换机让一条 insight 变成假的，而中继分不出哪些 insight 是绑机器的
+
+最后一条 insight 是 `BOX/TOOLING FACTS (epoch Y, tw053)`，开头就是
+"quietest box the lane has stood on -- 8 of 11 route floors under 0.9%,
+three CLAMPED to MIN_FLOOR"。这一波跑在 **tw035 / 纪元 Z** 上，实测：
+
+| | insight 说（Y/tw053） | 实测（Z/tw035） |
+|---|---|---|
+| floor < 0.9% 的路数 | 8 / 11 | **4 / 11** |
+| 被 MIN_FLOOR 夹住 | 3 条 | **0 条** |
+| 最吵的路 | —（号称最静） | decode_m8_up **7.64%**、prefill_m256_down **7.02%** |
+
+Z 一点也不是"最静的箱子"，它更接近这条 insight 自己引用的对照组 "epoch R tw008 at 7.12%"。
+**resume 路径没有区分"lane 事实"和"箱子事实"**，两者都当 insight 原样带过来。
+insight 里那些 MFMA/rocprofv3/ISA 工具链的教训是跨机有效的，底噪那半句不是。
+
+### 一个可证伪的预测，留给下一轮对账
+
+`suggest_next` 让把 1.15 按三条否决路修好再投。但按 **Z 的表**重算过了：
+`prefill_m256_down` 的 floor 从 0.20% 变成 **7.02%**，它 **-2.79% 已经不再否决**，
+而且同样地，**在这条路上做的任何修复也测不出来**（7% 底噪下 ±2.8% 不可读）。
+
+> **预测**：如果这一波拿一整个 direction 去修 `prefill_m256_down`，那是白花的预算——
+> 那条路现在既不能否决候选，也不能显示收益。真正还在否决的是
+> `prefill_m512_up`（-2.19 floors）和 `decode_m2_square`（-1.42 floors），
+> 而前者的修法 insight 里已经写好了（强制 ladder id 7 / 256x128，中位数 .1792 vs .1839）。
+
+如果预测应验，那就是"箱子事实以散文形式跨机中继"的一次可计价损失，届时回来记账。
