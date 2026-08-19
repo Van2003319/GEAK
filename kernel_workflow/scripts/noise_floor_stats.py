@@ -244,6 +244,7 @@ MACHINE_HOSTNAME = {
     "W": "tw042",     # wave 7 restore; another box new to the lane
     "X": "tw036",     # wave 8 restore; another box new to the lane
     "Y": "tw053",     # coldstart_newgate lane, first allocation of this box
+    "Z": "tw035",     # coldstart_newgate restore onto tw035; box carried retired N, new letter per (126)
 }
 
 # Epochs whose table was never measured. Their floors are the fail-closed
@@ -254,7 +255,7 @@ MACHINE_HOSTNAME = {
 # in it belongs beside that epoch's own table, not here: installing a measured
 # table has to be able to retire the claim and the sentence in one edit, and
 # `deprovisionalize_epoch.py` can only own text it can anchor to.
-PROVISIONAL_MACHINES = {"S"}
+PROVISIONAL_MACHINES = {"S", "Z"}
 # machine Q -- tw003. MEASURED: 8 complete same-variant primed repeats, source_hash 943b15834616ca9b857a59b94c548a7392c621b89093a792b69c6d6cf8a5db75.
 # Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
 MEASURED_NOISE_FLOOR_BY_MACHINE["Q"] = {
@@ -447,7 +448,21 @@ MEASURED_NOISE_FLOOR_BY_MACHINE["Y"] = {
 }
 
 
-CURRENT_MACHINE = "Y"
+# machine Z -- tw035. PROVISIONAL: this box has never been measured for this
+# lane, so every route sits at DEFAULT_NOISE_FLOOR and nothing narrower than
+# that is admissible. This is the correct fail-closed state for a new box, not
+# a fault. Registered as a NEW letter rather than by inheriting one this host
+# may already have carried: a re-used box gets a new epoch, and reinstating the
+# old letter's floors is finding (126). The FIRST GPU work here must be
+# measure_noise_floor.py (8 same-variant full-suite primed repeats, the (105)
+# debiased harness, 2*MAD/median), then deprovisionalize_epoch.py --apply,
+# which replaces this comment and the table below it in a single edit.
+MEASURED_NOISE_FLOOR_BY_MACHINE["Z"] = {
+    route: DEFAULT_NOISE_FLOOR for route in MEASURED_NOISE_FLOOR_BY_MACHINE["Y"]
+}
+
+
+CURRENT_MACHINE = "Z"
 
 MEASURED_NOISE_FLOOR = MEASURED_NOISE_FLOOR_BY_MACHINE[CURRENT_MACHINE]
 
