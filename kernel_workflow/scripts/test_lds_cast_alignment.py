@@ -342,3 +342,124 @@ class OutermostExtentIsNotLoadBearing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ByteArenaTest(unittest.TestCase):
+    """A raw `char` LDS arena must be READ, not refused unread.
+
+    Regression for the round-1 sighting on dense_bf16_gemm_fused: `char` was
+    absent from ELEM_SIZE, so a `__shared__ __align__(16) char smem[N];` arena
+    produced findings=[] with four `unparseable` rows and passed=false --
+    stopping a candidate before its build, correctness run, or any timing,
+    while the scan had in fact decided nothing about it. `char` is 1 byte by
+    definition; refusing to resolve it was not caution, it was a false refusal.
+    """
+
+    def test_a_char_arena_is_resolved_and_clean(self):
+        path = source("""
+            __global__ void k() {
+              __shared__ __align__(16) char smem[16384];
+              *reinterpret_cast<uint4*>(&smem[off]) = v;
+            }
+        """)
+        findings, unknown = LCA.scan(path)
+        self.assertEqual([], findings)
+        self.assertEqual([], unknown, "a char arena came back unparseable")
+        self.assertEqual(0, LCA.main([str(path)]), "a decidable clean file exited nonzero")
+
+    def test_a_one_dimensional_arena_has_no_outer_stride_to_judge(self):
+        # strides[:-1] is empty for a 1-D array, so no verdict is reachable
+        # here for ANY element type. The gate must therefore not fail on it.
+        path = source("""
+            __global__ void k() {
+              __shared__ char smem[1000];
+              *reinterpret_cast<uint4*>(&smem[i]) = v;
+            }
+        """)
+        findings, unknown = LCA.scan(path)
+        self.assertEqual(([], []), (findings, unknown))
+
+    def test_a_misaligned_char_backed_2d_view_is_still_caught(self):
+        # The fix resolves the size; it must not switch the check off. A 2-D
+        # char array with an odd row stride is still a real finding.
+        path = source("""
+            __global__ void k() {
+              __shared__ char as[32][136];
+              *reinterpret_cast<uint4*>(&as[r][c]) = v;
+            }
+        """)
+        findings, unknown = LCA.scan(path)
+        self.assertEqual([], unknown)
+        self.assertEqual(1, len(findings), "a 136-byte row stride passed a uint4 cast")
+        # 1 = a real finding, 2 = could not read. Resolving `char` moves this
+        # file from the second bucket into the first, which is the whole point.
+        self.assertEqual(1, LCA.main([str(path)]))
+
+
+class VectorTypedefTest(unittest.TestCase):
+    """A vector typedef declared in the scanned file is READ, not refused.
+
+    Regression for the round-1 sighting on dense_bf16_gemm_fused: the candidate
+    declared `typedef __attribute__((__vector_size__(4 * sizeof(short)))) short
+    shortx4_t;` a hundred lines above the casts that used it, and the scan
+    refused the whole candidate -- findings [], four unparseable rows, no build,
+    no correctness run, no timing. The width was written in the source the tool
+    was already reading. This resolves it the same way `constants()` resolves a
+    `constexpr` dimension; a typedef it cannot evaluate is still reported.
+    """
+
+    def test_vector_size_with_sizeof_product(self):
+        self.assertEqual(
+            {"shortx4_t": 8},
+            LCA.vector_typedefs(
+                "typedef __attribute__((__vector_size__(4 * sizeof(short)))) short shortx4_t;"))
+
+    def test_vector_size_with_integer_literal(self):
+        self.assertEqual(
+            {"v16_t": 16},
+            LCA.vector_typedefs("typedef __attribute__((__vector_size__(16))) float v16_t;"))
+
+    def test_ext_vector_type_spelling(self):
+        self.assertEqual(
+            {"h8_t": 16},
+            LCA.vector_typedefs(
+                "typedef _Float16 h8_t __attribute__((ext_vector_type(8)));"))
+
+    def test_an_unevaluable_width_stays_unresolved(self):
+        # A named constant is not something this may guess at.
+        self.assertEqual(
+            {}, LCA.vector_typedefs(
+                "typedef __attribute__((__vector_size__(kWidth))) short v_t;"))
+
+    def test_an_unknown_base_stays_unresolved(self):
+        self.assertEqual(
+            {}, LCA.vector_typedefs(
+                "typedef MysteryScalar v_t __attribute__((ext_vector_type(4)));"))
+
+    def test_a_file_local_typedef_makes_a_cast_decidable(self):
+        path = source("""
+            typedef __attribute__((__vector_size__(4 * sizeof(short)))) short shortx4_t;
+            __global__ void k() {
+              __shared__ Bf16 as[32][68];
+              *reinterpret_cast<shortx4_t*>(&as[r][c]) = v;
+            }
+        """)
+        findings, unknown = LCA.scan(path)
+        self.assertEqual([], unknown, "a file-local typedef came back unparseable")
+        # 68 Bf16 = 136 bytes per row; 136 % 8 == 0, so an 8-byte cast is clean
+        # where the 16-byte one in LiveSightingTest is not.
+        self.assertEqual([], findings)
+        self.assertEqual(0, LCA.main([str(path)]))
+
+    def test_a_file_local_typedef_still_catches_a_real_hazard(self):
+        path = source("""
+            typedef __attribute__((__vector_size__(8 * sizeof(short)))) short shortx8_t;
+            __global__ void k() {
+              __shared__ Bf16 as[32][68];
+              *reinterpret_cast<shortx8_t*>(&as[r][c]) = v;
+            }
+        """)
+        findings, unknown = LCA.scan(path)
+        self.assertEqual([], unknown)
+        self.assertEqual(1, len(findings), "136-byte row stride passed a 16-byte cast")
+        self.assertEqual(1, LCA.main([str(path)]))
