@@ -1074,3 +1074,86 @@ n=8 的 MAD 在双模路上根本定不住底噪。这跟 band 那条发现是**
 既然提交发生了，**这一轮应该是真的修好了 m512_up**，而不是把它蒙混过关。
 等 STATE 追上后核对 per-case，确认 m512_up ≥ 1.0。
 我"原样重投会再被否"的预测**没有被检验**——他们没有原样重投。
+
+### wave2_r2 细节：三个方向全部 verified，integrate **BANKED**
+
+| direction | specialty | actual (vs oracle) | vs in-session ctrl | verdict |
+|---|---|---|---|---|
+| wave2_r2_d0 | algorithm | 1.1480 | 1.058 | partial |
+| wave2_r2_d1 | host_runtime | 1.2042 | 1.0965 | **confirmed**（本轮最佳个体） |
+| wave2_r2_d2 | compute | 1.1543 | 1.047 | partial |
+| wave2_r2_integrate | integration | **1.2054** | 1.1041 | **confirmed / BANKED** |
+
+三者**结构正交**（d1 纯 host；d0 是 ladder id 22 发射处 4 行；d2 是 staging 模板的 KEXACT 参数），
+零冲突、无手工合并。增量 A/B/C 阶梯 ctrl 1.1954 → +d0 1.1987 → +d2 1.2018 → all 1.2054，
+**7/7 interleaved 配对全胜且单调不反转**——这才是归因能站住的原因：
+d0 只买到 `decode_m96_up`，d2 只买到 `prefill_m2048_square`，d1 体现为 `decode_m2_square` 1.24。
+
+`prefill_m512_up` 的结局要说准确：它**没有**被修到 parity 以上，是 **0.9977（-0.23%）**。
+它从 -2.27% 提到 -0.23%，从而**落进 1.26% 的 floor 里**，于是不再否决。
+"修好了"是错的说法，"移进噪声里了"才对。
+
+---
+
+## ⚠️ 严重：`STATE.cumulative` 的帧被乘错了，本 lane 的真实成绩是 **1.2054**，不是 1.3158
+
+`best_per_case` 的 11 条 speedup 都是**对 oracle 的绝对加速**，我把它们的几何平均算出来：
+
+```
+geomean(best_per_case)      = 1.205387
+wave_local_cumulative       = 1.2054      <- 一致
+cumulative 字段              = 1.31581464
+1.0916 * 1.2054             = 1.315815    <- 就是它
+1.2054 / 0.3358             = 3.59x       <- 对种子
+```
+
+**1.0916 和 1.2054 都是"对 oracle 的绝对几何平均"，把它们相乘没有意义。**
+这就是 finding (127) 的原样重演：两个不同分母被塞进同一个变量再相乘。
+代码那一侧早就为 (127) 加固过（`priorCumulativeVsSeed` 单独存、仅供报告），
+**但做这次乘法的是 tech_lead 的 `update_memory`，agent 那一侧没有被加固。**
+
+最能说明问题的是：**同一个字段的 `cumulative_frame` 文字是对的、和数字自相矛盾**——
+它写着 "CANONICAL advanced **1.0916 -> 1.2054**" 和 "the lane has moved **3.59x**"
+（1.2054/0.3358 = 3.5896 ✓）。散文对，数字错。
+
+### 为什么这条比本轮成绩本身更要紧
+
+这条 lane 存在的意义就是**和 greedy lane 配对比较**。greedy 那边记的是
+"absolute geomean vs rocBLAS **1.42619**"、"in-run rocBLAS geomean 1.40984"——
+**同样是对 rocBLAS 的绝对几何平均**。所以：
+
+| lane | 对 rocBLAS 绝对几何平均 |
+|---|---|
+| greedy_coldstart_20260817 | **~1.4045** |
+| coldstart_newgate（现在） | **1.2054** |
+
+**newgate 目前落后 greedy 约 14%。** 如果照 1.3158 报，会显示成"基本追平"——
+**在这条 lane 唯一要测的那个轴上给出相反的结论。**
+
+### 处置
+
+**现在不动 STATE.json**：wave 是活的、每轮 `update_memory` 会整体重写它，
+此刻写进去会被覆盖，还有写冲突风险。而且 resume 只把 `ps.cumulative` 当**报告值**读
+（`priorCumulativeVsSeed`，不进门控），所以它**不会污染本波的判决**。
+
+**危险在波边界**：下一波会把 `ps.cumulative` 当基数再乘一次，**逐波复利**。
+所以——**在下一波启动之前，必须把 `cumulative` 改回等于 `wave_local_cumulative`**
+（当前值 1.2054），这是本 lane 交接时的强制动作项。
+
+同时更正我自己上一条汇报：我说"1.21x vs seed，比 1.0916 高 +10.8%"。
+**幅度基本对（实为 +10.4%），但帧标错了**——1.2054 是对 **oracle** 的绝对值，不是对种子；
+对种子是 3.59x。commit message 里的 "1.21x" 是 **wave-local 对在册增量**（1.2054/1.0916=1.1041→实为1.10x），
+wave 1 那次 "1.09x" 因为冷启动时两帧恰好重合才没暴露这个歧义。
+
+### 下一轮的 suggest_next（瓶颈已从 memory 转到 **overhead**）
+
+(1) 把 split-K 的 2 次 dispatch 收成 1 次（**必须**是 cooperative last-CTA reduce；
+winner-take-all/direct-atomic 已在 registry 里以 -43.6% 关闭）——
+残留的那次 reduce dispatch 是 7/11 条路上 ~4.6us 的发射地板、只跑到 ~490 GB/s，
+而 `decode_m16_square` **比 rocBLAS 多做 1.86 倍 GPU 工作却拿到 1.541**，说明这套件是靠 dispatch 赢的。
+(2) wrapper 级 HIP graph capture/replay，以及把 fp32 workspace 池化到另外 9 条非 GEMV 路（r2_d1 只关了 GEMV 那条）。
+(3) `prefill_m128_square` 0.8305 是唯一纯 body 缺口（26.24us vs rocBLAS 18.92），
+任何方向必须**恒定 CTA 数**且**实例化数中性**。
+
+禁止重开（本轮又加两条）：tile chooser、slice count、**bytes-per-output/arithmetic intensity（本轮 15 组合扫描证伪）**、
+LDS bank conflict、K-stage depth、register prefetch、**全局删除死的 scalar staging 分支**。
