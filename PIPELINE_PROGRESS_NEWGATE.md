@@ -599,3 +599,56 @@ decode_m16_square/prefill_m128_square，"that would be a fabricated mechanism"�
 也就是说 wave 不会因为闸门连续拒绝而提前停摆——它会一直跑到 budget 12。
 `candidates[0]` 之后没有任何回落到次名的路径（L2357-2358 排序取头，无循环），
 所以上面那条"握着能过的候选却不提交"没有被别处兜住。
+
+---
+
+## 2026-08-19 17:0x — 更正上一条：round 2 **会**提交，而且是本 lane 最大的一步
+
+上一条我写"本轮预计不提交任何东西"。**这个预测是错的**，原因很简单：我是在本轮
+只有两个 verified 候选时下的判断，之后第三个 engineer 交了 **0.9879**（`target_routes: []`），
+geomean 高于 0.924，成为 winner。逐路复算：
+
+```
+WINNER geomean=0.9879  targets=[]
+ACCEPT -- improved past band on: prefill_m1024_down (+66.54% vs 0.89%),
+  prefill_m2048_square (+64.32% vs 0.27%), prefill_m512_up (+62.29% vs 1.29%),
+  prefill_m256_down (+55.00% vs 14.86%), prefill_m128_square (+36.12% vs 4.53%),
+  decode_m96_up (+35.37% vs 3.16%), decode_m64_square (+29.55% vs 0.48%),
+  decode_m32_down (+11.42% vs 3.05%)
+  decode_m16_square  +0.18%  flat
+  decode_m2_square   +0.31%  flat
+  decode_m8_up       -0.13%  flat   <- 唯一负数，远在 0.54% band 内
+```
+
+**零回归，8 条路越过各自 band。** 这个 ACCEPT 不依赖任何一条可疑的窄 band：
+即便把 prefill_m2048_square 的 band 换成 24 次标定的 3.16%，+64.32% 照样通过；
+八条里有七条的改善幅度比最宽的那张 band 表还大一个量级。**这是本 lane 目前
+最干净的一次判决**，也是 per-route 闸门第一次在没有争议的情况下放行。
+
+cumulative 预计 0.6114 → **0.9879**（+61.6%），逼近 rocBLAS 平价。
+`legacyImproved` 同样为真，两套判据一致，所以不会打印 OVERTURNS。
+
+### 那条结构性发现要不要撤？不撤，但必须降级为"未被触发"
+
+上一条说的"握着能过的候选却不提交"**本轮没有发生**——不是因为机制不存在，
+而是因为恰好来了一个既排头又能过的候选，把 0.924 挤下去了。事实仍然是：
+
+- `candidates[0]` 是唯一进闸门的候选，没有回落到次名的路径（已复核 L2357-2358）；
+- 如果 0.9879 晚到、或那个 engineer 失败，本轮 winner 就是 0.924，会被 0.0006 ms 否决，
+  而通过闸门的 0.632 不会被考虑，本轮就真的两手空空。
+
+所以这是一次**擦肩而过**，不是一次发生的故障。按证据等级它从"已观测的失效"
+降为"已证明可达、本轮未触发"。降级但保留，理由是它的触发条件很平常——
+只要排头那个候选恰好在某条窄 band 路线上回退一点点就会命中，
+而本轮 0.924 已经演示了这个条件有多容易满足。
+
+**这也说明我上一条下判断下早了**：本轮当时还有 engineer 在跑，`last_round` 还是 1，
+我却按"两个候选"写了结论。以后本 lane 的轮次结论一律等 `last_round` 前进后再写。
+
+### 无 target_routes 的处理是对的
+
+winner 的 `target_routes` 是空的，命中 L2428 那个分支。它**不拒绝**，只打一条 NOTE：
+"accepted with no declared target_routes ... An incidental gain and a realized mechanism
+are indistinguishable here."。这个处理是正确的——一个 61% 的真实收益不该因为缺一个标签
+被丢掉，但也不该被记成"机制兑现"。读本轮结果时请照此理解：**这 8 条路的改善是实测的，
+但没有任何被声明的机制可以被判定为兑现**。
