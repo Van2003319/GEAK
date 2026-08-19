@@ -238,9 +238,13 @@ def decide(
     no_band = sorted(r for r in inc if r not in bands)
     if no_band:
         raise RouteGateError(
-            f"no noise band for route(s) {', '.join(no_band)}. Bands on this lane range "
-            "from 2.68% to 16.44%, so a default would be wrong by up to 6x; derive them "
-            "with bands_from_repeats() on repeats of the unchanged tree")
+            f"no noise band for route(s) {', '.join(no_band)}. Measured bands on this lane "
+            "range from 1.56% to 11.55% (24 repeats of one unchanged tree, absolute-us "
+            "spread -- the basis this module argues for, not the speedup column), so a "
+            "default would be wrong by up to 7x; derive them with bands_from_repeats() on "
+            "repeats of the unchanged tree, and use enough repeats: at n=5 a full min-max "
+            "spread is largely a draw on whether a flyer landed in the sample, and the same "
+            "route measured 1.31% at n=5 against 11.55% at n=24")
 
     verdicts: list[RouteVerdict] = []
     for route in sorted(inc):
