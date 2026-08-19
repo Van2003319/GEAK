@@ -6,7 +6,7 @@ question -- do the noise floors currently in force belong to the box we are
 actually standing on -- and it exits non-zero when they do not.
 
 Why this exists as a script and not as a test. The check already existed, in
-`test_qd_robust_stats.py::EpochIdentityTest`. It was red, and it stayed red
+`test_noise_floor_stats.py::EpochIdentityTest`. It was red, and it stayed red
 across a whole wave, because nothing runs a unit test before a wave launches.
 The post-restore integrity pass that did run verified the seed digest, the
 oracle digest over 74 files, the lane HEAD and both twin sources -- everything
@@ -34,16 +34,12 @@ Exit codes -- distinct on purpose, so a launcher can branch on them:
   4  frame is INCONSISTENT -- hostname resolves to a different epoch than
      CURRENT_MACHINE, or to no epoch at all. Do not measure. Anything timed in
      this state is compared against another machine's ruler.
-  5  the Python table and the kernel_lane.js mirror disagree. The lane runs on
-     the JS side, so a mirror that has drifted means the epoch you verified in
-     Python is not the epoch that will be applied.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import socket
 import sys
 from pathlib import Path
@@ -51,38 +47,18 @@ from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import qd_robust_stats as QRS  # noqa: E402
-
-LANE_JS = Path(__file__).resolve().parent.parent / "kernel_lane.js"
-
-
-def _js_current_machine(text: str) -> str | None:
-    m = re.search(r"const\s+QD_CURRENT_MACHINE\s*=\s*'([A-Z])'", text)
-    return m.group(1) if m else None
-
-
-def _js_provisional(text: str) -> set[str] | None:
-    m = re.search(r"const\s+QD_PROVISIONAL_MACHINES\s*=\s*new Set\(\[([^\]]*)\]\)", text)
-    if not m:
-        return None
-    return set(re.findall(r"'([A-Z])'", m.group(1)))
+import noise_floor_stats as QRS  # noqa: E402
 
 
 def classify(host: str, resolved: str | None, current: str,
-             provisional: set[str], js_current: str | None,
-             js_provisional: set[str] | None,
-             js_present: bool = True) -> tuple[int, str]:
+             provisional: set[str]) -> tuple[int, str]:
     """The whole decision, as a pure function of the frame. Returns (exit, why).
 
     Split out from `main` so every branch is reachable in a test without
-    editing module constants or the JS file. A preflight whose own logic is
-    only exercised by running it on the one box it happens to be installed on
-    is the same mistake one level up.
+    editing module constants. A preflight whose own logic is only exercised by
+    running it on the one box it happens to be installed on is the same mistake
+    one level up.
     """
-    if js_present and (js_current != current or js_provisional != provisional):
-        return 5, (f"mirror drift: python {current}/{sorted(provisional)} vs "
-                   f"js {js_current}/"
-                   f"{sorted(js_provisional) if js_provisional is not None else '(unparseable)'}")
     if resolved is None:
         return 4, f"{host} is registered to no epoch"
     if resolved != current:
@@ -149,19 +125,6 @@ def main() -> int:
     print(f"resolves to epoch   : {resolved if resolved else '(unregistered)'}")
     print(f"CURRENT_MACHINE     : {current} -> {QRS.MACHINE_HOSTNAME.get(current)}")
 
-    # The JS mirror is what the lane actually applies. Check it before anything
-    # else can pass, or a green Python check certifies a table nobody uses.
-    if LANE_JS.exists():
-        text = LANE_JS.read_text()
-        js_cur = _js_current_machine(text)
-        js_prov = _js_provisional(text)
-        js_present = True
-        print(f"kernel_lane.js      : QD_CURRENT_MACHINE={js_cur} "
-              f"provisional={sorted(js_prov) if js_prov is not None else '?'}")
-    else:
-        js_cur, js_prov, js_present = None, None, False
-        print(f"kernel_lane.js      : NOT FOUND at {LANE_JS} -- mirror unchecked")
-
     if args.state:
         state_path = Path(args.state)
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -174,18 +137,6 @@ def main() -> int:
                            sort_keys=True) + "\n",
                 encoding="utf-8")
             print(f"                      : stamped into {state_path.name}")
-
-    code, _why = classify(host, resolved, current, QRS.PROVISIONAL_MACHINES,
-                          js_cur, js_prov, js_present)
-
-    if code == 5:
-        print()
-        print("MIRROR DRIFT -- the lane runs on the JS side. The epoch verified")
-        print("in Python is not the epoch that will be applied. Do not launch.")
-        print(f"  python: {current} / {sorted(QRS.PROVISIONAL_MACHINES)}")
-        print(f"  js    : {js_cur} / "
-              f"{sorted(js_prov) if js_prov is not None else '(unparseable)'}")
-        return 5
 
     if resolved is None:
         print()

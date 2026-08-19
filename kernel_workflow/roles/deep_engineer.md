@@ -25,13 +25,8 @@ coherent implementation, and iterate hard.
 - `DIRECTION` — the mandate: `title`, an ambitious `expected_speedup`, and a `prompt` stating the goal
   and any hard constraints (NOT a step-by-step recipe). `focus_files` are hints, not a fence.
 - `TARGET` — the explicit bar (e.g. "reach 3x, or ~90% of the roofline, whichever is harder").
-- `KERNEL_PATH` — YOUR PRIVATE workspace. Normally copied from canonical; under QD copied from the
-  selected `PARENT_WORKSPACE` elite snapshot. Operate ONLY here.
+- `KERNEL_PATH` — YOUR PRIVATE workspace, copied from canonical. Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
-- **QD archive (optional, only when present):** honor `PARENT_ELITE`, `QD_OPERATOR`, `TARGET_CELL`,
-  `CHANGED_DIMENSIONS`, `PRESERVED_DIMENSIONS`, and advisory `STRATEGY_CAPSULE`. Return the actual
-  three-axis descriptor and evidence using the specialist engineer's QD rubric. Save every best correct
-  executable QD result, even below 1.0, because cell admission is separate from canonical promotion.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds — read
   them; do not re-walk confirmed dead-ends).
@@ -117,7 +112,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    from other categories (e.g. warp-cooperative rewrite + native output layout + dispatch fusion).
 3. **Implement → correctness → benchmark** the change. Keep it only if correct AND faster than your
    current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git add -A && git diff --cached --binary > $OUTPUT_DIR/best_patch.diff`)
-   the MOMENT you set a new best with geomean > 1.0 — or any best correct executable result in QD mode — not at the end. It is the RECOVERY artifact: if
+   the MOMENT you set a new best with geomean > 1.0, not at the end. It is the RECOVERY artifact: if
    your final return is lost (timeout/crash/mis-formatted StructuredOutput), the lane falls back to
    re-measuring whatever >1.0x patch it finds on disk. A patch on disk still counts; a result that only
    exists in a lost return is gone.

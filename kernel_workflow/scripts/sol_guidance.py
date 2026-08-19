@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Speed-of-Light guidance for the GREEDY lane: steer, budget, and screen.
 
-`qd_sol_card.py` already owns the ceiling arithmetic and its provenance, and it
+`sol_card.py` already owns the ceiling arithmetic and its provenance, and it
 is deliberately reachable only as post-selection reporting. This module does not
 duplicate that. It adds the three things the greedy lane is missing, each of
 which is a use of SOL that is *not* candidate ranking:
@@ -18,7 +18,7 @@ Selection stays where it is. `winner` is still chosen by measured paired
 speedup, exactly as before, and nothing here is allowed to reorder candidates:
 an easy memory-bound route sitting at 95% of its ceiling must never outrank a
 hard compute-bound route honestly at 40% of its own. That is the same rule
-`qd_sol_card.build_sol_card` enforces with `post_selection=True`; this module
+`sol_card.build_sol_card` enforces with `post_selection=True`; this module
 keeps it by never accepting more than one candidate's measurements in any
 function that returns a comparable number.
 
@@ -36,7 +36,7 @@ Method follows two published treatments and the deviations are named:
     mechanism read as +0.6% suite noise on this lane.
 
 DEVIATION, and the reason this module exists rather than a thin wrapper. The
-compute ceiling in `qd_sol_card` carries a WITNESS: a peak is attainable only
+compute ceiling in `sol_card` carries a WITNESS: a peak is attainable only
 if something was observed to reach it, and the module refuses a ceiling that
 sits below an achieved rate ("the ceiling is not a ceiling"). The bandwidth
 ceiling has no such check, and on this suite that gap is not hypothetical --
@@ -60,7 +60,7 @@ from typing import Mapping, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from qd_sol_card import SOLCardError, bandwidth_ceiling  # noqa: E402
+from sol_card import SOLCardError, bandwidth_ceiling  # noqa: E402
 
 SCHEMA = "geak.sol-guidance/v1"
 
@@ -145,7 +145,7 @@ class Ceilings:
     def effective_bandwidth_bytes_s(self) -> float:
         """The bound actually used: never below a rate already witnessed.
 
-        A ceiling under an observed rate is not a ceiling. `qd_sol_card` raises
+        A ceiling under an observed rate is not a ceiling. `sol_card` raises
         on exactly this for compute; here it is resolved upward instead of
         raised, because the caller is screening a real measurement and aborting
         would lose the measurement along with the bad bound.

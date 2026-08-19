@@ -16,20 +16,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_measurement_frame as CMF  # noqa: E402
-import qd_robust_stats as QRS  # noqa: E402
+import noise_floor_stats as QRS  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent / "check_measurement_frame.py"
 PROV = {"Q", "S"}
 
 
-def cls(host, resolved, current, js_current="S", js_prov=None, js_present=True):
-    return CMF.classify(host, resolved, current, PROV, js_current,
-                        PROV if js_prov is None else js_prov, js_present)[0]
+def cls(host, resolved, current):
+    return CMF.classify(host, resolved, current, PROV)[0]
 
 
 class ClassifyTest(unittest.TestCase):
     def test_measured_epoch_matching_host_is_cleared(self):
-        self.assertEqual(cls("tw008", "R", "R", js_current="R"), 0)
+        self.assertEqual(cls("tw008", "R", "R"), 0)
 
     def test_provisional_epoch_matching_host_is_3_not_0(self):
         # Fail-closed, not a fault: the box is registered, the floors are just
@@ -49,33 +48,6 @@ class ClassifyTest(unittest.TestCase):
         # it needs a host that resolves to nothing. Do NOT re-point this at a
         # real hostname -- the next restore would silently disarm it again.)
         self.assertEqual(cls("tw000-unregistered", None, "S"), 4)
-
-    def test_mirror_drift_outranks_everything(self):
-        # Even a frame that would otherwise be a clean 0 must fail: the lane
-        # applies the JS table, so a green Python check would certify a table
-        # nobody uses.
-        self.assertEqual(cls("tw008", "R", "R", js_current="S"), 5)
-        self.assertEqual(cls("tw054", "S", "S", js_prov={"Q"}), 5)
-
-    def test_unparseable_mirror_is_drift_not_a_pass(self):
-        self.assertEqual(cls("tw054", "S", "S", js_current=None, js_prov=None), 5)
-
-    def test_absent_mirror_does_not_force_drift(self):
-        # A checkout without kernel_lane.js should still be able to report the
-        # python-side frame rather than failing with a confusing exit 5.
-        self.assertEqual(cls("tw054", "S", "S", js_current=None, js_prov=None,
-                             js_present=False), 3)
-
-
-class ParserTest(unittest.TestCase):
-    def test_parses_the_real_lane_js(self):
-        text = CMF.LANE_JS.read_text()
-        self.assertEqual(CMF._js_current_machine(text), QRS.CURRENT_MACHINE)
-        self.assertEqual(CMF._js_provisional(text), QRS.PROVISIONAL_MACHINES)
-
-    def test_parser_returns_none_rather_than_guessing(self):
-        self.assertIsNone(CMF._js_current_machine("no constant here"))
-        self.assertIsNone(CMF._js_provisional("no constant here"))
 
 
 class StateContinuityTest(unittest.TestCase):
@@ -112,11 +84,10 @@ class StateContinuityTest(unittest.TestCase):
 
     def test_continuity_never_changes_the_exit_code(self):
         # The whole point: a multi-box lane is reported, not blocked.
-        before = CMF.classify("tw054", "S", "S", PROV, "S", PROV)[0]
+        before = CMF.classify("tw054", "S", "S", PROV)[0]
         CMF.state_continuity({"measurement_frame": {"hosts_seen": ["tw003"]}},
                              "tw054", "S")
-        self.assertEqual(CMF.classify("tw054", "S", "S", PROV, "S", PROV)[0],
-                         before)
+        self.assertEqual(CMF.classify("tw054", "S", "S", PROV)[0], before)
 
     def test_stamp_round_trips_through_the_cli(self):
         import json
@@ -160,7 +131,6 @@ class EndToEndTest(unittest.TestCase):
         # gets deprovisionalised the fixture goes stale and the assertion
         # starts comparing the script against a set nobody uses.
         expected = CMF.classify(host, QRS.machine_for_host(host),
-                                QRS.CURRENT_MACHINE, QRS.PROVISIONAL_MACHINES,
                                 QRS.CURRENT_MACHINE,
                                 QRS.PROVISIONAL_MACHINES)[0]
         self.assertEqual(self._run().returncode, expected)

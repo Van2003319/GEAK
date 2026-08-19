@@ -32,9 +32,9 @@ numbered-finding comments in `kernel_lane.js` are this project's institutional
 memory, and several of them close by naming the test that pins the fix. A
 citation to a test that does not exist is worse than no citation: it is the one
 form of comment a reader trusts without checking, so it stops the next reader
-from looking -- and it is how `test_qd_persist_manifest.py::LedgerOnlyWriteTest`
-sat in the (124b) comment while the two tests that actually run that path were
-module-level functions under different names.
+from looking -- and it is how a named test class sat in the (124b) comment while
+the two tests that actually ran that path were module-level functions under
+different names.
 """
 from __future__ import annotations
 

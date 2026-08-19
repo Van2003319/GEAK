@@ -13,15 +13,6 @@ do not invent new optimizations; you compose and reconcile existing ones.
 - `INTEGRATE_DIR` — your private scratch dir. `GPU_ID`, `SKILL_DIR`, COMMANDMENT path, `BASELINE_PER_CASE`.
 - `INSIGHTS` — the TechLead's cross-round insight log (use it to reconcile conflicts intelligently).
 
-## QD semantic crossover (only when `PHASE=semantic_crossover`)
-
-Inputs are two complete, independently verified elite workspaces plus their descriptors/per-case strengths.
-Do not stack ancestry-relative diffs. Read both implementations, copy the first into a fresh private
-workspace, and semantically reconstruct one coherent implementation that preserves complementary ideas
-from both parents (for example one parent's algorithm with the other's memory/topology strategy). Run full
-correctness and benchmark, save a parent-relative binary patch and return the normal integration result
-plus the actual descriptor/evidence. This is a heavyweight dedicated operation; do not modify either parent.
-
 ## Candidate policy (mandatory)
 
 Every combined or hand-written result is a new candidate and must be independently scanned even when all parents previously passed. It must not include, call, import, dynamically load, or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, or MIOpen, nor delegate through PyTorch matmul/mm/bmm/linear. Only separately frozen immutable baseline/oracle paths are exempt. HIP runtime/language APIs, MFMA/device intrinsics, inline AMDGCN assembly, and header-only rocWMMA remain allowed when the candidate ELF has no forbidden dependency. Run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` on the materialized candidate sources/build files before correctness and on every candidate ELF after build. Save the receipts in `INTEGRATE_DIR`; any finding, inspection error, or absent receipt fails closed and the combination cannot be returned or archived.

@@ -79,19 +79,18 @@ if [ "${GEAK_SKIP_FRAME_CHECK:-0}" != "1" ]; then
     _frame_script="$(dirname "${BASH_SOURCE[0]}")/check_measurement_frame.py"
     if [ -f "$_frame_script" ]; then
         # `set -e` is in force and the checker exits nonzero BY DESIGN (3 = provisional,
-        # 4 = wrong host, 5 = mirror drift). Without disarming it around the call, the
-        # assignment itself aborts gpu_lock.sh -- which silently killed every GPU command
-        # on a provisional epoch, i.e. exactly the state a new box starts in, and exactly
-        # the procedure that clears it. Disarm explicitly and branch on the code.
+        # 4 = wrong host). Without disarming it around the call, the assignment itself
+        # aborts gpu_lock.sh -- which silently killed every GPU command on a provisional
+        # epoch, i.e. exactly the state a new box starts in, and exactly the procedure
+        # that clears it. Disarm explicitly and branch on the code.
         set +e
         _frame_out="$(python3 "$_frame_script" 2>&1)"
         _frame_rc=$?
         set -e
-        # 4 = this host is not the epoch's host. 5 = the Python constants and the lane's
-        # JS mirror disagree, so the epoch verified is not the epoch that will be applied.
-        # Both mean the floors about to judge this command are not this box's floors.
-        # 3 (registered, not yet measured) passes: measuring is itself GPU work.
-        if [ "$_frame_rc" = "4" ] || [ "$_frame_rc" = "5" ]; then
+        # 4 = this host is not the epoch's host, so the floors about to judge this command
+        # are not this box's floors. 3 (registered, not yet measured) passes: measuring is
+        # itself GPU work.
+        if [ "$_frame_rc" = "4" ]; then
             echo "ERROR: gpu_lock.sh refuses to run: the measurement frame does not describe this box." >&2
             echo "$_frame_out" | sed 's/^/       /' >&2
             echo "       Register a PROVISIONAL epoch for this host (a NEW letter -- never inherit one)," >&2

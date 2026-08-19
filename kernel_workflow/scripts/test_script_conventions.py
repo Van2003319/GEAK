@@ -7,7 +7,7 @@ has no such home, so it goes unchecked in all eight at once -- which is a
 different and worse failure than an untested function, because the eight look
 individually well covered.
 
-The one checked here came out of the mutation sweep. `qd_robust_stats.py`
+The one checked here came out of the mutation sweep. `noise_floor_stats.py`
 survived `sort_keys=True -> False`: its CLI test re-ran one input twice and
 compared, which passes whether or not the output is canonical, since CPython
 dicts are deterministic in insertion order too. Fixing that module alone would
@@ -17,7 +17,7 @@ of the six emitters had nothing checking they still were.
 
 This is a source-level check, and weaker than driving each CLI: it catches a
 `sort_keys` that was dropped, not a writer that bypasses `json` entirely. Two of
-the six (`qd_robust_stats`, `candidate_policy_scan`) also have behavioural
+the six (`noise_floor_stats`, `candidate_policy_scan`) also have behavioural
 coverage in their own files.
 """
 from __future__ import annotations
@@ -37,14 +37,6 @@ HERE = Path(__file__).resolve().parent
 # every edit above it and would quietly re-point the exemption at whatever moved
 # into its place.
 EXEMPT = {
-    "json.dumps(descriptor.get(axis))":
-        "a repr of one scalar inside an error token, not a document; sorting keys "
-        "of a string or None is meaningless",
-    "json.dumps(payload.get('manifest') or {})":
-        "the loads(dumps(x)) deep-copy idiom -- this text is parsed straight back "
-        "and never leaves the process",
-    "json.dumps(payload.get('cell_updates') or {})":
-        "the same loads(dumps(x)) deep-copy idiom, one line below the manifest one",
     "json.dumps(sources)":
         "escaping Python strings into a JS source template for mini-racer to "
         "evaluate; the consumer is a parser, not a diff",

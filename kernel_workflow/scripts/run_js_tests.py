@@ -3,19 +3,19 @@
 
 Why this exists
 ---------------
-`test_qd_archive.js` is the behavioural guard for the QD v2 archive: cell
-identity, descriptor legality, adjacency, robust admission, provenance. It has
-never run. Machine after machine in this project has had no `node`, `nodejs`,
-`bun`, or `deno`, and the ledger records the gap honestly as "the only
-genuinely runtime-blocked item" across several findings.
+`test_lane_gates.js` is the behavioural guard for the lane's admission gates:
+the correctness/metric selector, the oracle pin, the final validation verdict,
+and the policy / hipify-twin / ISA receipts. It has never run. Machine after
+machine in this project has had no `node`, `nodejs`, `bun`, or `deno`, and the
+ledger records the gap honestly as "the only genuinely runtime-blocked item"
+across several findings.
 
 Meanwhile finding (56) established the cost of that state directly: an
 unreachable gate is also an unexercised one, and the first real invocation of
 one such gate turned up six latent defects that no unit fixture would have
-contained. `test_qd_archive.js` guards the exact code path the QD redesign
-depends on -- the one that decides whether a route descriptor becomes an
-archive cell at all -- so leaving it unexecuted is leaving the redesign's
-core untested.
+contained. `test_lane_gates.js` guards the code path that decides whether a
+measured candidate is admitted at all, so leaving it unexecuted is leaving the
+lane's trust boundary untested.
 
 `mini-racer` embeds V8 as a Python wheel, no system `node` required. That is
 enough to run these tests, because they are pure: they read one source file,
@@ -49,10 +49,10 @@ E2E_ROLES = ROOT / "e2e_workflow" / "roles"
 # kernel_workflow.js consumes it, and a guard that can only read the producer
 # cannot see the consumer drop it.
 JS_TESTS = {
-    "test_qd_archive.js": (LANE, WORKFLOW),
+    "test_lane_gates.js": (LANE, WORKFLOW),
     # The CANDIDATE_FLOOR guard reads the lane only. It was runnable under node
     # and nowhere else, which on a box without node means it was not run at all
-    # -- the same way test_qd_archive.js went unexecuted before this runner
+    # -- the same way test_lane_gates.js went unexecuted before this runner
     # existed.
     "test_candidate_floor.js": (LANE,),
     # The dispatcher guard. Its body is one big async IIFE, which is why it

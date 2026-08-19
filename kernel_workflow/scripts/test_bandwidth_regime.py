@@ -205,7 +205,7 @@ class ScalingExperimentTest(unittest.TestCase):
 
     def test_bandwidth_does_not_scale_with_cus_across_three_sources(self):
         """The result D3 turns on, held to agree across two epochs and two
-        independent implementations (a QD candidate and the rocBLAS oracle)."""
+        independent implementations (a lane candidate and the rocBLAS oracle)."""
         for src, field in ((TW035, "latency_ms"), (EPOCH_O, "latency_ms"),
                            (EPOCH_O, "baseline_ms")):
             with self.subTest(src=src.parent.name, field=field):

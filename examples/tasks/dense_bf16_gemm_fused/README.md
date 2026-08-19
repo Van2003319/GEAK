@@ -12,7 +12,7 @@ Allowed candidate building blocks are HIP runtime APIs, HIP kernels, compiler/de
 
 ## Current seed
 
-The active candidate starts from the QD M=1 specialization:
+The active candidate starts from the M=1 specialization:
 
 - exact shape `(M,N,K)=(1,4096,4096)`;
 - aligned `uint2` BF16 loads;
@@ -24,7 +24,7 @@ Every non-M1 shape now reaches `src/custom_gemm.hip`, a candidate-owned synchron
 
 ## Archived library routes
 
-The historical rocBLAS solution-cache and cached hipBLASLt routes are indexed for research only. They must not be built, benchmarked as candidates, imported into QD, or selected as final implementations.
+The historical rocBLAS solution-cache and cached hipBLASLt routes are indexed for research only. They must not be built, benchmarked as candidates, or selected as final implementations.
 
 ## Measurement
 

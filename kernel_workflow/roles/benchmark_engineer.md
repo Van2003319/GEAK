@@ -211,13 +211,12 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
 repeats, in the order measured, not a summary. `latency_ms` stays what it always was (the
 representative number the suite reports); `samples_ms` is what it was computed from.
 
-Send it whenever you have it. It is what gives the archive's seed a real measurement interval
-instead of a definitional one (95). The seed's speedup against itself is 1 by construction, so
-without repeats there is nothing to say about how much a *null* comparison on that route wanders
-— and the archive has to guess that from a table measured on other hardware. Three repeats
-replace the guess with this machine's own answer. Omitting the field is not an error and the run
-proceeds, but the seed's interval is then labelled as floored rather than measured, and every
-comparison against it inherits that.
+Send it whenever you have it. It is what gives the baseline a real measurement interval instead of
+a definitional one (95). The baseline's speedup against itself is 1 by construction, so without
+repeats there is nothing to say about how much a *null* comparison on that route wanders — and the
+lane has to fall back on a floor table measured on other hardware. Three repeats replace the guess
+with this machine's own answer. Omitting the field is not an error and the run proceeds, but every
+later comparison against this baseline inherits the floored interval.
 
 Do not synthesize the repeats from one measurement, and do not report a spread you did not
 observe. A fabricated `samples_ms` is worse than an absent one: absent is handled, fabricated

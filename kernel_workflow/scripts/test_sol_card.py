@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPU-free tests for qd_sol_card.py."""
+"""GPU-free tests for sol_card.py."""
 from __future__ import annotations
 
 import importlib.util
@@ -9,8 +9,8 @@ import sys
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name("qd_sol_card.py")
-SPEC = importlib.util.spec_from_file_location("qd_sol_card", SCRIPT)
+SCRIPT = Path(__file__).with_name("sol_card.py")
+SPEC = importlib.util.spec_from_file_location("sol_card", SCRIPT)
 assert SPEC and SPEC.loader
 QSC = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = QSC

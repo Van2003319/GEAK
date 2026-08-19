@@ -22,52 +22,6 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 
 ---
 
-## QD archive addendum (only when QD inputs are present)
-
-A QD run still uses the same immutable baseline, oracle, canonical workspace, and final validation. If a
-`QD_STATE_DIR` is supplied on setup, treat it as immutable and never write, rename, lock, initialize, build,
-or benchmark inside it. Read `manifest.json`; fail closed with `qd_import_status:"rejected"` when it is
-missing/malformed, a referenced content-addressed artifact is absent, its tree does not hash to the recorded
-`source_hash`, or a v2 `(context_id, descriptor)` does not map back to the recorded cell.
-
-A matching `QD_CLASSIFIER_VERSION=geak-qd-v2` manifest may be imported normally. A v1 or otherwise mismatched
-manifest is rejected unless `QD_RECLASSIFY=true`; explicit reclassification permits only source snapshots to
-be copied as untrusted candidates. Discard every historical cell/descriptor/route/score in that mode and set
-`needs_reclassification:true`: current-run VerifyEngineer must independently recover exact harness contexts,
-route evidence, named v2 descriptors, source hash, correctness, policy, and repeated measurements. Never map
-an ordinal v1 descriptor to v2 by position or natural-language analogy.
-
-Deduplicate manifest cells by `source_hash`. For each unique source, copy
-`QD_STATE_DIR/qd_archive/artifacts/<source_hash>/workspace` source-only into
-`EVAL_DIR/qd_archive/imported/<source_hash>/workspace` using a tar pipe that excludes `.git`, build
-directories, caches, logs/reports, generated hipify copies, `*.so`, and `*.o`; never dereference symlinks.
-Run `$SKILL_DIR/scripts/qd_v2.py hash-tree` before and after the copy and require both hashes to equal the
-manifest hash. Imported snapshots must obey the current candidate/oracle split. Do not exempt or carry a
-mixed artifact where the candidate wrapper, binding, header, source, or loader calls/links a forbidden
-library merely because that library was historically used as the oracle. An exemption is allowed only for a
-separately built immutable oracle subtree/ELF that is not part of the candidate source list or candidate
-dependency graph. Run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` on every copied
-candidate-owned source/wrapper/build path with only those narrow immutable oracle exemptions. Save one
-canonical receipt at `EVAL_DIR/qd_archive/imported/<source_hash>/policy_import.json`. Reject that source on
-any finding or inspection error. A historical mixed rocBLAS/hipBLAS/CK candidate therefore imports as
-rejected; the workflow may still use a separately reconstructed, policy-clean source route supplied through
-the current task, but must not silently rewrite the archived snapshot during import.
-
-Do not copy historical `global_best`, fitness, visits, stalls, generation, cost, challengers, capsules, or
-transitions into the live archive. Historical scores are metadata only and must not select a parent or global
-best. Return `qd_import_status:"ready"`, `qd_import_source`, a sanitized `qd_import_manifest`, and one
-`qd_import_candidate` per unique source artifact containing `source_hash`, copied `snapshot`, the eligible v2
-route/context references (empty when reclassifying), `historical_geomean`, `historical_robust`, `policy_pass`,
-receipt path, and `needs_reclassification`. If no source survives, return `qd_import_status:"rejected"` and
-an empty list. The orchestrator independently re-runs evidence classification, correctness, and at least
-three complete measurements before a copied source can enter any live cell. Multiple verified route/context
-cells may then reference that one content-addressed artifact.
-
-At final validation, audit that the final patch was materialized from an archive snapshot as a patch
-relative to the immutable original baseline. Never apply an ancestry-relative elite patch directly to the
-user's original tree. All existing correctness, timing-receipt, arbitration, and conditional writeback
-rules remain unchanged.
-
 ## PHASE=setup
 
 Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped runs),
@@ -228,24 +182,6 @@ Return JSON:
   "notes": "anything unusual about the layout"
 }
 ```
-When `QD_STATE_DIR` was provided, add these fields to the same object:
-```json
-{
-  "qd_import_status": "ready|rejected",
-  "qd_import_source": "<immutable QD_STATE_DIR>",
-  "qd_import_manifest": {"version": 2, "classifier_version": "geak-qd-v2"},
-  "qd_import_candidates": [
-    {"source_hash":"sha256", "snapshot":"<copied content-addressed workspace>",
-     "route_descriptors":[{"route_id":"...", "case_ids":["exact_harness_case_id"],
-       "descriptor":{"compute_primitive":"native_mfma", "wave_schedule":"independent",
-         "k_pipeline":"lds_single", "decomposition":"tile_grid", "output_path":"direct_store",
-         "rasterization":"linear", "plan_binding":"static"}}],
-     "historical_geomean":0.0, "historical_robust":{}, "policy_pass":true,
-     "policy_receipt":"<policy_import.json>", "needs_reclassification":false}
-  ]
-}
-```
-```
 (`baseline_frozen`/`baseline_callable` are REQUIRED — the orchestrator aborts the run if `baseline_frozen`
 is false AND `baseline_callable` is empty, to avoid timing the candidate against `kernel_src/`.)
 
@@ -317,12 +253,12 @@ same oracle must agree on **both**; a digest that matches while the count change
 sides disagreed about the subject, not about its contents.
 
 This is the denominator of every speedup in the run, the correctness reference for every candidate, and
-— because the QD archive outlives the run — the yardstick every future warm-started elite was scored on.
+the yardstick every later wave of this lane is scored on.
 The golden is shipped into each engineer workspace as an **absolute symlink** (the tars deliberately do
 not dereference it), so a write to that path inside a sandbox writes through to the one shared original.
 The VerifyEngineer recomputes this digest with the identical command on every verification and the lane
-compares them: a mismatch **fails the whole run closed**, because every measurement already taken —
-including elites already admitted to the archive — was scored against a denominator that no longer
+compares them: a mismatch **fails the whole run closed**, because every measurement already taken was
+scored against a denominator that no longer
 exists. Omitting the digest does not abort, but it marks the run `oracle:unpinned`: results are still
 reported and are permanently ineligible to win a bake-off, because nothing can show they share a
 denominator. Return the same digest again in `director_validation.json` at validate time.

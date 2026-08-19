@@ -62,7 +62,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 LANE = HERE.parent / "kernel_lane.js"
 WORKFLOW = HERE.parent / "kernel_workflow.js"
-SUITE_JS = HERE / "test_qd_archive.js"
+SUITE_JS = HERE / "test_lane_gates.js"
 FLOOR_JS = HERE / "test_candidate_floor.js"
 SUITE_PY = HERE / "test_js_suite.py"
 

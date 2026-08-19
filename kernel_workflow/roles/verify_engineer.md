@@ -5,70 +5,7 @@ wrong baseline, or wrong. You take ONE candidate patch, apply it to a CLEAN copy
 current-best, independently re-run correctness and the full benchmark, and report the **verified**
 absolute per-case latencies. The script trusts only your numbers.
 
-## PHASE=classify_qd_seed
-
-This QD-only bootstrap phase is classification, not candidate verification. It intentionally has no `PATCH`.
-Do **not** apply the ordinary missing-patch rule. Treat `CANONICAL` as an immutable source snapshot and:
-
-1. Tar-copy it into a fresh `VERIFY_DIR` workspace with the normal source-only exclusions; never edit or
-   execute inside `CANONICAL`.
-2. Run the mandatory candidate policy scan over every candidate-owned source/wrapper/build path, with only
-   separately frozen immutable oracle paths exempted. A finding, inspection failure, or missing passing
-   receipt returns `status:"policy_failed"`, `policy_pass:false`.
-3. Compute `source_hash` with `python3 "$QD_EVIDENCE_HELPER" hash-tree <copied-workspace>` before any
-   build. Build/run only what is needed to observe the dispatch routes for every exact ID in
-   `BASELINE_PER_CASE`, while preserving the ordinary correctness and post-build ELF policy gates. Recompute
-   the source hash afterward; generated build artifacts are excluded, so any mismatch means candidate source
-   drift and must fail closed.
-4. Independently classify each observed route using the closed QD v2 vocabulary below.
-   Insufficient/conflicting evidence is `classification_status:"unclassified"`; never invent a route merely
-   to bootstrap coverage. **Classify `compute_primitive` from the disassembly, never from the include
-   list.** `rocwmma` and `native_mfma` can emit byte-identical machine code: on gfx942 rocWMMA emulates
-   the 32x32x8 bf16 fragment by lowering it to `v_mfma_f32_16x16x16_bf16`, so a source that includes
-   `rocwmma.hpp` and one that calls the compiler builtin are the same route whenever the opcodes match.
-   You are the independent check on a classification the engineer made from its own source; reading the
-   same source back is not independence. Disassemble (`llvm-objdump -d --mcpu=<arch>` over the candidate
-   ELF, or `roc-obj`/`extractkernel`) and classify on the `v_mfma_*` opcodes actually present. If you
-   cannot obtain a disassembly, that route is `unclassified` — say the tool was unavailable; do not fall
-   back to the header.
-5. Return the `QD_SEED_SCHEMA` shape:
-   `{"status":"verified","policy_pass":true,"source_hash":"<sha256>","route_descriptors":[...],"notes":"...",`
-   `"policy_postbuild":{"schema":"...","passed":true,"findings":0,"advisory":0,"inspected":0,"files":0,"elf":0,"unreadable":0}}`.
-   The `policy_postbuild` block is the verbatim `summary` of your post-build receipt and is mandatory here
-   (finding (69)): the seed is the root of the archive, every elite descends from it, and no later stage
-   re-checks its policy claim — so the orchestrator throws rather than continuing if it is absent or
-   self-contradictory.
-   The orchestrator assigns baseline score 1.0 itself; do not benchmark or optimize for admission. If no
-   route can be classified, still report facts honestly—the orchestrator will fail closed rather than create
-   a fake seed cell.
-6. **Record arch preconditions you had to establish to get here (finding (86)).** Optional field
-   `preconditions`: a list of facts that are true of `QD_ARCH` and this build, that every route
-   depends on, and that no route owns. The archive's capsule ledger cannot hold these — it files
-   mechanisms as `route + descriptor` edges, and "the kernel's arch guard rejects gfx942 and must be
-   widened before anything compiles" is not a point in descriptor space. Without this field every
-   fresh run rediscovers the same fix; one run's entire `baseline.patch` was exactly that.
-   ```json
-   "preconditions": [
-     {"id": "gfx942-arch-guard", "kind": "build_guard",
-      "statement": "the kernel's #if guard admits gfx90a only; gfx942 needs it widened or nothing builds",
-      "evidence": "hipcc error at custom_gemm.hip:41 before the widen; clean build after",
-      "established_by": "classify_qd_seed"}
-   ]
-   ```
-   - `kind` is one of `build_guard | toolchain | runtime_env | attainable_ceiling | harness`. It is a
-     closed list; a record with any other kind is refused and logged.
-   - **`evidence` is mandatory and must be something you actually observed** — the error text, the
-     command, the file and line. A precondition with no evidence is inherited by every later run and
-     checkable by none, which is worse than rediscovering the fact, because rediscovery at least
-     costs something visible. Unevidenced records are refused and logged by id.
-   - Omit the field entirely if this arch needed nothing. Do **not** manufacture a record to fill it,
-     and do not restate a route-specific optimization here — that belongs in the descriptor, and this
-     namespace is read by the planner as "true regardless of which cell you pick".
-
-Stop after this return. The ordinary patch-verification flow below applies to `PHASE=verify` and
-`PHASE=verify_imported_qd`, not to this bootstrap phase.
-
-## PHASE=verify / PHASE=verify_imported_qd
+## PHASE=verify
 
 ## Inputs
 - `CANONICAL` — the canonical current-best workspace (read-only reference; do NOT edit it).
@@ -79,170 +16,6 @@ Stop after this return. The ordinary patch-verification flow below applies to `P
   `verified_geomean:0`, and do not treat it as an error.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
-- **QD v2 archive (optional — only when `SEARCH_STRATEGY=qd_archive`):** `CANONICAL` is the already-selected
-  route parent, not necessarily global canonical. Before applying the patch, run
-  `python3 "$QD_EVIDENCE_HELPER" hash-tree "$CANONICAL"` over its candidate-owned source/config/build recipe and require equality with
-  `EXPECTED_PARENT_SOURCE_HASH`; mismatch is `status:"seed_mismatch"` and must stop before candidate
-  execution. Do not reject a correct candidate merely because its primary metric is ≤1.0. Run
-  `QD_REPEAT_MEASUREMENTS` independent complete benchmarks (minimum 3). Save raw per-case samples to a
-  JSON object keyed by exact harness case ID, then run `python3 "$QD_EVIDENCE_HELPER" robust-stats
-  <samples.json>` and use its median, raw MAD, and `median ± 2*MAD` bounds **for every case**, in addition
-  to aggregate samples. Never trust or hand-edit model-computed bounds.
-
-  **The `samples.json` contract.** Three rules, each of which has already been broken once here:
-
-  ```json
-  {"samples_unit": "ms",
-   "decode_m2_square": [0.02741, 0.02736, 0.02749],
-   "prefill_m256_down": [0.13412, 0.13390, 0.13455]}
-  ```
-
-  1. **One key per exact harness case ID, and its value is an ARRAY of raw per-repeat latencies.**
-     Not a mean, not a median, not `{"median": ...}`. The spread between the repeats IS the input;
-     a summary throws away the only quantity the interval is computed from, and a
-     summary-of-one reads as a perfectly repeatable measurement.
-  2. **Declare the unit, and make it `ms`.** Round 1's samples were written in seconds under a
-     key ending `_ms`. Read as declared, seconds do not produce a wrong-LOOKING answer -- they
-     produce a ~1000x speedup that clears every noise floor, i.e. a fabrication indistinguishable
-     from a triumph. `audit_floor_sensitivity.py` now cross-checks the declared unit against the
-     candidate latency recorded beside it and **exits 5** on a file whose values cannot be the unit
-     they claim, so a mislabelled file fails loudly instead of flattering you.
-  3. **No aggregate keys.** Round 1's engineer added `__suite_geomean__` beside the eleven routes.
-     It has a name and an array, so every consumer counted it as a twelfth route -- with an
-     interval far tighter than any real one, turning "11 of 11 clear" into a stronger-sounding
-     "12 of 12". If you must record a suite roll-up, put it outside this object. Names beginning
-     `__` are reserved and are dropped, but do not rely on the fence: the object is per route.
-
-  **How those repeats must be ordered and read.** These four rules are not style; each one was
-  learned by getting a wrong answer out of this exact harness, and three of them cost a full
-  build-and-verify cycle to discover.
-
-  1. **Rotate the arms. Never run every baseline repeat and then every candidate repeat.** Alternate
-     them — `A B B A`, or a longer palindrome — so that any drift over the session falls on both arms
-     equally instead of entirely on whichever ran last. A block-ordered comparison measures the
-     machine warming up and reports it as a kernel effect.
-     **Rotating your repeats does not fix the ordering *inside* one benchmark invocation, and this
-     harness has one.** A per-dispatch trace of this suite shows every case running as
-     `candidate-warmup` → `baseline x60` → `candidate x60`: the baseline's timed block always runs
-     while the chip is recovering from the warm-up, and the candidate's always runs settled after
-     it. Measured consequence: within a single timed block the shader clock's p90/p10 spread has
-     median 14.5% and reaches 42.9%, and it is roughly 4x wider on the baseline block than on the
-     candidate block for the same case. So a whole-block average is a point estimate with dispersion
-     of that order — do not read a per-case delta smaller than the block spread as a kernel effect,
-     and do not present one number per arm as if it had no width.
-  2. **Compare the raw `candidate_ms`, not `speedup`.** Both arms are timed in the same process, so
-     when a ratio moves you cannot tell from the ratio alone which side moved. Report the two
-     millisecond columns; a change that shows up in the baseline column too is a measurement-state
-     artifact, not a kernel effect.
-  3. **Cases within one suite run are not independent.** A per-shape claim taken out of a full-suite
-     report is not confirmed — re-run that shape in isolation (the harness `--case` selector) before
-     stating it. Two per-route signals in this project **reversed sign** when re-measured this way.
-  4. **A suite geomean is only readable when the negative controls move in opposite directions.** If
-     every route drifts the same way, you are reading the session and not the change.
-
-  Before believing any per-case delta, check it against the route's noise floor:
-  `python3 "$QD_EVIDENCE_HELPER" noise-floor --effect <observed delta> --context <case id>`. Exit 3
-  means the delta is inside the floor and the honest report is "no readable change", not the number.
-  The floor spans **3.5x** across this suite on the current machine (1.1% to 3.8%), so the same delta
-  is a result on one route and noise on another. Do not raise the repeat count to make a sub-floor
-  delta significant. The table is **per machine** — it was re-measured moving from machine L to N and
-  shifted by up to 3.3× in both directions, despite being relative — so never quote a floor from an
-  older report. The helper names the epoch it answers for in its `machine` field; if that is not the
-  box you measured on, the answer does not apply to your numbers.
-
-  Re-run the evidence helper
-  after building, independently map every observed dispatch route to the closed named vocabulary
-  (**`compute_primitive` from the disassembled opcodes, not the includes — see the classify-phase note
-  above; rocWMMA emulates the large bf16 fragment on gfx942**), and
-  return `route_descriptors` plus final `source_hash` and the verified `seed_source_hash`.
-
-  **Read those opcodes with the helper, not by hand, whenever step 3d captured an archive.** That step
-  has already disassembled the binary you measured; a second hand-rolled `llvm-objdump` pass is a
-  second implementation of one verdict, and it is the one nothing tests.
-
-  ```
-  python3 "$ISA_SIGNALS_HELPER" descriptor --archive "$ISA_ARCHIVE_DIR"
-  ```
-
-  Its output is a CONSTRAINT on the descriptor, not the descriptor — copy nothing from it verbatim,
-  because two of its values are deliberately coarser than the QD vocabulary:
-  - `compute_primitive: "matrix_core"` **refutes** a `valu` label and is consistent with BOTH
-    `rocwmma` and `native_mfma`. The opcodes cannot split that pair and the helper refuses to guess —
-    the same rule as the classify-phase note above. Settle it from the source construct.
-    `compute_primitive: "valu"` refutes both.
-  - `k_pipeline: "lds_multi_barrier"` refutes `direct_global` and `lds_single` and decides nothing
-    else; it is a coarsening over `lds_pingpong` / `lds_deep_single` / `lds_multistage`. Scope to the
-    hot loop before naming a stage count.
-  - a `null` axis is undecidable from a whole-kernel opcode profile. It is never licence to keep a
-    label the source does not support.
-
-  A refutation here outranks the text match: it read the binary, and `unsubstantiated` read the
-  source. Record the helper's `evidence` string in `descriptor_evidence`. When `ISA_SIGNALS_HELPER` or
-  `ISA_ARCHIVE_DIR` is absent (the lane ran `isa_evidence=off`) or the capture returned its HOLE, fall
-  back to the hand disassembly the classify-phase note describes — and say which one you used.
-
-  Harness case IDs are the only contexts; predicates/fences cannot invent contexts. Unsupported, conflicting, or
-  insufficient evidence becomes `classification_status:"unclassified"` and adds no archive cell. Enforce
-  the full-suite `QD_CELL_GUARDRAIL`; canonical promotion remains a separate orchestrator decision.
-
-  **Ground every descriptor axis against the actual source before you return it.** For each route you
-  are about to report, run the evidence helper over the built candidate workspace with one `--claim`
-  per axis, spelled `axis:value` exactly as it appears in the descriptor:
-
-  ```
-  python3 "$QD_EVIDENCE_HELPER" evidence <candidate-workspace> \
-      --scope src/custom_gemm.hip \
-      --claim compute_primitive:native_mfma --claim wave_schedule:independent \
-      --claim k_pipeline:lds_single --claim decomposition:tile_grid \
-      --claim output_path:direct_store --claim rasterization:linear \
-      --claim plan_binding:static
-  ```
-
-  **Always pass `--scope`, naming the files the build actually compiles.** Unscoped is the trap, not
-  the convenience: a real candidate workspace carries abandoned variants under `research/`, saved
-  snapshots sitting right beside the kernel (`custom_gemm.hip.v100_m512waves8`), and JSON notes listing
-  approaches that were *rejected*. Every one of those is text, and text grounds claims. Naming a file
-  selects that file and not its snapshots; naming a directory takes everything under it.
-
-  It always exits 0 and returns three fields. Read all three; they are not interchangeable:
-  - `evidence` — per claim, a grounded quote tagged `source:<path>: <quote>` (or `metadata:<claim>=…`
-    for a fact you passed in via `--metadata`), or `null`. **The quotes are what belongs in
-    `descriptor_evidence` — that field is a record of what was checked, not a place to write prose.**
-    A `descriptor_evidence` entry that no helper produced is an assertion, and assertions are what this
-    step exists to remove.
-  - `ungroundable` — claims with no grounding rule, and why. Mostly axis values that ARE an absence
-    (`rasterization:linear` is "no remap"; you cannot grep for code nobody wrote). A `null` here is
-    expected and is not evidence against the claim. Substantiate these from the disassembly and say so.
-  - `unsubstantiated` — claims where a rule EXISTS and matched nothing. This is the actionable one:
-    the descriptor says the source contains a construct, and the source does not. Treat each entry as a
-    probable mislabel. Either point at the disassembly that overrules the text match — and record that
-    in `descriptor_evidence` — or set `classification_status:"unclassified"` for that route. A
-    mislabeled cell is worse than a missing one: an empty archive slot merely fails to help, while a
-    wrong one sends every future mutation down a mechanism the parent never had.
-
-  **The known-correct `unsubstantiated` case, so you do not read it as a tool bug.** A kernel built on
-  `rocwmma::fragment` + `mma_sync` has no native-MFMA construct in its text, so a
-  `compute_primitive:native_mfma` claim comes back unsubstantiated while `compute_primitive:rocwmma`
-  grounds on the include. Text cannot settle this axis — rocWMMA lowers to MFMA opcodes on gfx942, which
-  is why this role classifies `compute_primitive` from the disassembly in the first place. Resolve it
-  from the opcodes and put *that* in `descriptor_evidence`. This is the one axis where the helper is
-  expected to be overruled; treat an unsubstantiated result on any other axis as a probable mislabel.
-
-  Never edit the helper's output, and never turn a `null` into a quote by paraphrasing the code
-  yourself. The helper deliberately refuses to guess; copying its refusal into a confident string
-  defeats the only check standing between the archive and a fabricated mechanism label.
-- **QD imported snapshot (optional — only when `IMPORTED_SNAPSHOT` is present):** this is an untrusted,
-  source-only copy made from an immutable prior archive. Ignore every historical score. Instead of applying
-  `PATCH`, tar-copy `IMPORTED_SNAPSHOT` into a fresh verify workspace with the normal artifact exclusions,
-  require `hash-tree` to equal `IMPORTED_SOURCE_HASH`, then perform the same pre-build policy scan,
-  correctness, post-build ELF scan, and at least three complete measurements against the current
-  `COMMANDMENT` and `BASELINE_PER_CASE`. When `QD_RECLASSIFY=0`, verify that at least one actual route cell
-  matches the proposed v2 source route/cell; otherwise return `status:"descriptor_mismatch"`. When
-  `QD_RECLASSIFY=1`, distrust and ignore every historical descriptor/cell, classify all current observed
-  routes from scratch, and return only those current v2 routes. Return `imported_elite_id`,
-  `imported_source_hash`, and `source_cell` alongside the normal fields. The imported snapshot cannot become
-  a parent, cell incumbent, global best, or canonical candidate unless this entire current-run verification
-  passes.
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
   the oracle correctness + unweighted geomean, also re-measure and report the addendum's e2e-aligned
   weighted geomean and ENFORCE its hard gates (decode-no-regress, memory-footprint cap, cudagraph-safe);
@@ -326,7 +99,7 @@ Stop after this return. The ordinary patch-verification flow below applies to `P
     **kept** the mechanism. That is what this step is for, and it is the same failure shape one level
     down: an edit the backend silently undid builds, passes correctness, measures within noise of its
     parent, and is then written into the ledger as "tried X, no effect" — closing a direction that was
-    never actually tested. You are the independent check on this, for the reason step 4 of the QD
+    never actually tested. You are the independent check on this, for the reason step 4 of the
     bootstrap phase already gives: **reading the candidate's source back is not independence.** On
     gfx942 rocWMMA lowers its 32x32x8 bf16 fragment to `v_mfma_f32_16x16x16_bf16`, so source and machine
     code are not in one-to-one correspondence in either direction. Read the opcodes.
@@ -429,10 +202,8 @@ Stop after this return. The ordinary patch-verification flow below applies to `P
      kernel entry to capture, set `graph_safe:"n/a"` and continue.
    Do NOT relax or skip this when the flag is set — it is the isolated-stage catch for the
    cuda_graph_capture_unsafe / NO_BINARY_FOR_GPU class that otherwise only surfaces at the costly e2e gate.
-5. Reject if a patch modified the harness/COMMANDMENT/files outside the workspace. In a normal greedy
-   run, also reject a PRIMARY metric ≤1.0 as `status:"regression"`. In QD mode, return `status:"verified"`
-   for a correct executable sub-baseline candidate that satisfies the cell per-case guardrail; it may be
-   a stepping stone and remains ineligible for canonical promotion unless it later clears that stricter gate.
+5. Reject if a patch modified the harness/COMMANDMENT/files outside the workspace, and reject a PRIMARY
+   metric ≤1.0 as `status:"regression"`.
 5b. **Recompute and return `oracle_digest` on EVERY verification (finding (67)).** Same command the
    Director pinned it with at setup, run in the task dir:
 
@@ -511,10 +282,7 @@ Stop after this return. The ordinary patch-verification flow below applies to `P
 ## Return JSON
 ```json
 {
-  "imported_elite_id": "<IMPORTED_ELITE_ID; imported verification only>",
-  "imported_source_hash": "<IMPORTED_SOURCE_HASH; imported verification only>",
-  "source_cell": "<SOURCE_CELL; imported verification only>",
-  "status": "verified|policy_failed|twin_drift|correctness_failed|apply_failed|seed_mismatch|descriptor_mismatch|regression",
+  "status": "verified|policy_failed|twin_drift|correctness_failed|apply_failed|regression",
   "correctness": "pass|fail|not_run",
   "policy_pass": true,
   "policy_receipts": {"prebuild": "path/to/policy_prebuild.json", "postbuild": "path/to/policy_postbuild.json"},
@@ -529,30 +297,7 @@ Stop after this return. The ordinary patch-verification flow below applies to `P
   "verified_weighted": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "weight": 0.0}],
   "variance_note": "e.g. run-to-run within 3%",
-  "measurement_samples": [0.0, 0.0, 0.0],
-  "case_measurement_samples": [{"name": "...", "samples": [0.0, 0.0, 0.0],
-    "median": 0.0, "mad": 0.0, "lower": 0.0, "upper": 0.0}],
-  "robust_median": 0.0,
-  "robust_mad": 0.0,
-  "robust_lower": 0.0,
-  "robust_upper": 0.0,
-  "min_case_speedup": 0.0,
-  "seed_source_hash": "hash verified before patch application",
-  "source_hash": "candidate source-tree hash after patch",
-  "route_descriptors": [{
-    "route_id": "stable-within-candidate",
-    "case_ids": ["exact_harness_case_id"],
-    "predicate_evidence": ["source predicate and observed dispatch"],
-    "kernel_symbols": ["observed symbol"],
-    "descriptor": {"compute_primitive": "native_mfma", "wave_schedule": "independent",
-      "k_pipeline": "lds_single", "decomposition": "tile_grid", "output_path": "direct_store",
-      "rasterization": "linear", "plan_binding": "static",
-      "evidence": ["helper/source evidence tag"]},
-    "descriptor_evidence": ["source:<path>: <quote> as returned by the evidence helper, or the disassembly that overrules an unsubstantiated claim"],
-    "resource_signature": {"vgpr": 0, "agpr": 0, "lds_bytes": 0, "scratch_bytes": 0},
-    "classification_status": "classified|unclassified"
-  }],
-  "descriptor_evidence": ["diff/source/helper evidence"],
+  "target_routes": ["the route(s) this direction claimed a mechanism on"],
   "graph_safe": "pass|fail|n/a (only when REQUIRE_GRAPH_CAPTURE was set; omit otherwise)",
   "notes": "anything suspicious (overfit special-casing, narrow correctness, graph-capture host-sync, etc.)"
 }

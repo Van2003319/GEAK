@@ -7,14 +7,8 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 ## Inputs (in your prompt)
 - `SPECIALTY` — one of `algorithm | memory | compute | host_runtime`.
 - `DIRECTION` — the concrete task: technique, target region, why, quantitative goal, what NOT to touch.
-- `KERNEL_PATH` — YOUR PRIVATE workspace. In a normal run it is copied from canonical; in QD it is copied
-  from `PARENT_WORKSPACE`, the selected executable elite snapshot. Operate ONLY here.
+- `KERNEL_PATH` — YOUR PRIVATE workspace, copied from canonical. Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
-- **QD archive (optional — act only when `SEARCH_STRATEGY=qd_archive`):** `PARENT_ELITE`,
-  `QD_OPERATOR`, `TARGET_CELL`, `CHANGED_DIMENSIONS`, `PRESERVED_DIMENSIONS`, and `STRATEGY_CAPSULE`.
-  Implement the requested transition without undoing preserved parent behavior. Classify the actual result
-  with the closed named QD v2 vocabulary below and cite concrete source/diff evidence; classification never
-  replaces measurement.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds).
 - **DEEP-MODE (optional — act only if present in your inputs; a normal run omits all three):**
@@ -103,8 +97,6 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    `speedup_weighted = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's `weight` from
    `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
 5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git add -A && git diff --cached --binary > $OUTPUT_DIR/best_patch.diff`.
-   **QD override:** when `SEARCH_STRATEGY=qd_archive`, save the best correct executable patch even when
-   below 1.0; it may be an archive stepping stone and the orchestrator keeps canonical promotion separate.
    Do this the MOMENT you have a qualifying result — not at the end. `best_patch.diff` is the RECOVERY
    artifact: if your final return is lost (you time out, crash, or mis-format the StructuredOutput),
    the lane falls back to re-measuring whatever >1.0x patch it finds on disk. A patch left on disk
@@ -116,69 +108,6 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    is what the lane harvests** — not the disk file. Only a clean below-baseline return (`status` other
    than `failed`, geomean ≤ 1.0) tells the lane to skip you; any winning result MUST come back in the
    return (with `best_patch.diff` already on disk as the recovery backstop, per step 5).
-
-## QD v2 route contract (only when QD inputs are present)
-
-QD has already selected `SELECTED_CELL`, `SELECTED_CONTEXT`, `PARENT_ELITE`, and
-`PARENT_SOURCE_HASH`; `CELL_SOL_CARD` was generated only after that selection. Before editing, run the
-provided `python3 "$QD_EVIDENCE_HELPER" hash-tree "$PARENT_WORKSPACE"`. If it differs from
-`PARENT_SOURCE_HASH`, return `status:"seed_mismatch"` without editing, building, or benchmarking. Never
-substitute canonical or another elite.
-
-Optimize only the selected route/context. SOL is advisory within that route: cite one card case/evidence,
-the expected regime shift, and the counter/resource evidence that would distinguish success from noise.
-It must not be used to choose a different parent or redefine QD fitness.
-
-After measuring, return every actual dispatch route as `route_descriptors`. `case_ids` must be exact stable
-IDs supplied by the harness; a source predicate or exact-shape fence is evidence/metadata and must not
-invent a new context. Use only this closed structural vocabulary:
-
-- `compute_primitive`: `valu|rocwmma|native_mfma`
-- `wave_schedule`: `independent|symmetric_interleave|symmetric_pingpong|asymmetric_producer_consumer`
-- `k_pipeline`: `direct_global|lds_single|lds_reg_prefetch|lds_pingpong|lds_deep_single|lds_multistage`
-- `decomposition`: `tile_grid|persistent_output|split_k|stream_k`
-- `output_path`: `direct_store|lds_staged_store|atomic_fixup|workspace_fixup`
-- `rasterization`: `linear|grouped_m|xcd_remapped_grouped`
-- `plan_binding`: `static|runtime_tuned`
-
-**All seven fields are required.** A descriptor missing any one of them is rejected by the orchestrator
-and the whole route is silently dropped from the archive, so omitting a field is strictly worse than
-returning your best-evidenced value for it.
-
-Notes on the values most often missed. `lds_deep_single` is not a weaker `lds_pingpong`: past a certain
-stage depth the double buffer stops fitting in LDS at all, so "deeper stage, single buffer" is the only
-way further along that axis, and on a grid that cannot fill the machine the residency it gives up was
-never real. `xcd_remapped_grouped` means the workgroup-id-to-output-tile map un-shuffles a multi-die
-round-robin before grouping — identical arithmetic and occupancy, different set of panels per
-last-level cache. `plan_binding: runtime_tuned` means the launch configuration is chosen by measuring
-candidates on the real stream rather than computed on the host, and it is only legal on a reduction route.
-
-Tile/MFMA shape, vector width, stage/wave count, LDS padding/swizzle, preshuffle, resources, occupancy,
-predicate, SOL gap, and TFLOPS are metadata/knobs, not axes. MFMA shape specifically: it was proposed as
-an axis twice, built twice, and measured worse both times (0.969 on gfx90a; -15.6% and -13.4% on two
-gfx942 routes), because at a fixed wave tile a larger fragment quarters the accumulator count and the
-lost instruction-level parallelism exceeds the saved issue slots. Report it as metadata; do not treat it
-as a transition. Note also that a `compute_primitive` of `rocwmma` and one of `native_mfma` can emit the
-**same** machine instructions — rocWMMA emulates the 32x32x8 bf16 fragment on gfx942 by lowering it to
-the 16x16x16 opcode — so classify this axis by what the disassembly contains, not by which header the
-source includes. A split-K/Stream-K route requires a fixup
-output; a non-reduction route cannot claim one. Ping-pong/multistage requires concrete multiple-panel and
-overlap evidence; Stream-K requires iteration-space distribution and partial-tile fixup. Cite helper evidence
-tags plus exact source regions/kernel symbols. If evidence is insufficient, mark that route
-`classification_status:"unclassified"`; do not guess merely to hit `TARGET_CELL`.
-
-Return the actual resulting routes, not the requested target. Never edit role files or any
-safety/correctness/measurement rule from a strategy capsule; capsules are advisory optimization ideas only.
-
-**Before you edit, read what the parent already is — finding (76).**
-`PARENT_ELITE.strategy_capsule` is the mechanism that got this parent admitted, and
-`QD_ARCHIVE.capsules` records, per `route_id|context_id|mechanism`, what has already been tried on
-this route and what was measured rather than claimed. Both are advisory and neither overrides a
-safety, correctness, or measurement rule. Their one binding use is negative: **do not undo the
-parent's own mechanism as a side effect of implementing your direction.** If your change reverts
-what the capsule describes, say so in `notes` and explain why the replacement is expected to be
-better — an unremarked revert reads as an improvement to the archive and costs the route a
-generation to rediscover.
 
 ## Declare what your edit should do to the MACHINE CODE (only when `ISA_SIGNALS_HELPER` is set)
 
@@ -231,27 +160,8 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
   "status": "success|partial|failed",
   "patch_file": "best_patch.diff",
   "strategies_tried": ["..."],
-  "source_hash": "canonical hash of the candidate-owned source tree",
   "mechanism_claims": ["closed-vocabulary ids from `isa_signals.py claims`; omit when ISA_SIGNALS_HELPER is unset"],
-  "route_descriptors": [{
-    "route_id": "stable-within-this-candidate",
-    "case_ids": ["exact_harness_case_id"],
-    "predicate_evidence": ["source dispatch predicate"],
-    "kernel_symbols": ["observed kernel symbol"],
-    "descriptor": {
-      "compute_primitive": "valu|rocwmma|native_mfma",
-      "wave_schedule": "independent|symmetric_interleave|symmetric_pingpong|asymmetric_producer_consumer",
-      "k_pipeline": "direct_global|lds_single|lds_reg_prefetch|lds_pingpong|lds_deep_single|lds_multistage",
-      "decomposition": "tile_grid|persistent_output|split_k|stream_k",
-      "output_path": "direct_store|lds_staged_store|atomic_fixup|workspace_fixup",
-      "rasterization": "linear|grouped_m|xcd_remapped_grouped",
-      "plan_binding": "static|runtime_tuned",
-      "evidence": ["deterministic evidence tag"]
-    },
-    "descriptor_evidence": ["specific source/helper evidence"],
-    "resource_signature": {"vgpr": 0, "agpr": 0, "lds_bytes": 0, "scratch_bytes": 0},
-    "classification_status": "classified|unclassified"
-  }],
+  "target_routes": ["the route(s) your mechanism is claimed on; omit when the direction names none"],
   "notes": "what worked / what didn't — written for the TechLead's insight log"
 }
 ```

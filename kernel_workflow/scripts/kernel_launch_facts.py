@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compute a kernel's per-shape launch facts from its source, not from memory.
 
-Finding 144. Twice in round 17 a number from the QD descriptor's ledger was
+Finding 144. Twice in round 17 a number from the planner's ledger was
 about to be carried into a sentence about the fused BF16 GEMM kernel -- once a
 ROUNDS LAW claim, once a whole planned experiment (D2, autotune decision
 variance) aimed at a tuner that this kernel does not have. The ledger is
@@ -23,7 +23,7 @@ guessing a value.
 
 TWO WARNINGS, because this table invites two wrong readings.
 
-1. `rounds` here is NOT the ROUNDS LAW (24). That law is stated over the QD
+1. `rounds` here is NOT the ROUNDS LAW (24). That law is stated over the
    lineage's `RouteFacts`, whose kernels tile far more coarsely; every shipped
    route in *that* descriptor sits at rounds 1. A number out of this table does
    not belong in a sentence about that law.

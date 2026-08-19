@@ -243,15 +243,15 @@ class SkipParsingTest(unittest.TestCase):
     REAL = (
         "sssssss.............................                          [100%]\n"
         "=========================== short test summary info ==========\n"
-        "SKIPPED [1] test_qd_route_priority.py:52: UNCHECKED: /tmp/pymut/examples/tasks/"
+        "SKIPPED [1] test_sol_card.py:52: UNCHECKED: /tmp/pymut/examples/tasks/"
         "dense_bf16_gemm_fused/scripts/task_runner.py is absent, so the 11 harness "
         "shapes in SUITE_SHAPES are transcribed from nothing this run can read.\n"
-        "SKIPPED [1] test_qd_robust_stats.py:187: UNCHECKED: run dir absent\n"
+        "SKIPPED [1] test_noise_floor_stats.py:187: UNCHECKED: run dir absent\n"
         "29 passed, 7 skipped, 70 subtests passed in 0.03s\n"
     )
 
     def test_a_real_rs_summary_yields_one_entry_per_skipped_test(self):
-        self.assertEqual(["test_qd_route_priority.py:52", "test_qd_robust_stats.py:187"],
+        self.assertEqual(["test_sol_card.py:52", "test_noise_floor_stats.py:187"],
                          mut.parse_skips(self.REAL))
 
     def test_the_reason_text_does_not_leak_into_the_name(self):
@@ -320,8 +320,8 @@ class NullMutantTest(unittest.TestCase):
     module's source instead of calling it objects to every mutant equally. Left
     unhandled, that test silently defends the entire file and the sweep reports
     it as coverage. This is the flattering direction, which is the one that does
-    not get noticed: `qd_route_priority.py` scored 96/96 killed with 20 of those
-    kills belonging to a single quote-style scan in `test_qd_lane_parity.py`.
+    not get noticed: one helper scored 96/96 killed with 20 of those kills
+    belonging to a single quote-style scan in a lane-parity guard.
     """
 
     def setUp(self):

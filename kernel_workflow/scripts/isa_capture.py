@@ -29,7 +29,7 @@ worked around:
                                           .group_segment_fixed_size (LDS), target
 
 The archive is immutable once written, and its `manifest.json` carries the
-`source_hash` of the tree it came from, computed with `qd_source_hash.tree_hash`
+`source_hash` of the tree it came from, computed with `source_hash.tree_hash`
 -- the same hasher, with the same exclusions, that `kernel_lane.js` uses for its
 fresh-workspace tar-copy. Without that field these signals are numbers with no
 owner, and `kernel_launch_facts.py`'s finding (144) is the standing warning about
@@ -240,11 +240,11 @@ def source_hash(root: Path) -> tuple[str | None, str | None]:
     """(hash, hole). Uses the lane's own hasher so the digest is comparable with
     every other `source_hash` in the run rather than being a second convention."""
     try:
-        import qd_source_hash
+        import source_hash
     except ImportError as exc:
         return None, f"source_hash:helper_missing({exc})"
     try:
-        return qd_source_hash.tree_hash(str(root)), None
+        return source_hash.tree_hash(str(root)), None
     except OSError as exc:
         return None, f"source_hash:unreadable({root}: {exc})"
 

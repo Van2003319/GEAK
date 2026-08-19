@@ -21,10 +21,10 @@ and `tech_lead` will not propose X again. In greedy search the ledger is the onl
 memory there is, so one false negative closes a direction permanently.
 
 So this reads the opcodes. `verify_engineer.md` already established the principle
-for the QD bootstrap phase -- "Classify `compute_primitive` from the
-disassembly, never from the include list ... You are the independent check on a
-classification the engineer made from its own source; reading the same source
-back is not independence" -- and gave the reason it matters on this hardware: on
+-- "Classify `compute_primitive` from the disassembly, never from the include
+list ... You are the independent check on a classification the engineer made from
+its own source; reading the same source back is not independence" -- and gave the
+reason it matters on this hardware: on
 gfx942 rocWMMA lowers its 32x32x8 bf16 fragment to `v_mfma_f32_16x16x16_bf16`,
 so two sources that differ can compile to byte-identical machine code. What is
 checked here is the converse: two sources that differ can also compile to *the
@@ -521,7 +521,7 @@ def build_signals(archive: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Claims. A claim is what the candidate said its edit would do to the machine
 # code, in a CLOSED vocabulary of things that are mechanically observable. The
-# vocabulary is closed for the reason `qd_source_hash.extract_descriptor_evidence`
+# vocabulary is closed for the reason `source_hash.extract_descriptor_evidence`
 # is conservative: an open-ended claim is one the checker has to interpret, and a
 # checker that interprets is a checker that can be talked into a pass.
 #
@@ -900,19 +900,19 @@ def run_checks(signals: dict, nop_cycle_budget: int = 32) -> dict:
 # Observed descriptor. What the machine code says the kernel's mechanism IS, as
 # opposed to what its author says it is.
 #
-# `verify_engineer.md` already established the rule this implements, for the QD
-# bootstrap phase: "Classify `compute_primitive` from the disassembly, never from
+# `verify_engineer.md` already established the rule this implements: "Classify
+# `compute_primitive` from the disassembly, never from
 # the include list ... You are the independent check on a classification the
 # engineer made from its own source; reading the same source back is not
 # independence." It gives the reason too -- on gfx942 rocWMMA lowers its 32x32x8
 # bf16 fragment to `v_mfma_f32_16x16x16_bf16`, so source and machine code are not
 # in one-to-one correspondence in either direction.
 #
-# NOT WIRED TO ANY ADMISSION GATE. This is a capability, not a policy: a greedy
-# lane has no archive cells to mis-file a candidate into, so there is nothing here
-# for it to protect. It exists so a QD lane (or a human) can cross-check a
-# self-declared descriptor against the opcodes, and so the axes below have one
-# implementation rather than being re-derived per caller.
+# NOT WIRED TO ANY ADMISSION GATE. This is a capability, not a policy: nothing in
+# the lane files a candidate by mechanism, so there is nothing here for it to
+# protect. It exists so a reader can cross-check a self-declared descriptor
+# against the opcodes, and so the axes below have one implementation rather than
+# being re-derived per caller.
 #
 # Every axis is reported with its evidence, and any axis the opcodes cannot decide
 # is `null` -- never a plausible default. A descriptor axis guessed from absence is

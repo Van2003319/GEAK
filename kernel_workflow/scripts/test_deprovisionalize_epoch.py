@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Tests for `deprovisionalize_epoch.py`.
 
-Everything here runs against COPIES of the two real files, with the module's
-`STATS`/`LANE` pointers redirected. The tool's whole purpose is to edit two
-load-bearing sources, so a test suite that edited the originals to prove it
-works would be the least trustworthy possible way to prove it.
+Everything here runs against a COPY of the real file, with the module's `STATS`
+pointer redirected. The tool's whole purpose is to edit a load-bearing source,
+so a test suite that edited the original to prove it works would be the least
+trustworthy possible way to prove it.
 
-The copies are read from the real files each run rather than reproduced as
-fixtures: an anchor that stops matching the live source is the failure mode this
+The copy is read from the real file each run rather than reproduced as a
+fixture: an anchor that stops matching the live source is the failure mode this
 file exists to catch, and a fixture would keep passing right through it.
 """
 from __future__ import annotations
@@ -25,8 +25,8 @@ sys.path.insert(0, str(HERE))
 
 import deprovisionalize_epoch as DE  # noqa: E402
 import measure_noise_floor as MNF  # noqa: E402
-import qd_robust_stats as QRS  # noqa: E402
-import qd_robust_stats as QRS  # noqa: E402
+import noise_floor_stats as QRS  # noqa: E402
+import noise_floor_stats as QRS  # noqa: E402
 
 # The epoch under test must be one that is still PROVISIONAL and already has a
 # table to overwrite. Derived, not hardcoded: this read "Q" until Q itself was
@@ -85,16 +85,14 @@ class Harness(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="deprov_"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.stats = self.tmp / "qd_robust_stats.py"
-        self.lane = self.tmp / "kernel_lane.js"
+        self.stats = self.tmp / "noise_floor_stats.py"
         shutil.copyfile(DE.STATS, self.stats)
-        shutil.copyfile(DE.LANE, self.lane)
-        self.real = (DE.STATS, DE.LANE)
-        DE.STATS, DE.LANE = self.stats, self.lane
+        self.real = DE.STATS
+        DE.STATS = self.stats
         self.addCleanup(self.restore)
 
     def restore(self):
-        DE.STATS, DE.LANE = self.real
+        DE.STATS = self.real
 
     def apply(self, v=None, machine=MACHINE, mode="--apply") -> int:
         path = self.tmp / "verdict.json"
@@ -107,10 +105,10 @@ class RefusalTest(Harness):
     install one is the sweep's own bar and not a softer one."""
 
     def refuses(self, **over):
-        before = (self.stats.read_bytes(), self.lane.read_bytes())
+        before = self.stats.read_bytes()
         self.assertEqual(2, self.apply(verdict(**over)))
-        self.assertEqual(before, (self.stats.read_bytes(), self.lane.read_bytes()),
-                         "a refused verdict still edited a file")
+        self.assertEqual(before, self.stats.read_bytes(),
+                         "a refused verdict still edited the file")
 
     def test_a_verdict_that_is_not_ok_is_refused(self):
         self.refuses(ok=False, problems=["correctness failed"])
@@ -188,65 +186,39 @@ class ApplyTest(Harness):
         self.assertEqual("True", measured)
         self.assertEqual(FLOORS[ROUTES.index("decode_m8_up")], float(floor))
 
-    def test_the_js_table_and_set_are_rewritten_together(self):
-        self.assertEqual(0, self.apply())
-        text = self.lane.read_text(encoding="utf-8")
-        expected = ", ".join(f"'{m}'" for m in REMAINING_PROVISIONAL)
-        self.assertIn(f"const QD_PROVISIONAL_MACHINES = new Set([{expected}]);", text)
-        for route, floor in zip(ROUTES, FLOORS):
-            with self.subTest(route=route):
-                self.assertIn(f"['{route}', {floor:.4f}]", text)
-
-    def test_the_two_files_get_the_same_numbers(self):
-        """The parity the lane tests enforce, checked here at the moment of the
-        edit rather than after it -- an installer that can produce a mismatch is
-        an installer that will, on the night the suite is not re-run."""
-        self.assertEqual(0, self.apply())
-        py, js = self.stats.read_text("utf-8"), self.lane.read_text("utf-8")
-        for route, floor in zip(ROUTES, FLOORS):
-            with self.subTest(route=route):
-                self.assertIn(f'"{route}": {floor:.4f},', py)
-                self.assertIn(f"['{route}', {floor:.4f}]", js)
-
     def test_the_new_table_carries_its_provenance(self):
         self.assertEqual(0, self.apply())
-        for path, marker in ((self.stats, "#"), (self.lane, "//")):
-            with self.subTest(file=path.name):
-                text = path.read_text(encoding="utf-8")
-                self.assertIn("MEASURED: 8 complete same-variant primed repeats", text)
-                self.assertIn("bc7ea649e9ea3b7e", text)
-                self.assertIn("tw003", text)
+        text = self.stats.read_text(encoding="utf-8")
+        self.assertIn("MEASURED: 8 complete same-variant primed repeats", text)
+        self.assertIn("bc7ea649e9ea3b7e", text)
+        self.assertIn("tw003", text)
 
     def test_applying_twice_is_a_no_op(self):
         self.assertEqual(0, self.apply())
-        first = (self.stats.read_bytes(), self.lane.read_bytes())
+        first = self.stats.read_bytes()
         self.assertEqual(0, self.apply())
-        self.assertEqual(first, (self.stats.read_bytes(), self.lane.read_bytes()))
+        self.assertEqual(first, self.stats.read_bytes())
 
     def test_check_reports_without_writing(self):
-        before = (self.stats.read_bytes(), self.lane.read_bytes())
+        before = self.stats.read_bytes()
         self.assertEqual(1, self.apply(mode="--check"))
-        self.assertEqual(before, (self.stats.read_bytes(), self.lane.read_bytes()))
+        self.assertEqual(before, self.stats.read_bytes())
         self.assertEqual(0, self.apply())
         self.assertEqual(0, self.apply(mode="--check"), "check still reports work "
                                                         "after the work was done")
 
 
 class AtomicityTest(Harness):
-    def test_a_broken_js_anchor_leaves_the_python_file_untouched(self):
-        """Half an edit is the state the parity tests exist to catch, and also
-        the state that wedges the pipeline. The tool renders both files fully
-        before writing either."""
-        self.lane.write_text("// the lane moved somewhere else\n", encoding="utf-8")
+    def test_a_broken_anchor_leaves_the_file_exactly_as_it_found_it(self):
+        """The tool makes two edits -- the table and the flag -- and renders the
+        whole file before writing any of it. Without that, an anchor that failed
+        on the second edit would leave a measured table sitting under a letter
+        still listed as PROVISIONAL, which reports every route it just measured
+        as unmeasured."""
+        self.stats.write_text("PROVISIONAL_MACHINES = {'Q'}\n", encoding="utf-8")
         before = self.stats.read_bytes()
         self.assertEqual(3, self.apply())
         self.assertEqual(before, self.stats.read_bytes())
-
-    def test_a_broken_python_anchor_leaves_the_js_file_untouched(self):
-        self.stats.write_text("PROVISIONAL_MACHINES = {'Q'}\n", encoding="utf-8")
-        before = self.lane.read_bytes()
-        self.assertEqual(3, self.apply())
-        self.assertEqual(before, self.lane.read_bytes())
 
     def test_an_ambiguous_set_anchor_is_a_refusal_not_a_guess(self):
         text = self.stats.read_text(encoding="utf-8")
@@ -259,23 +231,18 @@ class ProseOwnershipTest(Harness):
 
     A comment reading "nothing has been measured here" directly above a measured
     table is worse than no comment, because it is the half a reader believes.
-    Both languages therefore anchor the comment block, not just the numbers.
+    The anchor therefore covers the comment block, not just the numbers.
     """
 
     def sentences(self) -> list[tuple[Path, str]]:
-        """The live provisional sentence in each file, word for word.
-
-        Two different sentences, because the two files were written by hand at
-        different times -- which is itself the argument for the tool.
-        """
+        """The live provisional sentence, word for word."""
         # Anchored on the epoch header rather than on the hand-written prose
-        # that follows it. The two files' sentences were authored separately
-        # and each retiring epoch takes its own wording with it, so quoting
-        # either one word-for-word only survives until the next apply. What
-        # does not change is that a provisional epoch's block opens with its
-        # own header and the word PROVISIONAL.
+        # that follows it. Each retiring epoch takes its own wording with it,
+        # so quoting that prose word-for-word only survives until the next
+        # apply. What does not change is that a provisional epoch's block opens
+        # with its own header and the word PROVISIONAL.
         head = f"machine {MACHINE} -- {QRS.MACHINE_HOSTNAME[MACHINE]}. PROVISIONAL:"
-        return [(self.stats, head), (self.lane, head)]
+        return [(self.stats, head)]
 
     def test_the_live_sources_carry_the_sentences_this_test_is_about(self):
         """(55). If the wording drifts, every assertion below starts passing by
@@ -289,9 +256,9 @@ class ProseOwnershipTest(Harness):
         `stale_prose` that returned [] for everything would make the clean-exit
         assertion below pass without the prose ever being touched."""
         found = DE.stale_prose(MACHINE)
-        self.assertEqual(2, len(found), f"expected one block per file, got {found}")
+        self.assertEqual(1, len(found), f"expected the epoch's block, got {found}")
 
-    def test_the_provisional_sentence_is_gone_from_both_files(self):
+    def test_the_provisional_sentence_is_gone_from_the_file(self):
         self.assertEqual(0, self.apply(), "a clean apply should leave no stale prose")
         for path, sentence in self.sentences():
             with self.subTest(file=path.name):
@@ -343,8 +310,6 @@ class StaleProseTest(Harness):
         anyway; a scan that counted it would never clear and the exit code would
         be permanently 6, which is the same as having no signal."""
         self.stats.write_text('PROVISIONAL_MACHINES = {"Q"}\n', encoding="utf-8")
-        self.lane.write_text("const QD_PROVISIONAL_MACHINES = new Set(['Q']);\n",
-                             encoding="utf-8")
         self.assertEqual([], DE.stale_prose(MACHINE))
 
 
@@ -413,10 +378,9 @@ class ProducerContractTest(Harness):
         for stage in ("correctness", "identity"):
             with self.subTest(stage=stage):
                 bail = {"ok": False, "stage": stage, "problems": ["..."]}
-                before = (self.stats.read_bytes(), self.lane.read_bytes())
+                before = self.stats.read_bytes()
                 self.assertEqual(2, self.apply(bail))
-                self.assertEqual(before,
-                                 (self.stats.read_bytes(), self.lane.read_bytes()))
+                self.assertEqual(before, self.stats.read_bytes())
 
 
 class RendererReuseTest(unittest.TestCase):
@@ -425,9 +389,7 @@ class RendererReuseTest(unittest.TestCase):
         drift is invisible: both sides print plausible floats."""
         src = (HERE / "deprovisionalize_epoch.py").read_text(encoding="utf-8")
         self.assertIn("MNF.render_python(", src)
-        self.assertIn("MNF.render_js(", src)
-        for own in ("def render_python", "def render_js"):
-            self.assertNotIn(own, src, "the tool grew its own renderer")
+        self.assertNotIn("def render_python", src, "the tool grew its own renderer")
 
 
 if __name__ == "__main__":

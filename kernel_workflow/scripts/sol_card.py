@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Deterministic gfx90a "speed of light" (SOL) roofline card, strictly post-selection.
 
-kernel_lane.js already threads an optional `qd_sol_calibration` object
-(A.qd_sol_calibration -> QD_SOL_CALIBRATION) through to setup, stores an
-`sol_card` on each archive elite, and has the tech-lead plan schema carry a
-`sol_gap_before` / `target_regime` per direction -- but nothing in
-kernel_lane.js computes any of that; it is all agent-reported today. This
-module is the deterministic formula behind those fields.
+`sol_guidance.py` steers a round toward the routes where the hardware still
+allows a win, and it needs a ceiling it can defend. This module is that
+ceiling: the deterministic roofline arithmetic, with the provenance of every
+peak it divides by, so a headroom number can be traced to a measurement rather
+than to a nameplate.
 
 SOL is diagnostic, not a selection signal: the roofline ceiling for a kernel's
 own measured arithmetic intensity does not change whether that kernel beats
@@ -27,19 +26,19 @@ from __future__ import annotations
 
 from typing import Mapping, Sequence
 
-SCHEMA = "geak.qd-sol-card/v3"
+SCHEMA = "geak.sol-card/v3"
 # v3 adds the compute-ceiling witness ((89) item 2). The version string is
 # bumped rather than the fields quietly appended because a consumer written
 # against v2 reads a v3 card without noticing that its compute denominator now
 # carries an attainability claim -- and per (92) a version string is the only
 # thing that makes a stale consumer fail loudly instead of silently agreeing.
-SCHEMA_V2 = "geak.qd-sol-card/v2"
-# v1 cards are still readable. They exist on archive elites written before the
-# bandwidth ceiling became footprint-indexed, and rejecting them would make an
-# old elite look corrupt rather than merely old. What a v1 card may NOT do is
-# claim a footprint-resolved ceiling, so `validate_sol_card` requires the v2
-# fields on v2 cards and forbids them on v1.
-SCHEMA_V1 = "geak.qd-sol-card/v1"
+SCHEMA_V2 = "geak.sol-card/v2"
+# v1 cards are still readable. They were written before the bandwidth ceiling
+# became footprint-indexed, and rejecting them would make an old card look
+# corrupt rather than merely old. What a v1 card may NOT do is claim a
+# footprint-resolved ceiling, so `validate_sol_card` requires the v2 fields on
+# v2 cards and forbids them on v1.
+SCHEMA_V1 = "geak.sol-card/v1"
 ACCEPTED_SCHEMAS = (SCHEMA, SCHEMA_V2, SCHEMA_V1)
 SUPPORTED_ARCH = "gfx90a"
 
@@ -542,7 +541,7 @@ def _parser():
     p.add_argument("--achieved-bytes", type=float, required=True)
     p.add_argument("--elapsed-s", type=float, required=True)
     p.add_argument("--dtype", default="bf16")
-    # No default: see `qd_v2._arch_argument`. The gfx90a card here is a
+    # No default. The gfx90a card here is a
     # physical-peak reference whose own `source` says it is not a measurement;
     # the gfx942 card is `measured: True`. Silently picking the former on a
     # gfx942 box understates remaining headroom by ~3.3x.
@@ -559,7 +558,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                achieved_bytes=args.achieved_bytes, elapsed_s=args.elapsed_s,
                                dtype=args.dtype, arch=args.arch)
     except SOLCardError as exc:
-        print(f"qd_sol_card: {exc}", file=sys.stderr)
+        print(f"sol_card: {exc}", file=sys.stderr)
         return 2
     sys.stdout.write(json.dumps(card, sort_keys=True, separators=(",", ":")) + "\n")
     return 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The mechanisms this kernel has already measured shut, and why.
 
-`qd_route_priority.py` answers "which *route* is worth a slot". Nothing has ever
+Route priority answers "which *route* is worth a slot". Nothing has ever
 answered "which *mechanism* has already been tried on it". That asymmetry is the
 self-sealing shape from finding (92) pointed the other way: a route recorded as
 closed is never proposed and so never re-measured, while a mechanism closed
@@ -20,7 +20,7 @@ stop work rather than to aim it:
    negative control. An entry with a `reason` and no number does not belong here
    -- that is a hypothesis, and hypotheses are what the slots are for.
 2. **A closure is only as tight as the floor that justified it** (finding 92,
-   restated in `qd_route_priority`). `bound` records what the prize was bounded
+   restated as a route-priority verdict). `bound` records what the prize was bounded
    *at*, and `epoch` records whose noise floor did the bounding. A mechanism
    bounded at "under 2%" on a box whose floor was 7% is bounded at 7%, and it
    reopens on a quieter box. This is why the entries carry an epoch letter and

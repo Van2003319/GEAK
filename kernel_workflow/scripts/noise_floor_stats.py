@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Deterministic per-context robust statistics for geak-qd-v2 measurements.
+"""Deterministic robust statistics, and the per-epoch noise floors under them.
 
-kernel_lane.js's QD v2 verify contract carries, per benchmark context,
-`case_measurement_samples: [{name, samples, median, mad, lower, upper}, ...]`
-(QD_CASE_SAMPLES_SCHEMA) and folds those into cell admission via
-`qdCaseRobust`/`qdRobust`, which trust whatever median/mad/lower/upper an
-agent reports. This module computes that tuple deterministically from the raw
-repeated-measurement samples themselves (kernel_lane.js's own
-QD_REPEAT_MEASUREMENTS: 3 is the expected sample count, but nothing here
-assumes exactly 3), so admission decisions rest on arithmetic instead of a
-model's self-report.
+Two halves that only make sense together. The first is median/MAD interval
+arithmetic over raw repeated-measurement samples -- {name, samples, median,
+mad, lower, upper} per benchmark context -- computed here from the samples
+themselves rather than taken from whatever summary the agent that produced
+them chose to report.
+
+The second is what that arithmetic is measured against: a per-route,
+per-machine relative half-width below which a difference is unreadable
+(finding 26), so a route that is quiet in three samples but loud in twenty
+cannot present a tight interval. Floors do not pool across a machine boundary,
+which is why the tables below are keyed by epoch rather than global.
+`measure_noise_floor.py` produces an epoch's table, `deprovisionalize_epoch.py`
+installs it, and `check_measurement_frame.py` fences on it -- `gpu_lock.sh`
+runs that preflight before every GPU command, so a container restored onto a
+new box cannot be timed against the box it was snapshotted from.
 
 Robustness matters here because GPU wall-clock timings are noisy and
 occasionally spike (a stalled SMI query, a cold cache, a neighbor process):
 the median resists those spikes far better than a mean, and MAD-based bounds
 widen instead of narrowing under an outlier, which is the conservative
-direction kernel_lane.js already leans (`robust.lower > incumbent.robust.upper`
-before a cell can be replaced).
+direction -- widening can only refuse an admission, never grant one.
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ import math
 import statistics
 from typing import Mapping, Sequence
 
-SCHEMA = "geak.qd-robust-stats/v1"
+SCHEMA = "geak.noise-floor-stats/v1"
 
 # Admission uses the workflow's deliberately conservative interval contract:
 # median ± 2*MAD. This is not a normal-distribution confidence interval; it is
@@ -235,6 +240,9 @@ MACHINE_HOSTNAME = {
     "S": "tw054",     # same box as O, second container; see the S table below
     "T": "tw046",     # wave 4 restore; a box this lane had never run on before
     "U": "tw049",     # wave 5 restore, MID-ROUND: see the U block below
+    "V": "tw051",     # wave 6 restore; a box this lane had never run on before
+    "W": "tw042",     # wave 7 restore; another box new to the lane
+    "X": "tw036",     # wave 8 restore; another box new to the lane
 }
 
 # Epochs whose table was never measured. Their floors are the fail-closed
@@ -371,11 +379,57 @@ def machine_for_host(hostname: str | None = None) -> str | None:
     return latest
 
 
-# The machine whose floors apply unless a caller names another. Still one line
-# set deliberately -- inferring it from the host would mean a new box silently
-# selects a table nobody chose -- but now cross-checked against the host, and
-# against `PROVISIONAL_MACHINES`, by the test named above.
-CURRENT_MACHINE = "U"
+# machine V -- tw051. MEASURED: 8 complete same-variant primed repeats, source_hash c4b6dba073440f108e3f07585272b1488850df3f95f8c7e3c926dccc1fc96355.
+# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+MEASURED_NOISE_FLOOR_BY_MACHINE["V"] = {
+    "decode_m16_square": 0.0087,
+    "decode_m2_square": 0.0020,  # clamped to MIN_FLOOR
+    "decode_m32_down": 0.0225,
+    "decode_m64_square": 0.0132,
+    "decode_m8_up": 0.0223,
+    "decode_m96_up": 0.0090,
+    "prefill_m1024_down": 0.0121,
+    "prefill_m128_square": 0.0216,
+    "prefill_m2048_square": 0.0093,
+    "prefill_m256_down": 0.0120,
+    "prefill_m512_up": 0.0107,
+}
+
+
+# machine W -- tw042. MEASURED: 8 complete same-variant primed repeats, source_hash f87a1ccd45be3f3ee060ce401f8119845ffd68efe9c45b2cc8475b97253d6786.
+# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+MEASURED_NOISE_FLOOR_BY_MACHINE["W"] = {
+    "decode_m16_square": 0.0101,
+    "decode_m2_square": 0.0083,
+    "decode_m32_down": 0.0045,
+    "decode_m64_square": 0.0042,
+    "decode_m8_up": 0.0043,
+    "decode_m96_up": 0.0121,
+    "prefill_m1024_down": 0.0042,
+    "prefill_m128_square": 0.0136,
+    "prefill_m2048_square": 0.0092,
+    "prefill_m256_down": 0.0181,
+    "prefill_m512_up": 0.0091,
+}
+
+# machine X -- tw036. MEASURED: 8 complete same-variant primed repeats, source_hash f87a1ccd45be3f3ee060ce401f8119845ffd68efe9c45b2cc8475b97253d6786.
+# Installed by deprovisionalize_epoch.py from the sweep verdict; the statistic is 2*MAD(speedup)/median(speedup) per route, floors below MIN_FLOOR (0.002) clamped up. Floors do not pool across a machine boundary, so this table is a reading of this box only.
+MEASURED_NOISE_FLOOR_BY_MACHINE["X"] = {
+    "decode_m16_square": 0.0058,
+    "decode_m2_square": 0.0047,
+    "decode_m32_down": 0.0061,
+    "decode_m64_square": 0.0084,
+    "decode_m8_up": 0.0092,
+    "decode_m96_up": 0.0033,
+    "prefill_m1024_down": 0.0076,
+    "prefill_m128_square": 0.0033,
+    "prefill_m2048_square": 0.0039,
+    "prefill_m256_down": 0.0107,
+    "prefill_m512_up": 0.0047,
+}
+
+
+CURRENT_MACHINE = "X"
 
 MEASURED_NOISE_FLOOR = MEASURED_NOISE_FLOOR_BY_MACHINE[CURRENT_MACHINE]
 
@@ -427,17 +481,13 @@ def robust_stats(samples: Sequence[float], context: str | None = None
     - n >= 2: mad is the median absolute deviation from the median; the radius
       is max(2*MAD, |median| * floor), clamped so lower never reaches zero.
 
-    Parity note, and a warning about this docstring's own history. These lines
-    used to claim the n == 1 case "matches kernel_lane.js's fallback of
-    lower == upper == score". That stopped being true when finding (26) added
-    the floor here, and the sentence stayed -- so anyone checking whether the
-    two implementations agreed could read a confident parity claim and stop.
-    The lane went on admitting elites with a bare 2*MAD radius for the whole
-    period; see finding (58). `kernel_lane.js`'s `qdCaseRobust` now mirrors this
-    function exactly, and `test_qd_lane_parity.py::NoiseFloorParityTest` plus
-    `test_js_suite.py::RobustParityTest` are what keep that true -- one compares
-    the tables, the other executes both implementations on the same samples.
-    Do not restate parity in prose here; prose is not the mechanism.
+    A warning about this docstring's own history. These lines used to claim the
+    n == 1 case matched a second implementation's zero-width fallback. That
+    stopped being true when finding (26) added the floor here, and the sentence
+    stayed -- so anyone checking whether the two agreed could read a confident
+    claim and stop, and finding (58) is what that cost. What keeps the n == 1
+    behaviour honest is `test_noise_floor_stats.py::RobustStatsTest`, not these
+    sentences. Prose is not the mechanism.
     """
     xs = [float(x) for x in samples if isinstance(x, (int, float)) and not math.isnan(x)]
     n = len(xs)
@@ -446,10 +496,9 @@ def robust_stats(samples: Sequence[float], context: str | None = None
                 "lower": 0.0, "upper": 0.0}
     median = statistics.median(xs)
     if n == 1:
-        # Previously this returned a zero-width interval, matching
-        # kernel_lane.js's point-estimate fallback. It now carries the measured
-        # floor instead: one sample is the case with the *least* spread
-        # information, so it is the last place that should present the
+        # Previously this returned a zero-width interval. It now carries the
+        # measured floor instead: one sample is the case with the *least*
+        # spread information, so it is the last place that should present the
         # narrowest bound. Widening can only refuse admissions, never grant
         # one, so it cannot turn a rejection into an acceptance downstream.
         radius = abs(median) * noise_floor(context)
@@ -466,9 +515,8 @@ def robust_stats(samples: Sequence[float], context: str | None = None
 
 def context_robust_stats(samples_by_context: Mapping[str, Sequence[float]]
                           ) -> list[dict[str, object]]:
-    """`robust_stats` per context, shaped exactly like QD_CASE_SAMPLES_SCHEMA's
-    items: {name, samples, median, mad, lower, upper}, sorted by context name
-    for a deterministic, diff-friendly ordering.
+    """`robust_stats` per context: {name, samples, median, mad, lower, upper},
+    sorted by context name for a deterministic, diff-friendly ordering.
     """
     out: list[dict[str, object]] = []
     for name in sorted(samples_by_context):
@@ -484,9 +532,7 @@ def context_robust_stats(samples_by_context: Mapping[str, Sequence[float]]
 
 def combine_contexts(per_context: Sequence[Mapping[str, object]]) -> dict[str, float]:
     """Fold per-context {median, lower, upper, ...} rows into one overall
-    {score, median, mad, lower, upper}, mirroring kernel_lane.js's
-    qdContextScore averaging (mean across contexts, not a geomean -- QD v2's
-    own score is a plain per-context average).
+    {score, median, mad, lower, upper}: a plain mean across contexts.
 
     The bound stays sound without any independence assumption: if every
     context's true value lies in [lower_i, upper_i], then by linearity the

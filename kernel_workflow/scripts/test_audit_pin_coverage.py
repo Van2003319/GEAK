@@ -74,8 +74,8 @@ class ClauseExtractionTest(unittest.TestCase):
         self.assertEqual([p[0] for p in pins], [1, 3])
 
     def test_a_regex_containing_an_escaped_slash_is_not_truncated(self):
-        pins = self._pins(r"ok(/scripts\/qd_v2\.py/.test(src));" + "\n")
-        self.assertEqual([p[2] for p in pins], [r"scripts\/qd_v2\.py"])
+        pins = self._pins(r"ok(/scripts\/sol_card\.py/.test(src));" + "\n")
+        self.assertEqual([p[2] for p in pins], [r"scripts\/sol_card\.py"])
 
     def test_a_test_call_on_something_other_than_the_sources_is_ignored(self):
         # `/re/.test(someLocal)` is a fixture assertion, not a source pin, and
@@ -142,15 +142,29 @@ class RealSuiteTest(unittest.TestCase):
     """The extractor against the file it exists to read."""
 
     def setUp(self):
-        self.js = (HERE / "test_qd_archive.js").read_text(encoding="utf-8")
+        self.js = (HERE / "test_lane_gates.js").read_text(encoding="utf-8")
         self.pins = audit._pins(self.js)
 
-    def test_the_real_suites_slice_pins_are_scored_not_skipped(self):
+    def test_the_real_suites_slices_are_resolved_and_then_executed(self):
+        """`_slices` must resolve the real suite's cuts, and the suite must spend
+        them the strong way.
+
+        The count of regex pins aimed AT a slice is deliberately not asserted.
+        Matching a narrowed haystack is stronger than matching the whole file
+        (see `_slices`), but weaker again than running the extracted code, and
+        this suite does the latter for every slice it takes -- so a pin count
+        here would read as coverage while measuring the absence of the better
+        form. `SliceResolutionTest` above is what proves the extractor scores
+        slice pins rather than skipping them, on input built to contain them.
+        """
         slices = audit._slices(self.js)
         self.assertGreaterEqual(len(slices), 5, sorted(slices))
-        against_slices = [p for p in audit._pins(self.js, slices)
-                          if p[3] not in ("src", "wfSrc")]
-        self.assertGreaterEqual(len(against_slices), 10, len(against_slices))
+        for name in sorted(slices):
+            with self.subTest(slice=name):
+                self.assertRegex(
+                    self.js, rf"new Function\((?:[^()]|\([^()]*\))*\$\{{{name}\}}",
+                    f"`{name}` is cut out of the lane and never evaluated, so nothing "
+                    "in this suite runs the code it narrowed to")
 
     def test_every_real_slice_cuts_something_out_of_the_lane(self):
         lane = (HERE.parent / "kernel_lane.js").read_text(encoding="utf-8")

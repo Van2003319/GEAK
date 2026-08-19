@@ -25,7 +25,7 @@ followed from that one line, all of them silent:
    incumbent geomean of 1.019 when the incumbent measured ~1.39.
 
 These are lexical checks against the lane source, in the style of
-`test_qd_lane_parity.py`. They catch the defect coming back verbatim or by deletion of
+the lane-parity guards. They catch the defect coming back verbatim or by deletion of
 the guard; they are not a substitute for executing the lane. Labelled as such on
 purpose -- see that module's docstring for why the weaker check is still worth having.
 """

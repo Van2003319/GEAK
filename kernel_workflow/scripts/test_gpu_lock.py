@@ -433,15 +433,6 @@ class MeasurementFrameFenceTest(GpuLockHarness):
         self.assertNotIn("PAYLOAD-RAN", r.stdout)
         self.assertIn("does not describe this box", r.stderr)
 
-    def test_mirror_drift_refuses_the_command(self):
-        # Exit 5 is "the Python constants and the JS mirror disagree", so the epoch
-        # verified is not the epoch that will be applied. Same consequence as a wrong
-        # host: the floors judging this command are not this box's floors.
-        self.plant_checker(5)
-        r = self.run_lock(FREE_A, "echo", "PAYLOAD-RAN")
-        self.assertNotEqual(0, r.returncode)
-        self.assertNotIn("PAYLOAD-RAN", r.stdout)
-
     def test_a_provisional_epoch_still_runs(self):
         # The one that must NOT refuse. Exit 3 is a registered-but-unmeasured epoch --
         # the state every new box starts in -- and measuring its floors is itself GPU

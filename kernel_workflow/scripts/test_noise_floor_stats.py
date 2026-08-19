@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPU-free tests for qd_robust_stats.py."""
+"""GPU-free tests for noise_floor_stats.py."""
 from __future__ import annotations
 
 import importlib.util
@@ -10,8 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name("qd_robust_stats.py")
-SPEC = importlib.util.spec_from_file_location("qd_robust_stats", SCRIPT)
+SCRIPT = Path(__file__).with_name("noise_floor_stats.py")
+SPEC = importlib.util.spec_from_file_location("noise_floor_stats", SCRIPT)
 assert SPEC and SPEC.loader
 QRS = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = QRS
@@ -562,7 +562,7 @@ class CliTest(unittest.TestCase):
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             self.assertEqual(run1.stdout, run2.stdout)
             payload = json.loads(run1.stdout)
-            self.assertEqual("geak.qd-robust-stats/v1", payload["schema"])
+            self.assertEqual("geak.noise-floor-stats/v1", payload["schema"])
             self.assertEqual(2, len(payload["per_context"]))
             self.assertIn("combined", payload)
 

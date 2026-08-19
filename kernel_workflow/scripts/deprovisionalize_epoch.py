@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 """Install a measured noise-floor table and retire an epoch's PROVISIONAL flag.
 
-`measure_noise_floor.py` ends by printing two blocks and a sentence: paste this
-into `qd_robust_stats.py`, paste that into `kernel_lane.js`, then remove the
-letter from `PROVISIONAL_MACHINES` and from `QD_PROVISIONAL_MACHINES`. Four
-hand-edits in two languages, at whatever hour a GPU finally frees. The parity
-tests catch a half-applied edit, which is the right outcome and also a wedged
-pipeline: the suite is red and the run that was waiting for the floors cannot
-proceed until someone finishes the paste.
+`measure_noise_floor.py` ends by printing a block and a sentence: paste this
+into `noise_floor_stats.py`, then remove the letter from
+`PROVISIONAL_MACHINES`. Two hand-edits, at whatever hour a GPU finally frees,
+and the second is the one that gets skipped. `test_noise_floor_stats.py` catches
+the half-applied edit -- a provisional epoch whose table is no longer the
+fail-closed default -- which is the right outcome and also a wedged pipeline:
+the suite is red and the run that was waiting for the floors cannot proceed
+until someone finishes the paste.
 
-So the paste is a tool. It is all-or-nothing -- both files are rendered in full
-and validated before either is written -- and idempotent, so a re-run after a
+So the paste is a tool. It is all-or-nothing -- the whole file is rendered and
+validated before any of it is written -- and idempotent, so a re-run after a
 crash is a no-op rather than a second table.
 
-It renders through `measure_noise_floor.render_python` / `render_js` rather than
-formatting the numbers again here. A second renderer would be a second thing to
-keep in agreement with the first, and the disagreement would be invisible: both
-outputs are plausible tables of plausible floats.
+It renders through `measure_noise_floor.render_python` rather than formatting
+the numbers again here. A second renderer would be a second thing to keep in
+agreement with the first, and the disagreement would be invisible: both outputs
+are plausible tables of plausible floats.
 
-Prose is handled by ownership, not by cleverness. The comment directly above
-each table says in sentences that the epoch is unmeasured and that measuring it
-is the next GPU work; after the edit that text is false, and false-but-confident
+Prose is handled by ownership, not by cleverness. The comment directly above the
+table says in sentences that the epoch is unmeasured and that measuring it is
+the next GPU work; after the edit that text is false, and false-but-confident
 prose beside a correct table is worse than no prose at all. So that comment
-block is part of the anchor in BOTH languages and is replaced wholesale by
-generated provenance. Sentences the tool cannot anchor -- anywhere else in
-either file -- it will not rewrite and will not ignore: it reports every
-remaining PROVISIONAL mention of the machine and exits 6, stopping an unattended
-chain at the point where a human sentence is genuinely required.
+block is part of the anchor and is replaced wholesale by generated provenance.
+Sentences the tool cannot anchor -- anywhere else in the file -- it will not
+rewrite and will not ignore: it reports every remaining PROVISIONAL mention of
+the machine and exits 6, stopping an unattended chain at the point where a human
+sentence is genuinely required.
 
-Owning the comment is also what makes the Python side idempotent. An anchor
-starting at the assignment leaves the old header in place and inserts a new one
-above it, so re-running after a crash stacks contradictory provenance instead of
-doing nothing.
+Owning the comment is also what makes the edit idempotent. An anchor starting at
+the assignment leaves the old header in place and inserts a new one above it, so
+re-running after a crash stacks contradictory provenance instead of doing
+nothing.
 
     deprovisionalize_epoch.py --verdict /tmp/floor_Q.json --machine Q --check
     deprovisionalize_epoch.py --verdict /tmp/floor_Q.json --machine Q --apply
@@ -50,13 +51,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 HERE = Path(__file__).resolve().parent
-LANE = HERE.parent / "kernel_lane.js"
-STATS = HERE / "qd_robust_stats.py"
+STATS = HERE / "noise_floor_stats.py"
 
 sys.path.insert(0, str(HERE))
 
 import measure_noise_floor as MNF  # noqa: E402
-import qd_robust_stats as QRS  # noqa: E402
+import noise_floor_stats as QRS  # noqa: E402
 
 
 class AnchorError(RuntimeError):
@@ -66,7 +66,7 @@ class AnchorError(RuntimeError):
 def shortname(path: Path) -> str:
     """Repo-relative when it is in the repo, absolute when it is not.
 
-    Tests point STATS/LANE at copies outside the tree, and a progress line that
+    Tests point STATS at a copy outside the tree, and a progress line that
     raises rather than prints would fail the run for a cosmetic reason.
     """
     try:
@@ -151,12 +151,6 @@ PY_TABLE = re.compile(
     re.DOTALL | re.MULTILINE)
 PY_SET = re.compile(r"^PROVISIONAL_MACHINES = (?P<body>\{[^}]*\}|set\(\))",
                     re.MULTILINE)
-JS_TABLE = re.compile(
-    r"^(?P<comment>(?:  //[^\n]*\n)*)  \['(?P<m>[A-Z])', new Map\(\[.*?^  \]\)\],",
-    re.DOTALL | re.MULTILINE)
-JS_SET = re.compile(
-    r"^const QD_PROVISIONAL_MACHINES = new Set\((?P<body>\[[^\]]*\])\);",
-    re.MULTILINE)
 
 
 def drop_from_py_set(text: str, machine: str) -> str:
@@ -167,22 +161,14 @@ def drop_from_py_set(text: str, machine: str) -> str:
     return text[:match.start("body")] + new + text[match.end("body"):]
 
 
-def drop_from_js_set(text: str, machine: str) -> str:
-    match = one(JS_SET, text, "QD_PROVISIONAL_MACHINES")
-    letters = sorted(set(re.findall(r"'([A-Z])'", match.group("body"))) - {machine})
-    new = "[" + ", ".join(f"'{l}'" for l in letters) + "]"
-    return text[:match.start("body")] + new + text[match.end("body"):]
-
-
 def replace_py_table(text: str, machine: str, block: str) -> str:
     """Replaces the assignment AND the comment block directly above it.
 
-    Same anchor shape as the JS side, and for the same two reasons. The comment
-    is the sentence saying the epoch is unmeasured, sitting immediately above
-    the numbers that now say otherwise. And an anchor that starts *below* the
-    comment is not idempotent: each run inserts a fresh provenance block above
-    the previous one, so a re-run after a crash leaves a stack of contradictory
-    headers rather than a no-op.
+    Two reasons. The comment is the sentence saying the epoch is unmeasured,
+    sitting immediately above the numbers that now say otherwise. And an anchor
+    that starts *below* the comment is not idempotent: each run inserts a fresh
+    provenance block above the previous one, so a re-run after a crash leaves a
+    stack of contradictory headers rather than a no-op.
     """
     for match in PY_TABLE.finditer(text):
         if match.group("m") == machine:
@@ -190,35 +176,17 @@ def replace_py_table(text: str, machine: str, block: str) -> str:
     raise AnchorError(f"no MEASURED_NOISE_FLOOR_BY_MACHINE[\"{machine}\"] assignment")
 
 
-def replace_js_table(text: str, machine: str, block: str) -> str:
-    """Replaces the entry AND the comment block directly above it.
-
-    The comment is part of the anchor on purpose. It is the sentence that says
-    the epoch is unmeasured, it sits immediately above the numbers, and leaving
-    it in place beside a measured table is the failure this whole tool exists to
-    avoid repeating by hand.
-    """
-    for match in JS_TABLE.finditer(text):
-        if match.group("m") == machine:
-            return text[:match.start()] + block + text[match.end():]
-    raise AnchorError(f"no ['{machine}', new Map([...])] entry in {LANE.name}")
-
-
-def render(verdict: Mapping[str, Any], machine: str) -> tuple[str, str]:
+def render(verdict: Mapping[str, Any], machine: str) -> str:
     table = verdict["routes"]
-    py = provenance(verdict, machine, "#") + "\n" + MNF.render_python(machine, table)
-    js = provenance(verdict, machine, "  //") + "\n" + MNF.render_js(machine, table)
-    return py, js
+    return provenance(verdict, machine, "#") + "\n" + MNF.render_python(machine, table)
 
 
 def rewrite(verdict: Mapping[str, Any], machine: str) -> dict[Path, str]:
     """New text for each file. Raises AnchorError before writing anything."""
-    py_block, js_block = render(verdict, machine)
+    py_block = render(verdict, machine)
     stats = STATS.read_text(encoding="utf-8")
-    lane = LANE.read_text(encoding="utf-8")
     return {
         STATS: drop_from_py_set(replace_py_table(stats, machine, py_block), machine),
-        LANE: drop_from_js_set(replace_js_table(lane, machine, js_block), machine),
     }
 
 
@@ -239,7 +207,7 @@ def stale_prose(machine: str) -> list[str]:
     """
     named = re.compile(rf"\b{machine}\b|`{machine}`|'{machine}'|\"{machine}\"")
     out = []
-    for path in (STATS, LANE):
+    for path in (STATS,):
         for start, block in comment_blocks(path.read_text(encoding="utf-8")):
             text = "\n".join(block)
             # The bare word, not the substring: `deprovisionalize_epoch.py` and
@@ -300,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         planned = rewrite(verdict, machine)
     except AnchorError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
-        print("both files are left untouched; the source moved and the anchors "
+        print("the file is left untouched; the source moved and the anchors "
               "need updating before this can be trusted to edit it", file=sys.stderr)
         return 3
 

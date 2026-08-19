@@ -7,104 +7,6 @@ directions. Used for the baseline (PHASE=baseline) and after improving rounds (P
 `WORKSPACE` (canonical current-best), `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, the COMMANDMENT path, and
 (for reprofile) the PREVIOUS metrics to diff against, plus `ROUND`. Optionally `INCREMENTAL_RESUME`.
 
-## PHASE=selected_cell_sol
-
-This QD-only phase runs **after** the archive has selected `SELECTED_CELL`, `CONTEXT_ID`, and
-`PARENT_ELITE_ID`. It must never compare/rank archive parents or suggest a different cell. First run
-`python3 "$QD_EVIDENCE_HELPER" hash-tree "$WORKSPACE"`; require exact equality with `EXPECTED_SOURCE_HASH`,
-otherwise fail closed rather than profiling another source tree.
-
-Use the selected context's verified `PARENT_PER_CASE` latency and versioned `QD_SOL_CALIBRATION` to build
-one small card. For GEMM use `FLOPs=2MNK` and the task's minimum compulsory input/output bytes; account for
-fused tensors only when the task contract requires them. `FLOPS`, `BYTES_MIN`, and `FOOTPRINT_BYTES`
-are yours to compute from the shape before the call -- they are not orchestrator inputs, and an unset
-one expands to an empty string and fails the call rather than defaulting. Run the deterministic helper
-after selection:
-
-```bash
-python3 "$QD_EVIDENCE_HELPER" sol-card --flops "$FLOPS" --bytes "$BYTES_MIN" \
-  --elapsed-ms "$MEASURED_MS" --dtype "$QD_DTYPE" --arch "$QD_ARCH" \
-  --footprint-bytes "$FOOTPRINT_BYTES" \
-  ${QD_SOL_CALIBRATION:+--calibration "$QD_SOL_CALIBRATION"}
-```
-
-Use its `compute_floor_s`, `memory_floor_s`, `sol_s`, `sol_gap=elapsed_s/sol_s`, and
-`remaining_headroom=1-1/sol_gap`; do not recompute or rename `sol_gap` as a headroom fraction.
-
-`--footprint-bytes` is the **distinct working set** the shape touches, which is not in general
-`--bytes`: `--bytes` is traffic and may count a tensor twice, the footprint counts it once. They
-coincide for a single streaming pass, which is why omitting the flag falls back to `--bytes`; pass it
-explicitly whenever they differ. It matters because on gfx942 the measured bandwidth ceiling moves
-**2.8x** across the footprints of a single suite (1.42 TB/s at 32 MB to 3.94 at 1024 MB), so the wrong
-footprint does not shade the answer, it changes which regime the route is in.
-
-**Copy the ceiling provenance into each case verbatim (finding (70)).** Every case you return must
-carry a `ceiling` block built from the helper's own output for that case's footprint, transcribed and
-not retyped from memory:
-
-```json
-"ceiling": {"basis": "<bandwidth_ceiling_basis>", "confidence": "<bandwidth_ceiling_confidence>",
-            "extrapolated": <bandwidth_ceiling_extrapolated>, "footprint_bytes": <footprint_bytes>,
-            "bracket": <bandwidth_ceiling_bracket>}
-```
-
-`sol_ms` alone cannot be checked by anything downstream: `sol_gap = measured/sol_ms` and
-`remaining_headroom = 1 - 1/sol_gap` hold by construction whatever number you divided by, so a
-fabricated or clamped ceiling produces a perfectly self-consistent card. The `ceiling` block is what
-makes the denominator checkable. The orchestrator **drops any case whose memory floor is the binding
-one while its ceiling reads `low` or `unmeasured`** — clamped below the measured range the ceiling
-overstates the achievable rate, so such a card claims headroom that is not there. Do not paper over
-that by relabelling the confidence or by moving the case to `compute_bound`; the remedy is to measure
-the footprint, and a dropped case is a named refusal, which is worth more than an invented number.
-
-**Copy the compute-ceiling witness the same way, per case (finding (89)).** The helper emits three
-more fields about the *compute* peak it divided by, and they are transcribed, never reasoned about:
-
-```json
-"compute_ceiling": {"witnessed": <compute_ceiling_witnessed>,
-                    "attainment": <compute_ceiling_attainment>,
-                    "witness": "<compute_ceiling_witness>"}
-```
-
-Provenance is not attainability. A vendor nameplate peak has perfect provenance — it is on the
-datasheet and `rocminfo` will read it off the card for you — and is still unreachable by the vendor's
-own library, so a gap measured against it says the same "you have 4x left" about every route in the
-suite and about rocBLAS, which ranks nothing. `witnessed` is true only when something was actually
-observed to reach the rate and is named in `witness`. **The orchestrator drops any case whose compute
-floor is the binding one while `witnessed` is false** — that is exactly the case whose headroom number
-means nothing. Do not fix it by relabelling the roof or by inventing a witness; a case dropped for a
-named reason is worth more than a gap computed against a number nothing has reached. Cases whose
-memory floor binds are unaffected, so an arch with no witness still profiles normally everywhere else.
-
-Read `bandwidth_ceiling_confidence` off the card rather than deciding confidence yourself.
-`measured_interpolated` is a measured ceiling between two measured points. `measured_scalar` is a
-calibrated effective peak. `unmeasured` is a physical reference peak and is low confidence. When
-`bandwidth_ceiling_extrapolated` is true the footprint fell outside the measured range and the value
-was **clamped**; below the low end that clamp *overstates* the achievable rate, so a small decode shape
-will look like it has headroom it does not have -- treat that card as a prompt to measure the
-footprint, never as a target.
-For tiny/decode work whose roof floors are far below launch/fill time, preserve the numerical floors but
-set `profile_regime:"latency_parallelism"`; do not call it MFMA/HBM saturation. Reuse a matching
-`source_hash+context+calibration_version` receipt when present. Otherwise collect only enough targeted
-evidence to distinguish MFMA/VALU underuse, HBM/VMEM, LDS, VGPR/AGPR/scratch, occupancy/CTA supply, or
-`unknown`; do not run a whole-archive profile sweep.
-
-**A busy-cycle MFMA utilization cannot see the instruction mix.** `SQ_VALU_MFMA_BUSY_CYCLES` counts
-cycles the MFMA pipe was occupied, and on gfx942 bf16 that pipe retires a fixed 512 FLOPs per busy
-cycle regardless of fragment shape — half as many large instructions each take twice as long. Two
-builds differing only in MFMA shape were measured with **bit-identical** busy cycles while one ran 15%
-slower. So a high MFMA-busy fraction says the pipe is fed; it says nothing about whether the right
-instruction was chosen, and a shape change is invisible to this counter by construction. If the
-question is which opcode is executing, disassemble; if the question is instruction-level parallelism,
-count independent accumulator chains, not busy cycles. Never report a busy-cycle ratio as evidence that
-the instruction mix is optimal.
-
-Return the `CellSOLCard` fields requested by the orchestrator: selected cell/context, exact parent ID/hash,
-calibration version, and per-case measured/floor/gap/roof/regime/confidence/`ceiling`/`compute_ceiling`/evidence. SOL is diagnosis for
-mutation planning, not QD fitness or selection.
-
-For `PHASE=selected_cell_sol`, stop here and do not use the baseline/reprofile return schema below.
-
 ## PHASE=isa_attribution
 
 The lane escalated to machine-code evidence because the search stopped moving. You are answering ONE
@@ -224,7 +126,7 @@ assumed MI300X.
    BEFORE→AFTER shift section explaining why the bottleneck moved and what to target next.
 
 6. **Do not publish a speed-of-light number from this branch (finding (89)).** This phase has no
-   ceiling: it does not call `qd_sol_card.py`, nothing checks where its peak came from, and nothing
+   ceiling: it does not call `sol_card.py`, nothing checks where its peak came from, and nothing
    downstream can tell a measured ceiling from a nameplate one once it is a bare number in a
    roadmap. A hand-rolled roofline from `rocminfo`/datasheet peak reads ~2x more headroom than the
    real one, and the inflated figure is the one the Director and every Engineer plans against,
@@ -239,9 +141,8 @@ assumed MI300X.
      removal is on your honour.
    - You may still say a route looks compute- or memory-bound, and you should: that is a
      *classification* from the counters you measured, and it is what this phase is for. What you
-     may not do is attach a ratio to it. If a headroom ratio is genuinely needed, the
-     `PHASE=selected_cell_sol` branch above exists to produce one, from a card whose ceiling has
-     provenance.
+     may not do is attach a ratio to it. A headroom ratio needs a ceiling with provenance, and this
+     phase has none to offer.
    - The one exception the counters license: a *sanity* check against peak, as step 4 already says
      — "efficiency > 100% means the peak is mis-calibrated". Report that as a defect in words, not
      as a `peak_pct` field.

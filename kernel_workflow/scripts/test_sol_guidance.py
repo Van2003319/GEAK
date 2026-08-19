@@ -24,9 +24,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sol_guidance as sg
-from qd_sol_card import SOLCardError
+from sol_card import SOLCardError
 
-# The lane's measured gfx942 table, as qd_sol_card records it.
+# The lane's measured gfx942 table, as sol_card records it.
 TABLE = {32 << 20: 1.42e12, 64 << 20: 2.11e12, 86 << 20: 2.30e12,
          128 << 20: 2.68e12, 256 << 20: 2.92e12, 1024 << 20: 3.94e12}
 PEAK_BF16 = 668e12

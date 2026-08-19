@@ -49,7 +49,7 @@ cannot kill, and the sweep's own numbers do not say so (54).
 
 Usage:
   python3 kernel_workflow/scripts/mutate_python.py                # every module
-  python3 kernel_workflow/scripts/mutate_python.py qd_robust_stats
+  python3 kernel_workflow/scripts/mutate_python.py noise_floor_stats
   python3 kernel_workflow/scripts/mutate_python.py --limit 40     # cap per module
 """
 from __future__ import annotations
@@ -67,17 +67,12 @@ SCRATCH = Path("/tmp/pymut")
 MIRROR = SCRATCH / "kernel_workflow"
 
 # Modules worth mutating: the ones carrying decision logic a wrong answer would
-# propagate into the archive. Excluded on purpose: `run_js_tests.py` and
-# `audit_pin_coverage.py` (tooling that reports rather than decides), and
-# `qd_persist_manifest.py`'s filesystem effects, which a mutation sweep cannot
-# distinguish from an environment failure.
+# propagate into a measurement. Excluded on purpose: `run_js_tests.py` and
+# `audit_pin_coverage.py`, tooling that reports rather than decides.
 MODULES = [
-    "qd_robust_stats",
-    "qd_route_priority",
-    "qd_sol_card",
-    "qd_source_hash",
-    "qd_descriptor_v2",
-    "qd_v2",
+    "noise_floor_stats",
+    "sol_card",
+    "source_hash",
     "hip_twin_sync",
     "candidate_policy_scan",
 ]
@@ -249,7 +244,7 @@ def null_mutant_failures(src_path, original: str, baseline: set[str]) -> set[str
     and the sweep credits the kill to whatever the mutation happened to be.
 
     This is not hypothetical and it was not caught by the sweep's own numbers.
-    `test_qd_lane_parity.py` scans qd_route_priority.py for the literal
+    A lane-parity guard scans a helper for the literal
     `verdict = "needs_fresh_elapsed"`; `ast.unparse` emits single quotes. Every
     one of that module's 96 mutants was scored killed, and 20 of them had no
     behavioural test anywhere -- reported as "killed elsewhere", which reads as
@@ -316,7 +311,7 @@ def sweep(module: str, limit: int | None,
 
         # Second pass, and the reason the first pass's number must never be
         # reported on its own. `test_<module>.py` is not the only test that can
-        # object: `test_qd_lane_parity.py` cross-checks several of these tables
+        # object: the lane-parity guards cross-check several of these tables
         # against `kernel_lane.js`, and the JS runner checks others. A mutant
         # killed there is defended -- just not by the file named after the
         # module. Reporting the first-pass survivors as findings would
@@ -368,7 +363,7 @@ USAGE = """mutate_python.py -- mutation sweep over the Python helpers.
   mutate_python.py                     every module in MODULES (a LONG sweep:
                                        it runs each module's test file once per
                                        mutant, hundreds of pytest invocations)
-  mutate_python.py qd_robust_stats     one module
+  mutate_python.py noise_floor_stats     one module
   mutate_python.py --limit 40          cap mutants per module
 
 This is not a test and its score is not gated; see the module docstring.

@@ -26,7 +26,7 @@ PRIMARY = textwrap.dedent("""\
     constexpr int kLdsStride = 68;
 
     __global__ void k(int m, float* c) {
-    #if defined(QD_MFMA_ARCH)
+    #if defined(GEAK_MFMA_ARCH)
         const int tid = threadIdx.x;
         c[tid] = m;
     #else
@@ -47,7 +47,7 @@ TWIN = textwrap.dedent("""\
     constexpr int kLdsStride = 68;
 
     __global__ void k(int m, float* c) {
-    #if defined(QD_MFMA_ARCH)
+    #if defined(GEAK_MFMA_ARCH)
         const int tid = threadIdx.x;
         c[tid] = m;
     #else
@@ -107,7 +107,7 @@ def test_edit_to_twin_only_is_drift(tmp_path):
 def test_arch_guard_divergence_is_drift(tmp_path):
     """(85)'s repair must land in both files or it does not land at all."""
     p, t = write_pair(tmp_path, "e", PRIMARY,
-                      TWIN.replace("defined(QD_MFMA_ARCH)", "defined(__gfx90a__)"))
+                      TWIN.replace("defined(GEAK_MFMA_ARCH)", "defined(__gfx90a__)"))
     ok, detail = hts.check_pair(p, t)
     assert not ok, detail
 

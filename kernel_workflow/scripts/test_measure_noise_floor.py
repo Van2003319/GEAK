@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import measure_noise_floor as M  # noqa: E402
-import qd_robust_stats as QRS  # noqa: E402
+import noise_floor_stats as QRS  # noqa: E402
 
 
 def rows(speedups: dict[str, float]) -> list[dict[str, object]]:
@@ -186,17 +186,12 @@ class RenderTest(unittest.TestCase):
         clamped_line = [l for l in text.splitlines() if "prefill_m256_down" in l][0]
         self.assertIn("clamped", clamped_line)
 
-    def test_js_render_carries_the_same_numbers(self):
-        text = M.render_js("Q", self.TABLE)
-        self.assertIn("['Q', new Map([", text)
-        self.assertIn("['decode_m2_square', 0.0721]", text)
-
-    def test_both_engines_are_emitted_together(self):
-        # (58): the table lives in two files and a table in one of them is a
-        # table that will drift. The CLI must print both fragments.
+    def test_the_table_and_the_flag_are_emitted_together(self):
+        # Printing the table is half the edit. A measured table under a letter
+        # still listed in PROVISIONAL_MACHINES reports every route it just
+        # measured as unmeasured, so the CLI must name both.
         out = self._cli()
-        self.assertIn("qd_robust_stats.py", out)
-        self.assertIn("kernel_lane.js", out)
+        self.assertIn("noise_floor_stats.py", out)
         self.assertIn("PROVISIONAL_MACHINES", out)
 
     def _cli(self) -> str:

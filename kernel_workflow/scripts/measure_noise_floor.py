@@ -27,12 +27,11 @@ What it does, in order:
 3. Run the full 11-case suite `--repeats` times, each in a FRESH process, so
    every repeat pays its own priming cost exactly as a real measurement does.
 4. Per route, floor = 2*MAD(speedup) / median(speedup) -- the same statistic
-   `qd_robust_stats.robust_stats` applies, expressed as a fraction of the
+   `noise_floor_stats.robust_stats` applies, expressed as a fraction of the
    median so it is dimensionless and survives the epoch it was measured in.
-5. Emit the table three ways: JSON for machines, a Python dict literal for
-   `qd_robust_stats.py`, and a JS Map fragment for `kernel_lane.js`. Both files
-   carry the table and both must be edited; emitting only one of them is how a
-   table drifts between the two engines that read it.
+5. Emit the table two ways: JSON for machines, and a Python dict literal for
+   `noise_floor_stats.py` -- the same numbers, in the shape of the diff they
+   are about to become.
 
 It fails closed everywhere it can:
 
@@ -50,10 +49,10 @@ and it is never a true statement about a GPU; clamping is the direction that
 can only refuse admissions, never grant one, and the clamp is recorded per
 route rather than hidden.
 
-Writing the table into the two engines is deliberately NOT automated. Replacing
-a floor table is the step that decides what the archive will accept for the
-rest of the epoch; it gets a human-legible diff, and `Q` comes out of
-`PROVISIONAL_MACHINES` / `QD_PROVISIONAL_MACHINES` in the same edit.
+Writing the table into `noise_floor_stats.py` is deliberately NOT automated.
+Replacing a floor table is the step that decides what the archive will accept
+for the rest of the epoch; it gets a human-legible diff, and `Q` comes out of
+`PROVISIONAL_MACHINES` in the same edit.
 """
 
 from __future__ import annotations
@@ -69,8 +68,8 @@ from typing import Any, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import qd_robust_stats as QRS  # noqa: E402
-import qd_source_hash as QSH  # noqa: E402
+import noise_floor_stats as QRS  # noqa: E402
+import source_hash as QSH  # noqa: E402
 
 # Eight is the standing figure for a floor sweep: enough that the MAD is not
 # itself dominated by the sample count, few enough to fit in one lock window.
@@ -202,12 +201,6 @@ def render_python(machine: str, table: Mapping[str, Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def render_js(machine: str, table: Mapping[str, Mapping[str, Any]]) -> str:
-    body = ",\n".join(f"    ['{route}', {stats['floor']:.4f}]"
-                      for route, stats in table.items())
-    return (f"  ['{machine}', new Map([\n{body}\n  ])],")
-
-
 def attribution_problems(verdict: Mapping[str, Any], machine: str) -> list[str]:
     """Reasons this verdict does not describe `machine`'s box.
 
@@ -323,15 +316,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"# epoch {args.machine}, source_hash {verdict['source_hash']}, "
           f"{verdict['repeats_complete']} complete repeats")
     print()
-    print("# --- qd_robust_stats.py ---")
+    print("# --- noise_floor_stats.py ---")
     print(render_python(args.machine, verdict["routes"]))
     print()
-    print("# --- kernel_lane.js (QD_MEASURED_NOISE_FLOOR_BY_MACHINE) ---")
-    print(render_js(args.machine, verdict["routes"]))
-    print()
-    print(f"# then remove \"{args.machine}\" from PROVISIONAL_MACHINES and "
-          f"QD_PROVISIONAL_MACHINES -- a measured table that still reads as "
-          f"provisional is the same lie in the other direction")
+    print(f"# then remove \"{args.machine}\" from PROVISIONAL_MACHINES -- a "
+          f"measured table that still reads as provisional is the same lie in "
+          f"the other direction")
     return 0
 
 
