@@ -914,3 +914,87 @@ insight 里那些 MFMA/rocprofv3/ISA 工具链的教训是跨机有效的，底�
 > 而前者的修法 insight 里已经写好了（强制 ladder id 7 / 256x128，中位数 .1792 vs .1839）。
 
 如果预测应验，那就是"箱子事实以散文形式跨机中继"的一次可计价损失，届时回来记账。
+
+---
+
+## wave 2 / round 1（`last_round` 3→**1** 是重编号，不是倒退）
+
+先澄清一个会咬人的地方：**`STATE.json.last_round` 是 wave-local 的**。新一波把它重置成 1，
+`cumulative` 仍是 1.0916、`wave_local_cumulative` 回到 1.0。所以这条 lane 现在有**两个 "round 1"**
+（冷启动那个 0.6114，和这个）。本文件此后一律写 **wave2_r1** 这种前缀。
+我那条"HEAD 不动就不下结论"的规则照旧有效，但**不能再拿 `last_round` 变大当触发条件**——
+这次它是变小的。
+
+**canonical 没动**（仍 `bc1e462`），`cumulative` 仍 **1.0916**。这一轮又是**零提交**。
+
+| direction | specialty | actual | verdict |
+|---|---|---|---|
+| wave2_r1_d0 | host_runtime | 1.1490 | partial（**无 kernel 改动**） |
+| wave2_r1_d1 | memory | **1.1581** | partial（按分是本轮第一） |
+| wave2_r1_d2 | algorithm | 0 | dead_end（apply_failed，无补丁） |
+| wave2_r1_integrate | integration | 1.1420 | no_improvement |
+
+### 我上一条预测的结算：方向对，数目错了一条
+
+我在这一轮开跑**之前**（commit `8908d954`）写下：修 `prefill_m256_down` 是白花预算，
+因为它在 Z 上 7.02% 的底噪里既不能否决也不能显示收益；还在否决的应该是
+`prefill_m512_up` 和 `decode_m2_square`。
+
+- **"白花预算"部分：应验，而且是整整一个 direction。** `wave2_r1_d0` 的标题就是
+  "Repair the two prefill band-gate refusals"，结果它自己的 lesson 写着
+  "Both declared target routes are **nulls** (m512_up -3.3%, m256_down -1.6%,
+  both inside their own spreads)"，并且"its whole functional delta vs the seeded
+  parent is a **29-line comment**"——一整个方向没产出任何 kernel 改动。
+  它独立重新发现了我已经写在盘上的那件事："the box is epoch Z / tw035 and the
+  refusing bands were epoch Y / tw053 ... m256_down's real floor is **5-17x** the clamp
+  that refused it"。（注意：agent 读不到本文件，这不是它们的失误；
+  这正是"箱子事实以散文跨机中继"要付的价，现在有了标价。）
+- **"还在否决哪几条"部分：我多报了一条。** 重测下来三条否决路读作
+  m2 **1.1082**、m256_down **1.0451**、m512_up **0.9773**——
+  **只有 `prefill_m512_up` 真的在种子之下**。m256_down 掉出否决集是我料中的，
+  `decode_m2_square` 我以为会留下，它没有。**实际否决路是一条，不是两条。**
+
+### d0 的真正产出：`prefill_m256_down` 的双模在**oracle 那一侧**
+
+这比"这条路很吵"深一层。d0 测到 baseline 臂一小时内从 **.1303 漂到 .1417**，
+而 candidate 臂是平的。**双模在不可变 oracle 的计时里，不在候选里。**
+推论 d0 自己写了：suite geomean **携带一个会话模态**，
+因此 **任何低于 2% 的跨会话结论都不可采信**。
+
+配套还有一条更刺眼的（来自 d1）：**在一条"执行码逐字节相同"的路上，
+观察到 3/3 的 interleaved 配对 2% 胜出**——纯粹是 link layout。
+"profile before believing a paired win"。这两条合起来，
+把本 lane 所有 <2% 的结论都降级了。
+
+### d1 是"按分第一、按机制为空"
+
+d1 拿了 1.1581，但它改的那 23 行 reduce 宽度守卫**在任何被计分的路上都不会被执行**：
+rocprofv3 证明 `decode_m2_square` 走 `gemv_bf16_kernel<2,1>`，
+`dense_bf16_gemm.hip:220` 在 m<=2 时就 `launch_gemv<2>` 了，根本到不了 `splitk_reduce_kernel`。
+所以 m2 的 -1.3% **不是 reduce 缺陷、也无法从 reduce 内部修**——该方向关闭。
+1.1581 归功于被播种进来的 round-3 本体（重新键控的 (m,n,k) slice 表），不是这个守卫。
+
+**这是"winner-selection gap"的一个新变体**：按分选出来的赢家，其机制归因为空。
+分数是真的（对 in-session control 1.0935 是 +5.2%），只是**功劳记错了对象**。
+
+### 这条 lane 现在的真正僵局：一条路卡住 +4.6%
+
+被拒的 round-3 本体现在已经**跨会话、跨纪元被独立重测三次**：1.1420 / 1.1490 / 1.1581，
+对在册 1.0916 稳定在 **+4.6% ~ +5.2%**，**八条路在 parity 或以上**。
+它一直不入账，卡在 **`prefill_m512_up` 0.9773（-2.27%）** 这一条上。
+按纪元 Z 的 floor 1.26% 算是 **-1.8 floors**，**照样否决**。
+
+而 round 3 insight 里记的那个唯一已知修法**已被 d0 证伪**：
+"'force id 7 on m512_up' **is already what macro_select returns**，
+ids 1/4 是 +29%/+56%"——tile 轴上最后一个具名例外关闭。
+**于是 m512_up 目前没有任何已知修法，而它是 +4.6% 的唯一阻塞点。**
+
+`suggest_next` 的 (a) 计划是"按 epoch-Z 的 floor 重新导出 band 后原样重投"。
+**按上面的算术，原样重投会再被否一次**（-2.27% vs 1.26% floor）。
+这一点我先写下来，下一轮回来对账。
+
+新补丁在盘上：`STATE_DIR/wave2_round1_integrated_patch.diff`，
+`git apply --check` 对 `bc1e462` 干净。**工作依然没丢。**
+
+已关闭且不得重开（五条，均带 receipt）：tile-chooser、slice-count、
+LDS bank-conflict、stage-depth、register-prefetch。
