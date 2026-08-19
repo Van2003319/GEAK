@@ -730,3 +730,83 @@ mtime 停在 15:53，而 canonical git 里 `aa71ba0` 已经落地。
 与 canonical git 和我的逐路复算完全一致。所以它**不是错的，只是慢**——本轮实测滞后约
 40 分钟（git 提交 ~17:05，STATE 刷新 17:44）。结论不变：mid-wave 要判断轮次是否落地，
 看 canonical git log；`STATE.json` 事后会对上，但不能用来判断"现在到哪了"。
+
+---
+
+## 2026-08-19 19:1x — 换机重启：tw053(Y) → **tw035(Z)**，以及 round 3 的结局（refused，1.15）
+
+环境从快照恢复到新机器，之前的 wave 进程全部断掉。识别依据不是"看起来没动"：
+全盘文件的 mtime 纳秒位统一变成 `.000000000`（快照回填的痕迹），
+且 `pgrep task_runner|hipcc|gpu_fence_run` 为空。**agent transcript 的 mtime 是 19:09，
+但那是恢复过程重写文件，不是 agent 在跑**——这正是我上一次误判 stall 的镜像错误，
+这次两个证据都取到了才下结论。
+
+### 纪元 Z 已注册（用脚本，没有手改）
+
+```
+check_measurement_frame.py  -> EXIT 4
+  hostname tw035 / resolves to epoch N / CURRENT_MACHINE Y -> tw053
+```
+`tw035` **历史上带过纪元 N**（`exp/opt_bf16_20260814/noisefloor_tw035_20260816/`）。
+沿用 N 就是 finding 126，所以取下一个未使用字母。已用：N,O,P,Q,R,S,T,U,V,W,X,Y —— 取 **Z**。
+
+```
+register_epoch.py --letter Z --host tw035 --note '...new letter per (126)'
+  -> epoch Z registered for tw035, PROVISIONAL, 11 routes at DEFAULT 0.072
+check_measurement_frame.py  -> EXIT 3
+```
+先跑 `--dry-run` 看了四处改动的 diff 再落盘。**没有手改 `noise_floor_stats.py`**（§13.18 那次静默 no-op）。
+tw035 八张卡全空（busy 0% / vram 283MB，按 gpu_lock 自己的 sysfs 判据查的，不是 rocm-smi），
+所以底噪 sweep 用 **单卡 2**、整个 8 次重复包在一次 `gpu_lock.sh` 调用里，正在跑。
+
+### round 3 结算：三个方向都验过，integrate 到 **1.15**，然后被**拒绝**
+
+wave 在断电前把 round 3 跑完并写进了 STATE（`last_round 3`，ledger 11 条）：
+
+| 方向 | claimed | actual | verdict |
+|---|---|---|---|
+| r3_d0 | 1.0892 | 1.0897 | dead_end |
+| r3_d1 | 1.1409 | **1.1399** | confirmed |
+| r3_d2 | 1.1025 | 1.1001 | partial |
+| r3_integrate | — | **1.15** | partial（**refused**） |
+
+`cumulative` 仍是 **1.0916**，canonical 仍是 `aa71ba0`。1.15 比在册的 1.0916 高 **+5.35%**，
+8 条路改善，被三条回退路线否决：
+
+```
+prefill_m256_down  -2.79%  floor 0.20%  (-13.9 floors)  floor_clamped=TRUE
+prefill_m512_up    -2.76%  floor 0.46%  ( -6.0 floors)
+decode_m2_square   -1.26%  floor 0.69%  ( -1.8 floors)
+```
+
+**补丁被保留下来了**，58732 字节，落在 lane 自己的 state 目录、不在会被清掉的 round 目录：
+`exp/state_coldstart_newgate_20260819/round3_refused_integrated_patch.diff`，
+`applies_to: CANONICAL @ git aa71ba0`。`suggest_next` 明确写着"不要开新方向，
+把这个补丁按三条路的修法重投"。这一点做得对：**拒绝没有丢掉工作**。
+
+### 这是同一主题的第三次，但**机制不同，别混为一谈**
+
+前面两条记的是 `route_gate` 的 band（由 `baseline_per_case[].samples_ms` 的 n=5 极差导出）。
+这里否决 1.15 的是**另一套东西**：`noise_floor_stats.MEASURED_NOISE_FLOOR`，
+按纪元存的 per-route 底噪（`2*MAD/median`）。两张表、两套代码路径，
+只是碰巧都在"用一个噪声模型逐路判决"这件事上。**不要把它们的数字互相引用。**
+
+值得记的是这次否决**自带自我怀疑**：`prefill_m256_down` 那条的 note 写着
+"bimodal in four independent sessions; the 0.20% floor is a MIN_FLOOR clamp from one
+quiet session, **not a property of the route**"。也就是说机器一边说"这个 floor 不可信"，
+一边用它把 -2.79% 判成 13.9 个 floor 的回退并否决整个候选。
+`suggest_next` 给的处置是对的——"escalate the MIN_FLOOR clamp on that route rather than
+fitting the kernel to a 0.20% band"，即修表，不要为了迁就一个 0.20% 的假 band 去改 kernel。
+
+### 一个必须写下来的反向论证：**provisional 不只是"不敏感"，它会放行回退**
+
+纪元 Z 现在整表 DEFAULT `0.072`（7.2%）。把三条否决路线放进去：
+-2.79% / -2.76% / -1.26% **全部落在 7.2% 以内**，一条都不越界。
+也就是说，**如果现在带着 provisional 表直接开跑，这个 1.15 会被判 ACCEPT 并提交**，
+而它在测量过的 Y 表下是被否决的。
+
+平时说 provisional 的坏处是"胜利幅度读不出来"（本 lane 的 launch 文件也是这么写的），
+方向是偏保守。**这里方向是反的**：粗底噪同样看不见回退，于是把一个含三条回退的候选放行。
+所以"exit 3 技术上能跑"在本 lane 当前这个具体状态下尤其不能用——
+下一件要判的事恰好就是这个候选。**先把 Z 测出来再开波。**
+
