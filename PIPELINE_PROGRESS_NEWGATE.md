@@ -652,3 +652,76 @@ winner 的 `target_routes` 是空的，命中 L2428 那个分支。它**不拒�
 are indistinguishable here."。这个处理是正确的——一个 61% 的真实收益不该因为缺一个标签
 被丢掉，但也不该被记成"机制兑现"。读本轮结果时请照此理解：**这 8 条路的改善是实测的，
 但没有任何被声明的机制可以被判定为兑现**。
+
+---
+
+## 2026-08-19 17:1x — round 2 结算：提交的是 **integrated 1.0916**，跨过 rocBLAS 平价
+
+再更正一次。round 2 的 winner 既不是 0.924 也不是 0.9879，而是 **integrator 的 1.0916**——
+integrate 步骤把 `r2_d0`（macro-tile）和 `r2_d1`（staged 16x16 bodies）叠起来，
+再手工调了两个常数，四次组合的记录都在 journal 里：
+
+```
+r2_d0 + r2_d1                                   incremental  1.0528
+  + kMacroMinM 32->64                           hand_merge   1.0832
+  + r2_d2 kSliceFits 全 3 条                    hand_merge   1.0741  <- 退步
+  + kMacroMinM=64, kSliceFits 只保留 2 条       hand_merge   1.0916  FINAL
+```
+
+integrator 的取舍值得记：`r2_d2` 整体 **REFUTED**——它的 `{256,4096,3}` 条目是在
+没有 macro route 的树上测的，搬到这棵树上让 prefill_m128_square 从 0.0479 退到 0.0553 ms，
+所以只保留了在本树上重新测出是赢的那两条。这是"父树变了，调优表就不再有效"的
+一个干净例子，不是猜的，是重测出来的。
+
+逐路复算（10/11 越过 band，零回归，`decode_m2_square` +0.47% 持平）：
+
+```
+ACCEPT -- prefill_m1024_down +66.97% (band 0.89%), prefill_m2048_square +64.57% (0.27%),
+  prefill_m512_up +63.06% (1.29%), prefill_m256_down +55.06% (14.86%),
+  decode_m32_down +41.21% (3.05%), decode_m96_up +36.54% (3.16%),
+  prefill_m128_square +35.78% (4.53%), decode_m8_up +31.39% (0.54%),
+  decode_m64_square +29.21% (0.48%), decode_m16_square +25.33% (1.29%)
+```
+
+`git apply` 一次成功，无 --3way 无手工合并。canonical:
+`aa71ba0 round 2 winner: integrated (1.09x)` on `8d9bee7`。
+
+### 新发现：**integrated winner 永远没有同场控制臂**
+
+`kernel_lane.js:2372-2373`：
+```js
+const sameSession = !!winner.control_per_case;
+const incumbentSide = sameSession ? winner.control_per_case : bestPerCase;
+```
+而 L2345-2352 把 integrate 结果推进 candidates 时，构造的对象只有
+`source/id/title/specialty/geomean/geomean_unweighted/weighted/arithmetic/per_case/patch`——
+**没有 `control_per_case`，也没有 `target_routes`**。所以只要 winner 是 integrated：
+
+1. `sameSession` 恒为 false，闸门拿 **round 1 存下来的 `bestPerCase`** 当 incumbent，
+   跨轮、跨会话比较——正是同场控制臂被引入来消除的那种比较；
+2. `target_routes` 恒为空，必然触发 L2428 那条 "no declared target_routes" NOTE。
+
+本轮**无害**：margin 是 25%~67%，比任何一张 band 表宽一个量级，
+换成同场控制臂（0.9879 那个候选的 control 臂数字几乎一样）结论不变。
+但这是**按构造成立**的，不是偶发：每一个 integrated winner 都会走跨轮比较那条路。
+等哪天 integrated 的优势掉到个位数百分比，这个洞就会决定判决。
+和上一条的 winner-selection 洞一样：**记录，不修**，判据及其取用方式是本 lane 的被测对象。
+
+### 操作提醒：mid-wave 时 `STATE.json` 不是权威
+
+`STATE.json` 此刻仍写着 `cumulative 0.6114 / canonical 8d9bee7 / last_round 1`，
+mtime 停在 15:53，而 canonical git 里 `aa71ba0` 已经落地。
+**轮次落地与否要看 canonical workspace 的 git log**（以及 journal 里那条
+`{"committed": true, "head_sha_before": "8d9bee7...", "head_sha_after": "aa71ba0..."}`），
+`STATE.json` 是滞后刷新的。我上一轮就是因为信了 `last_round` 才把话说早。
+
+### 本 lane 当前状态
+
+| 项 | 值 |
+|---|---|
+| cumulative（实际） | **1.0916** — 首次越过 rocBLAS 平价 |
+| canonical | `aa71ba0 round 2 winner: integrated (1.09x)` |
+| 起点 | seed 0.336 → r1 0.6114 → r2 1.0916 |
+| 已提交轮次 | 2 / budget 12 |
+| 闸门判决 | r1 ACCEPT、r2 ACCEPT，均零回归；一次预演性 REFUSE（0.924，未成为 winner） |
+| 测试 | 875 全绿 |
