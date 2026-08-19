@@ -1157,3 +1157,61 @@ winner-take-all/direct-atomic 已在 registry 里以 -43.6% 关闭）——
 
 禁止重开（本轮又加两条）：tile chooser、slice count、**bytes-per-output/arithmetic intensity（本轮 15 组合扫描证伪）**、
 LDS bank conflict、K-stage depth、register prefetch、**全局删除死的 scalar staging 分支**。
+
+---
+
+## 2026-08-19 23:11 第二次换机：tw035 → **tw040**，纪元 **A**（字母表绕回来了）
+
+wave `wf_4afd016a-76f` 死在 **round 3 中途**——最后一次写盘 23:09:44，
+是 `round_3/engineer_0/verify/isa_v2/` 的反汇编产物，也就是它正在做 ISA 取证时进程被拆掉。
+round 2 的成果**已经落在 canonical 上**（`cdb7932`），没丢。
+
+### 字母表用完了：取 **A**，不是"Z 之后"
+
+`MACHINE_HOSTNAME` 已占 **L 到 Z 连续 15 个**（L/M 是约定之前的 gfx90a 老箱，无 hostname 记录）。
+Z 之后没有字母了。`register_epoch.py` 的校验是 `re.fullmatch(r"[A-Z]", L)`——**只收单个字母**，
+所以 "AA" 这类不行。**A–K 从未出现过**（在整个 `noise_floor_stats.py` 里 grep `"[A-K]"` 零命中），
+且脚本自身会在字母已存在时拒绝，等于第二道保险。于是取 **A**。
+
+这里要说清楚 finding (126) 的边界：126 禁的是**复用退休字母**（同一个箱子重新拿到旧字母，
+把旧箱的 floor 拿来判新箱的计时）。**A 不是退休字母，是从未分配过的字母**，
+tw040 也是这条 lane 没跑过的新箱。所以取 A 不违反 126。
+**给后来者：约定是"下一个未使用字母"，不是"字母序的下一个"；到 Z 之后从 A 继续。**
+
+```
+check_measurement_frame.py       -> EXIT 4 (tw040 unregistered)
+register_epoch.py --letter A --host tw040   (先 --dry-run 看四处 diff)
+  -> epoch A registered for tw040, PROVISIONAL, CURRENT_MACHINE Z -> A
+check_measurement_frame.py       -> EXIT 3
+八张卡全空 (busy 0%, vram 283MB)
+```
+
+### 这次做了一个**成对冷/热 sweep**，去检验我自己上次留下的那个未排除假设
+
+在纪元 Z 上，我的 sweep 和 wave 的复测在双模路上差了 7–11 倍，我当时写下一个没排除的替代解释：
+**我那次是快照恢复后这台机器上的第一个 GPU 负载，时钟/功耗可能还在爬**。
+这次可以直接测：**在同一次 `gpu_lock.sh 2` 调用里连跑两遍 8-repeat sweep**，
+第一遍冷（本机第一个 GPU 负载）、第二遍紧接其后（热）。
+`verdict.json`（冷）/ `verdict_warm.json`（热）。协议本身一字未改，只是多跑了一遍做诊断。
+
+若两遍在双模路上**系统性地"冷更吵"**，冷启动瞬态假设得到支持，
+且意味着**每次换机后的第一次 sweep 都会装进一张偏宽的表**——
+偏宽的表**放行回退**（这正是纪元 Z 上 m256_down 让 -2.79% 溜过去的机制）。
+若两遍吻合，那就是我在 Z 上的 7.02% 属于别的原因，冷启动假设被排除。
+**先测再说，不预设结论。**
+
+### 波边界上执行了那条强制动作项：`cumulative` 已改回 1.2054
+
+wave 已死、STATE 无人占用，正是我在 `591a7ccc` 里写的"必须在下一波启动前修"的时机。
+改动经断言保护（不满足"恰好等于 1.0916 × wave_local"就中止）：
+
+```
+cumulative  1.31581464 -> 1.2054     (= geomean(best_per_case), vs oracle)
+对种子 0.3358           -> 3.59x
+wave_local_cumulative   1.2054       (不变)
+```
+
+`cumulative_frame` 一并写清楚了"两者同帧、不得相乘"，
+免得下一个 `update_memory` 再乘一次。备份留在 `STATE.json.bak_frameFix_*`。
+其余键（ledger 19、insights 19、best_per_case、refused_candidate）**一律未动**。
+注意 ledger 已从 15 涨到 19——round 3 死前把它的条目写进去了，那些内容保留。
