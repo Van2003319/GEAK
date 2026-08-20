@@ -1652,3 +1652,93 @@ note calling those captions wave-local was wrong.
 STATE not yet rewritten (`cumulative` still 1.2054, `last_round` still wave 3's 2) -- `update_memory`
 runs after the commit. **Falsifiable prediction for when it lands:** correct is **1.2707**; the frame bug
 would show as 1.2054 x 1.2707 = **1.5317**, and a subtler chaining error as 1.2054 x 1.0494 = **1.2650**.
+
+
+### ⚠️ 交接陷阱：1.2707 那棵树还没进 `state_dir/best`
+
+运维在 06:43Z 核对现场时发现的，写下来以防波次死在 `update_memory` 之前。
+
+**现状**（06:43Z，tw035 的作业 07:34Z 到期，交接约 07:09Z 触发）：
+
+| 位置 | 内容 |
+|---|---|
+| 本波 workspace git | `4dd8f63 round 1 winner: engineer r1_d0 (1.27x)` ← **1.2707 只在这里** |
+| `exp/state_coldstart_newgate_20260819/best/` | 目录 mtime 还是 08-19 22:10，仍是 wave 2 的 **1.2054** 那棵树 |
+| `state_dir/STATE.json` | `cumulative` 1.2054、`banked_commit` cdb7932、`last_round` 2、`wave` 仍写 wave3 |
+
+`update_memory` 要在 re-profile 之后才跑，届时才会把累计最优同步进 `best/` 并重写 STATE。
+**如果波次在那之前被交接拆掉，下一波会从 `best/` 播种，也就是退回 1.2054，白丢 +5.4%。**
+这正是 greedy lane 犯过两次的 state_dir 滞后（见 `PIPELINE_PROGRESS_GREEDY.md` 的「STATE.json 是坏的，已修复」）。
+
+**树本身不会丢**：docker 快照带走整个文件系统，`4dd8f63` 连同它的 workspace 都在镜像里。丢的是**接力**。
+
+**接班的人先做这一件事**：确认 `state_dir/best` 是不是 1.2707 那棵树。
+
+```bash
+cd /home/yxh/GEAK
+# best 不是独立 git 仓库，用内容比对，别用 git log（会穿透到父仓库）
+diff -rq exp/state_coldstart_newgate_20260819/best/src \
+         exp/team_dense_bf16_gemm_fused_20260820_032458_2873_8557/dense_bf16_gemm_fused/workspace/src
+```
+
+有差异就说明 `update_memory` 没跑完，需要手工补：把那个 workspace 树同步进 `best/`（连同不可变 oracle），
+`STATE.json` 的 `cumulative` 置 **1.2707**、`banked_commit` 置 `4dd8f63`、`best_per_case` 换成
+`round_1/engineer_0/verify/agg.json` 的 `per_case`。
+
+**校验用的独立数字**（运维从三次配对原始测量复算，不经过 agent 的聚合，也不经过 `agg.json`）：
+
+```
+run1  候选/oracle 1.2691   同会话对照/oracle 1.2059   候选/对照 +5.10%
+run2  候选/oracle 1.2715   同会话对照/oracle 1.2104   候选/对照 +4.72%
+run3  候选/oracle 1.2701   同会话对照/oracle 1.2096   候选/对照 +4.92%
+```
+
+`cumulative` 写进去之后应当等于 **1.2707**。若看到 1.5317（= 1.2054 × 1.2707）就是帧相乘的老毛病复发，
+若看到 1.2650（= 1.2054 × 1.0494）是另一种链式错误 —— 这两个数是本文件上一条自己给出的可证伪预测。
+
+### the prediction was exact, and the frame bug is now ROOT-CAUSED to the lane script
+
+I predicted the frame-product would be **1.5317**. Insight 1 records: *"the lane script passed
+CUMULATIVE_VS_SEED = 1.5317 = 1.2054 x 1.2707."* Exactly that number. So the defect is **not** the
+tech_lead's arithmetic, as I concluded at the wave-2 boundary -- it is the **lane script**, which chains
+two ABSOLUTE vs-oracle geomeans as if they were multipliers, when the wave-4 tree already contains
+everything `cdb7932` contained. This wave the tech_lead caught it, wrote `cumulative: 1.2707`, and kept
+`cumulative_vs_seed_input: 1.5317` beside it so the discrepancy stays visible. At the wave-2/3 boundary
+nothing caught it and I repaired 1.31581464 by hand.
+
+That is the real finding: **the lane emits a wrong cumulative every wave, and correctness currently
+depends on whoever happens to be reading.** Two firings, two different outcomes. I am NOT editing
+`kernel_lane.js` while a wave is live, but this is now a standing script-level defect rather than an
+arithmetic slip, and it should be fixed at a quiet boundary rather than re-caught forever.
+
+Live secondary hazard: `wave_local_cumulative` and `cumulative` are now **both 1.2707**. If anything
+multiplies them at the next boundary the result is 1.6147. That is precisely the shape of the bug above.
+
+### the win is real, and it is NOT free -- two costs the headline hides
+
+**1. Numerics. The verifier priced them; the engineer's estimate was refuted by measurement.**
+`max_rel_err` goes **0.0077 -> 0.28-0.42** on exactly the 9 split-K routes, while the 2 non-split routes
+are **bit-identical** across arms -- which is both a clean proof of which routes the mechanism reaches
+and proof the shift is the bf16 partial planes rather than draw noise. The engineer claimed ~10x margin
+against the 2e-2 tolerance; elementwise relative error in fact **exceeds the relative term by 14-21x**,
+and the suite passes only because `atol = 2e-2 * RMS(ref)` absorbs it on small-magnitude outputs. The
+frozen oracle is the contract and it passes, so this is not grounds to refuse the bank -- but the lane
+now carries a **45x worst-case elementwise accuracy degradation the oracle does not price**. Any
+tightening to a pure relative check, or any caller whose outputs are less RMS-dominated than the harness
+draws, fails those 9 routes. What paid for the speed was halving the split-K partial plane width from
+fp32 to bf16; this is the bill for it.
+
+**2. Benchmark overfit is growing and unpaid.** `kSliceFits` is keyed on the exact (m,n,k) triple, six of
+its entries are six of the eleven scored shapes, and this round re-fit two more. Off-table shapes fall
+through to the fill formula so it is not a correctness special-case -- but a growing share of the decode
+gains **generalizes to nothing**. The 1.2707 is honest as a suite score and partly fitted as a claim
+about GEMM.
+
+**Headroom, per the wave's own accounting:** `prefill_m128_square` at 0.9190 is now the ONLY route below
+parity, and its residual is BODY, not workspace. A hypothetically free reduce fix-up is worth roughly
+another **6% geomean**, concentrated in the fixed term on small-plane routes -- now the single most
+valuable unexplained quantity in the lane.
+
+**Relay note, and it worked:** insights went 28 -> 20, but the closed list was not dropped -- the
+tech_lead **re-carried it in full** (insight 14) citing the same reason I did when I promoted it. The
+promotion propagated as a practice rather than as a string, which is the durable outcome.
