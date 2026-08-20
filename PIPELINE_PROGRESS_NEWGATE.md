@@ -1352,3 +1352,24 @@ wave's one durable structural gain, and it arrived as a by-product of a failure.
   finding 127 does not need bad arithmetic to propagate, only a confident wrong caption. Corrected.
 
 STATE backup at `STATE.json.bak_boundary_20260820_014335`.
+
+### wave 4 launched (`wf_9669bc60-a8a`, monitor `b4yfvkzqd`) -- and the relay repair is VERIFIED, not assumed
+
+Baseline `ae61f02`, seeded from `state_dir/best` at 1.2054 (not from the seed). Launched over wave 3's
+own STOP RECOMMENDED, deliberately: that gate reports the exhaustion of **one-knob arms**, and it is not
+evidence about headroom. `prefill_m128_square` at 0.834 and `decode_m96_up` at 0.932 are genuinely slower
+than the oracle -- routes 17% and 7% underwater are not closed by five knobs failing.
+
+What makes this a different draw from wave 3 rather than a repeat: `suggest_next` is **write-only across
+wave boundaries** (`kernel_lane.js:2630` reads it from the tech_lead's live memory, never from
+`prior_state`), so wave 3's DO-NOT-RE-ISSUE list, its open-problem statement, and its three methodology
+corrections were all set to evaporate and be re-bought at full price. I promoted them into `insights`,
+which the resume path *does* import, and then checked rather than trusting it: the wave-4 agent transcript
+contains both the promoted closed list and the refreshed epoch A box facts, and contains **zero**
+occurrences of the stale `epoch Z, tw035` string. First wave in this lane to begin holding its
+predecessor's closed list.
+
+Standing decision for the next boundary: if wave 4 also banks nothing *with the closed list in hand*, that
+is a far stronger stop signal than wave 3's was, and I will treat it as terminal for the lane rather than
+launching a fifth. Wave 3's stop-gate could not distinguish "no headroom" from "wrong instrument"; wave 4
+can.
