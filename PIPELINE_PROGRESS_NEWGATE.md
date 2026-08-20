@@ -1940,3 +1940,45 @@ first the one-lock getenv `kSliceFits` ablation off the *shipped* binary to deco
 between bf16 plane width and slice re-fit; then true ping-pong / double-buffered LDS on ids 9/22 (the
 only pipelining form without the `ds_write` WAR), and the split-K fix-up's ~4.4 us internal fixed
 term. My epoch-C BOX facts propagated intact as insight 26.
+
+### CORRECTION 3 (supersedes both earlier accounts of r1_d1): the return was LATE, not lost.
+
+`r1_d1`'s record landed in `journal.jsonl` at index 28 — *after* the round-1 insights (24) and the
+round-2 ISA attribution (26). Its `report.md` and `worker_result.json` were rewritten at **09:53:58 /
+09:54:44**, while its verifier had run at **~09:29**. So the engineer simply **overran its own
+verification**: the verifier found no patch because the arm was still being built, and the "moving
+tree" insight 14 describes is the same overrun seen from the verifier's side.
+
+That makes my two earlier readings of this direction both wrong in the same way — I twice quoted a
+file that was still being written. The numbers I recorded (geomean 1.2441, route +2.4%, suite
+−0.26%) were a mid-flight snapshot. **The engineer's final self-report is: geomean 1.2476, target
+route +2.31% slower in 3 of 3 pairs, suite −0.06% — a wash, not a −0.26% loss.** Verdict unchanged
+and now cleanly stated by its author: REFUTED. The tech_lead's on-disk read (1.2467 / 0.9018) was
+itself a third snapshot of the same moving file. Rule for reading this lane's artifacts: an engineer
+directory is only quotable once its agent has returned in the journal; `worker_result.json` is
+authoritative *after* that, not before. My §"RELAY DEFECT" framing is withdrawn entirely — there is
+no relay defect here, only a scheduling overrun, and the lane's process rule (emit a patch of the arm
+you measured, or freeze the tree before the verifier runs) is the correct and sufficient fix.
+
+The direction's final `strategies_tried` also closes more than the earlier snapshot showed: the
+register-prefetch pipeline behind `if constexpr(BK>=128)` had **zero effect** (throughput, not
+latency, on that arm), a 10-config unsplit tile sweep confirms 32×64×256 (2,2) as best, and deep-K
+combined with split-K is far worse — BK 32→64 costs +14%, 32→128 costs **+93%** at fixed grid.
+
+### wave 5 round 2 — dispatched, budget 9, and it goes at the structural term
+
+Not stopping, and the reasoning is explicit that none of the three stop-gate clauses is close: the
+fix-up floor has been attacked and priced (~0.82 us, wave3_r1_d1), but `prefill_m128_square` is still
+sub-parity at 0.9265 and the two decode routes sit at 48–51% of a **measured** 3350 GB/s
+structure-matched ceiling, and round 1's best verified result was a +0.03% null — "a reason to change
+mechanism, not to stop". It also correctly labels the passed `CUMULATIVE_SPEEDUP=1` as the wave-local
+placeholder rather than a measurement, i.e. the truncation hazard was caught a second time.
+
+`r2_d0` (memory, expected 1.33): **break the single-buffer LDS WAR — one barrier per K stage inside a
+13107 B/CTA LDS cap.** This is the term all four instruments converged on, and the direction cleared
+the closed-mechanism list honestly rather than by ignoring it: `closed_mechanisms.py` flags row 74
+("barrier count"), whose bound reads "the kernel has one barrier, so the entire barrier prize is
+1–2%" and whose `reopens_when` is "a variant introduces several barriers per stage". Both clauses
+describe a *different* tree and both now point the other way — this tree is ISA-counted at **two**
+`s_barrier` per K stage on 100% of instantiations. That is the right way to reopen a closed row: by
+showing its stated precondition is factually false here.
