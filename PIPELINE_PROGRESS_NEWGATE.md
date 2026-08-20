@@ -1792,3 +1792,48 @@ installed, resolving 10 arguments with 11 route bands. Rendered with `--print` a
 Fresh launch, **not** `resumeFromRunId` — that is same-session only and its cached agents hold
 tw035/epoch B timings. Insight 18 refreshed from epoch B to epoch C facts before launch (it had gone
 stale at three consecutive boundaries). Run ID `wf_07bd05ac-bf6`.
+
+### wave 5 round 1 — no patch, but the box's stream ceiling is now measured
+
+`r1_d0` (memory) returned `status: partial`, **no patch saved**, and the verifier logged
+`apply_failed` / `verified_geomean: 0`. That is the documented empty-patch path, **not** the
+`git apply` no-op hazard and not a tooling failure: the engineer measured its assigned mechanism,
+found it lost, and correctly declined to save it. Both arms sat below the same-session control
+(best arm 1.2431 vs controls 1.2522 and 1.2503).
+
+**The deliverable is the ceiling.** Standalone binary, own lock, 1 GB working set against the
+256 MB MALL:
+
+| measurement | GB/s |
+|---|---|
+| peak coalesced `dwordx4` read | **4297** (only 2750 at 1×CU of blocks; plateau from 2×CU) |
+| the B panel's actual gather shape (BN=64 rows, 64 B runs strided K·2 B) | **3436** — the access shape costs 20% |
+| same stream inside the macro body (global→LDS→barrier→read→barrier per 32-k stage) | **3350** — LDS+barriers cost 6–9%, flat from 3.4 to 54 CTAs/CU |
+
+Recomputed in the timed frame from exact shape bytes over `bench_us`: `decode_m64_square`
+1719 GB/s (51% of 3350), `decode_m96_up` 1600 (48%), `prefill_m128_square` 1192 (**36%**).
+Access shape 20%, LDS+barriers 6–9%, CTA count zero — **the residual ~2× is the MFMA block sitting
+in the dependency chain.** Price every future DRAM-traffic mechanism against **3350 GB/s**, never
+the ~5.3 TB/s nameplate and never a `run_profile()` number. This is the first hard answer to what
+insight 13 called the lane's most valuable unexplained quantity.
+
+**Closed by measurement:** 1-deep software-pipelined global fetch on macro ids 9 `<64,64,32,2,2>`
+and 22 `<96,64,32,3,2>` — two independent implementations, both correctness PASS with 11/11
+conclusive write probes, both rebuilt with the hipified twin moved aside and verified to carry the
+change, both **4–5% slower** on both target routes, i.e. 6–8× those routes' warm floors. Not
+resources: occupancy 7 and 8 waves/SIMD, zero spill, LDS identical to parent. The cost is
+**scheduling** — one register set creates a WAR against the just-issued `ds_write`, forcing
+`s_waitcnt lgkmcnt` before the prefetch re-load. Refuted en route: "the split arm is handicapped
+because `launch_macro` cannot hand it `kExact`" — Arm B proved exactness at runtime, ran fully
+unpredicated staging, and was the *worse* arm. Left untested and the honest way to finish killing
+this axis: a true ping-pong (two register sets, k-loop unrolled by 2, no WAR) or double-buffered
+LDS. Widening the B run to 512 B buys 3436→3975 GB/s = ~16% of stream rate, at most ~8% of these
+calls — not the 2×, not worth a round.
+
+**Card-to-card spread is the largest frame effect yet seen.** Setup measured the incumbent tree at
+1.2812 (runs 2–5 within 0.7%); this engineer's same-session controls on a different card of the
+same box read 1.2522 and 1.2503 — a **~2.3% spread within one box, one epoch**. That dwarfs the
+0.83% cross-box drift and is 2–11× every route's warm floor. It is not a defect and it is already
+handled: the lane scores against a **same-session control arm**, never against the stored
+cumulative. But it means no candidate number may ever be compared to `STATE.cumulative` directly,
+and the three-point 0.51% error bar from wave 4b describes one card, not this box.
