@@ -1295,3 +1295,60 @@ run `wf_90377108-25c`，monitor `bidbyqz4t`。
 顺带一条**给 agent 记功**的观察：那条 insight 把我的 sweep 和第二次 sweep 调和成了
 "prefill_m256_down 1.0-3.4%，且其双模在 ORACLE 臂"——**记的是跨两次 sweep 的区间，不是单个数**。
 这比我第一次写的"真实底噪是 7.02%"更谨慎、也更正确。**在这一点上 tech_lead 比我做得好。**
+
+## wave 3 (tw040 / epoch A) -- two rounds, five directions, ZERO banked. The wave stopped itself.
+
+Lane total unchanged: **1.2054, git cdb7932**. `wf_90377108-25c` ran round 1 and round 2 and then
+exited on its own stop-gate rather than issuing a round 3. No workflow process alive at 01:41 UTC.
+
+**Round 1 (three directions) -- all died on their PREMISE at step 0.** Not "tried and lost": the
+thing each was going to exploit did not exist. Dispatch gap already 0 ns; host prologue already
+0 us *inside the scored window*; prefill_m128_square residency already not binding. The graph-capture
+lever the role file requires was attacked and priced at **zero** with a live 10 us busy-spin
+sensitivity control -- so stop-gate clause (a) is discharged with a receipt, not by assertion.
+The pooled-fp32-workspace arm shipped as a measured null (+0.18% by both engineer and verifier)
+and was correctly NOT integrated: a byte-identical-.so getenv A/B that perturbs the binding object
+for nothing, plus a thread_local pool that never releases up to ~67 MB.
+
+**Round 2 (two directions) -- worse news than round 1, and more valuable.** Both premises were
+priced correctly, both patches were built, and both were *realized in the machine code* with clean
+receipts -- and still measured null-to-negative. This is the lane's first full **ISA anti-signal**:
+d0 satisfied every precondition on all 8 split symbols (2-byte key gone, ds_write_b16 gone,
+full_drain 22->5/6/8, instructions 478->279, identical LDS/VGPR, zero spills, exact 8-for-8 swap,
+11/11 correct) and lost **-2.6%** over 6/6 interleaved in-lock pairs. The sign is per-tile and
+tracks CTA/CU exactly -- id 9/id 1 routes lose, id 7/id 22 win -- which retroactively **confirms
+the shared-instantiation/occupancy-regime claim** that round 1 had left unverified. That is the
+wave's one durable structural gain, and it arrived as a by-product of a failure.
+
+**Two things I want on the record because they cut against the lane's own habits:**
+
+1. d1 caught its own step-0 price **wrong by 3x in its own favour** -- it had divided an excess by
+   the 59.7 us ORACLE call when the geomean is over candidate-relative speedups, so the denominator
+   is the CANDIDATE time. It repriced and only then passed the gate. The methodology correction
+   (state the denominator; print the same-lock control beside every verified_geomean) is worth more
+   than the direction was.
+2. On prefill_m512_up the **engineer and the verifier disagreed in SIGN**, both using correct paired
+   method. Sub-2% single-route claims on p512_up and p256_down are now inadmissible regardless of
+   pair count. My own 7.02% floor claim died the same way two waves ago; this is the same lesson
+   arriving through a different door.
+
+### Boundary checks at wave close -- one passed, two were defects I had already promised to fix
+
+- **(a) cumulative arithmetic: PASSED.** No 1.0916x product this time; `cumulative` 1.2054,
+  `wave_local` 1.0. But the check surfaced something better: `geomean(best_per_case)` on tw040/epoch A
+  is **1.1993** for the *same* git cdb7932 that measured 1.2054 in-lock on tw035/epoch Z. 0.51% apart.
+  Neither number is wrong -- **the pair is the lane's cross-session error bar**, and it sits right at
+  the 2% inadmissibility line the lane just re-derived. Honest headline is **1.20 +/- 0.5%**, and I
+  have written that provenance into STATE rather than picking a prettier number.
+- **(b) the BOX insight went stale for a THIRD time** -- it still said "epoch Z, tw035, floors
+  0.27%-3.37%" after two waves on tw040. Worse than cosmetic: it advertised prefill_m256_down as the
+  *wide* route (1.0-3.4%) when on epoch A it is **clamped at MIN_FLOOR 0.20%**, i.e. the route most
+  likely to throw a FALSE REFUSAL -- the exact failure that killed wave 1 round 3. Replaced with the
+  epoch A facts. I have now missed this at three consecutive boundaries; it is not an accident, it is
+  that nothing in the machinery ties a box-scoped fact to the box.
+- **(c) NEW defect, and the frame bug wearing a different hat.** `cumulative_frame` read
+  *"vs the original seed"*. It is not: 1.2054 is absolute vs the immutable oracle, and vs-seed is
+  **3.59x**. The value was right and the label was wrong, which is the more dangerous arrangement --
+  finding 127 does not need bad arithmetic to propagate, only a confident wrong caption. Corrected.
+
+STATE backup at `STATE.json.bak_boundary_20260820_014335`.
