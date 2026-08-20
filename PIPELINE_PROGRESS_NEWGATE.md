@@ -1396,3 +1396,100 @@ distinction the closed-list relay was meant to attack. 22 agents, 0 errors, 2.46
 STATE deliberately NOT edited to record this -- wave 4 owns that file now, and a read-modify-write from
 outside a running wave is the lost-update this lane has already been bitten by. It goes here instead and
 folds into STATE at the next boundary.
+
+
+---
+
+## 2026-08-20 02:0x — 运维改动：选 winner 与判提交不再是两套判据
+
+**这是一次有意的、记录在案的中途改动，改的是本 lane 的被测对象本身。** 决定由运行方作出，
+理由是这条缺陷已经被 wave 1 round 2 完整证据化，继续让它生效只是在重复采集同一个负面结果。
+
+改了什么（commit `c1adeef1`）：`kernel_lane.js` 原来只把 `candidates[0]`（suite geomean 最高的）
+送进闸门，而闸门是逐路的。于是 wave 1 round 2 出现了「排头 0.924 被 `decode_m2_square`
+回退 0.0006 ms 否决、而 0.632 逐路 ACCEPT 零回归却从未被送进闸门」——手里握着能过的候选、
+本轮却两手空空。现在候选按 geomean 降序**逐个**过闸门，取第一个通过的；**全都不过时行为与从前逐字一致**
+（winner 仍是排头、仍被拒），排头能过时也逐字一致。方向是单向的：只能让本来空手的一轮落袋，
+**不可能让任何一轮变得更严**。
+
+判据现在只有一份实现：`judgeCandidate(cand)`，选 winner 和记录判决都调它。
+「选用一套判据、判用另一套」正是这次要修的缺陷，修的时候留着两份实现就是同一个 bug 换个引信。
+
+**两件故意没做的事**：(1) `bestSeen` 仍记录本轮**报出**的最高 geomean 而不是落袋的那个，
+否则往下够一个候选就会悄悄降低停机计数器的标尺，选择修复会变成没人要求的停机规则改动。
+(2) **没有**加「被选中的候选还必须超过 `cumulative`」这个下限——`cumulative` 是别的会话测的绝对值，
+而接受它的逐路判决是同会话配对的；为了一个漂移过去的陈旧绝对值去拒绝一个「对自己会话的对照臂
+逐路不劣」的候选，等于把对照臂要消除的跨会话比较又请回来。改成**大声记日志**：真落袋时
+`cumulative` 会下降，日志会明说。
+
+**生效时机（重要，别误判）**：波 4 是 01:46:59 起的，这个 commit 是 02:04:11。
+嵌套 workflow 在起波时就已把 `kernel_lane.js` 载入，**所以波 4 跑的仍是旧代码，修复从波 5 起生效**。
+如果波 4 又出现「有候选能过却没提交」，那是预期内的，不要当成修复失效。
+
+验证：新增一段可执行守卫，从 lane 源码里抽出真的选择块和真的 `judgeCandidate` 跑四种形状
+（排头被拒+次席通过、排头通过、全都不过、无 band 表）。另有 5 处守卫钉住了被搬走的文本，
+已重新指向新位置而不是放松——其中一处的断言文字还在主张「改默认不可能让任何运行更严」，
+那正是 wave 1 round 2 推翻的说法，现在改成钉住 lane 自己承认相反。
+`test_js_suite.py` 的两个变异跟着搬进 `judgeCandidate`，仍然能杀。
+全套 **901 passed / 866 subtests**，5 个 JS 守卫全绿（385 项）。
+
+### 顺带：两条**不是这次改动造成**的红，需要你们决定
+
+`test_noise_floor_stats.py` 有两条失败，在 HEAD 上同样复现，从昨晚 20:36 装纪元 Z 起就红了：
+
+```
+test_an_unknown_route_gets_the_widest_floor_not_the_narrowest      0.0764 != 0.072
+test_an_unknown_machine_gets_the_widest_floor_anywhere...          0.0764 != 0.0088
+```
+
+根因是真的：`DEFAULT_NOISE_FLOOR`（7.2%）在源码里是**在后面那些纪元表被追加之前**算出来的，
+而纪元 Z 把 `decode_m8_up` 测成了 **7.64%**。于是「未知路线/未知机器拿到任何地方最宽的底噪」
+这个 fail-closed 性质**已经不成立**——一条没测过的路线现在拿到的底噪，比一条测过的还要窄。
+影响有界（相对 6%），但方向是错的那一边。
+
+第二条里还叠了一个过期 fixture：它拿 `machine="Z"` 当「未注册的机器」，而 Z 昨晚被注册了。
+按本目录的惯例这类字母应当**推导而不是写死**。
+
+**没有顺手修**，因为修它要改 `DEFAULT_NOISE_FLOOR` 的推导位置，而 provisional 表是**用这个常量造的**
+（`register_epoch.py` 的自检、`check_measurement_frame` 的输出都断言两者相等），
+把它从 0.072 抬到 0.0764 会改变每一台新机器开局时的 fail-closed 底噪。
+**波次正在跑的时候不该悄悄改一个 fail-closed 常量。**
+
+## THIRD restore: tw040 -> tw035 (snapshot). Wave 4 died having banked nothing.
+
+Process exited at ~02:0x UTC; both the workflow and its monitor went with it and left no completion
+record. Damage assessment: wave 4 reached `round_1` and stopped there -- canonical HEAD still at the
+`ae61f02` baseline, STATE untouched at 1.2054 / `wave_local` 1.0 / 27 insights. **Nothing banked, nothing
+corrupted, nothing to recover.** The lane total is still 1.2054 @ `cdb7932` and the wave-4 launch simply
+has to be re-made.
+
+I did NOT use `resumeFromRunId`: it is same-session only, and the cached agents hold **tw040/epoch A**
+timings that are now the wrong ruler for this box. Replaying them would be frame-mixing with extra steps.
+Fresh launch, same as the tw040 restore.
+
+### The epoch decision was not the routine one, because tw035 is not a new box to this lane
+
+`check_measurement_frame.py` exited 4: host resolves to **Z**, `CURRENT_MACHINE` was **A**. tw035 already
+carries two letters -- N (retired) and Z, my own sweep from the previous restore -- so the tempting move
+was to point the frame back at Z and skip a sweep entirely. That is wrong, and `machine_for_host`'s own
+docstring says why: a re-used box gets a NEW epoch, and reinstating the old letter's floors is
+"finding (126) with extra steps". This is a **snapshot restore** -- a different container on a host that
+merely reports the same name. Z's floors describe hardware/container state that no longer demonstrably
+exists.
+
+Registered **B** for tw035 via `register_epoch.py` (B-K were never allocated; L/M are the pre-convention
+letters), so this is a new letter, not a retired one. Before applying I checked the one thing that could
+have made it a silent no-op: with tw035 now mapped by BOTH Z and B, does resolution pick the new letter?
+`machine_for_host` returns the **last** matching entry and `register_epoch` appends, so tw035 -> B.
+Multi-letter hosts are already precedented here (tw054: O+S, tw008: P+R). Frame went 4 -> 3, as predicted.
+
+All eight cards verified free by **gpu_lock's own sysfs criteria** (`renderD(128+8*id)`, busy 0%,
+283 MB baseline), not by rocm-smi, whose indexing disagrees.
+
+Sweeps running: cold and warm, back to back inside ONE `gpu_lock.sh 2` call so all 16 repeats share a
+card. Two reasons for the pair rather than the single required sweep: epoch A's installed table is the
+WARM one, so installing a cold table here would silently change what a "floor" means between epochs; and
+it independently **replicates the cold/warm finding on a second box** (n=2), which is the only way to
+tell whether the 10-of-11 result was a property of tw040 or of restores in general. `PWD` is the scratch
+verdict dir, not the seed task -- `gpu_lock` derives `TORCH_EXTENSIONS_DIR` from `$PWD` and the seed
+directory must not be written to.
