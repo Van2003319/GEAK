@@ -54,7 +54,7 @@ const KNOWN_ARGS = new Set([
   'kernel_path', 'workflow_dir', 'exp_root', 'eval_dir', 'task', 'mode', 'target_language',
   'op_spec', 'budget', 'deep_cost', 'min_improve', 'candidate_floor', 'progress_delta',
   'max_no_improve', 'route_bands', 'gpu_ids', 'gpu_mode', 'gpu_lock_env', 'apply_to_original',
-  'state_dir', 'incremental_analyze', 'isa_evidence', 'compiler_source_dir',
+  'state_dir', 'incremental_analyze', 'isa_evidence', 'ir_diagnostics', 'compiler_source_dir',
   'workload_spec_path', 'workload', 'perf_knowledge_dir', 'use_expert_skills', 'expert_skills_dir',
   'shared_kb', 'global_kb', 'e2e_feedback', 'harness_addendum',
   'dra_enabled', 'dra_max_questions', 'dra_blindspot', 'dra_max_blindspots',
@@ -652,6 +652,16 @@ const ISA_MODE_WARNING = (ISA_MODE_RAW !== '' && !ISA_MODES.includes(ISA_MODE_RA
 // and the diff describes the wrong tree. `dump_ir.sh` already solves both and is
 // the pattern to copy.
 const ISA_ENABLED = ISA_MODE !== 'off';
+// L3's capture RECOMPILES; `isa_capture.py` deliberately does not. That is a real
+// difference in cost and in blast radius, so it gets its own switch rather than
+// riding on `isa_evidence`: an operator who wants the verification receipt -- which
+// reads the artifact that actually ran and cannot break a build -- may reasonably
+// not want a lane that rebuilds a translation unit in order to look at it. Defaults
+// ON when the ISA layer is on, because the ladder is the point of having one.
+const IR_DIAGNOSTICS = String(A.ir_diagnostics != null ? A.ir_diagnostics : 'on').trim() !== 'off';
+// The ladder needs both: L3 needs the trajectory, and it needs the ISA archive to
+// tie that trajectory to the binary that was measured.
+const LADDER_ENABLED = ISA_ENABLED && IR_DIAGNOSTICS;
 // Optional read-only AMDGPU backend checkout for the compiler role's second tier.
 // Empty by default and expected to stay empty: this image has no such sources, and
 // the role is written to finish on runtime evidence or return inconclusive rather
@@ -951,18 +961,46 @@ const ISA_EVIDENCE_SCHEMA = obj({
   claims_indeterminate: { type: 'array', items: { type: 'string' } },
   high_findings: { type: 'number' }, notes: { type: 'string' },
 }, ['exit_code', 'mechanism_verdict']);
-// The deep-analysis return, shared by the `isa` and `compiler` depths. `status` has
-// three values and `inconclusive` is the one that must stay reachable: a plateau the
-// evidence cannot explain has to be recordable as such, or the analyst is pushed
-// into inventing a mechanism to have something to return. `source_change_required`
-// is the field that makes the analysis worth its cost -- an attribution that does
-// not end in a condition the next edit must satisfy is a compiler note, not a
-// diagnosis.
-const ISA_ATTRIBUTION_SCHEMA = obj({
-  status: { type: 'string', enum: ['attributed', 'inconclusive', 'skipped'] },
-  depth: { type: 'string', enum: ['isa', 'compiler'] },
+// The deep-analysis return, shared by L3 (`ir`) and L4 (`compiler`).
+//
+// `status` has four values and each one is load-bearing:
+//   attributed     a pass and a structure explain it, and they imply ONE rewrite
+//                  family. Escalation stops here.
+//   needs_compiler the pass and structure are named but not WHY, and the residue
+//                  is a legality/pass-constraint question. This is the only value
+//                  that routes to L4, and it routes there IN THIS ROUND.
+//   inconclusive   the evidence was read and did not answer. A real finding.
+//   unavailable    there was no evidence to read (capture failed, or the trajectory
+//                  could not be tied to the measured binary). Distinct from
+//                  `inconclusive` on purpose -- one tells the next round not to
+//                  bother asking again, the other tells it to retry.
+//
+// `source_change_required` is what makes the analysis worth its cost: an attribution
+// that does not end in a condition the next edit must satisfy is a compiler note,
+// not a diagnosis.
+//
+// `attributed_pass` and `stage_transition` are the fields that keep this layer from
+// decaying back into disassembly reading. The previous version of L3 returned
+// `vgpr=152, scratch=0, global_load_bytes.max=4` -- true numbers naming no pass, from
+// which no narrowed compiler question can be built, which is why L4 could only ever
+// guess at the whole backend. `admissibleAttribution` below refuses a positive status
+// that does not carry them.
+const IR_ATTRIBUTION_SCHEMA = obj({
+  status: { type: 'string', enum: ['attributed', 'needs_compiler', 'inconclusive', 'unavailable'] },
+  depth: { type: 'string', enum: ['ir', 'compiler'] },
   archive: { type: 'string' }, source_hash: { type: 'string' },
   summary_path: { type: 'string' },
+  // L3's core product: which pass, between which two stages, changed what.
+  attributed_pass: { type: 'string' },
+  stage_transition: { type: 'string' },
+  structural_signature: { type: 'string' },
+  // Set by L3 only when status is `needs_compiler`; both are required before L4 runs.
+  suspected_passes: { type: 'array', items: { type: 'string' } },
+  compiler_question: { type: 'string' },
+  // Did the recompiled trajectory match the binary that was actually measured?
+  provenance_ok: { type: 'boolean' },
+  // L4 only: which tier produced the finding (0 knowledge, 1 remarks, 2 source).
+  tier_used: { type: 'number' },
   signals_cited: { type: 'array', items: { type: 'string' } },
   diagnosis: { type: 'string' },
   source_change_required: { type: 'string' },
@@ -1195,6 +1233,8 @@ phase('Setup');
       `${A.progress_delta == null ? ' (= min_improve)' : ''}`);
   log(`  ${shown('isa_evidence', ISA_MODE)}  ${shown('mode', MODE)}  ` +
       `${shown('gpu_mode', GPU_MODE)}  gpu_ids=${GPU_IDS}`);
+  log(`  ${shown('ir_diagnostics', IR_DIAGNOSTICS ? 'on' : 'off')}` +
+      `  evidence_ladder=${LADDER_ENABLED ? 'L1..L4' : 'L1..L2 (no IR trajectory, so no L3/L4)'}`);
   // Stale text is worse here than no text: this echo exists so a reader can see what will decide
   // the round before any GPU time is spent, and it went on promising a derivation that had been
   // deleted. `not supplied` is not a degraded state any more -- it means every route is held to
@@ -1709,65 +1749,155 @@ const isaEvidenceReject = (rep, label) => {
 // about when to spend the run's most expensive evidence is not a good candidate for
 // being the third.
 //
-// Returns {depth, from, reason} where depth is `pattern` | `isa` | `compiler`.
+// The four rungs, named after the paper's levels so the record can be read against
+// it. L1 and L2 are RECORDED but never requested: pattern triage and profiling
+// happen every round regardless, and a ladder that pretended to gate them would be
+// describing a decision it does not make.
+const STAGE_L1 = 'L1_pattern';
+const STAGE_L2 = 'L2_profile';
+const STAGE_L3 = 'L3_ir';
+const STAGE_L4 = 'L4_compiler_source';
+const STAGE_FAILED = 'requested_but_unreached';
+// Rounds banked before this file was versioned carry `evidence_depth` with the OLD
+// vocabulary, where `isa` meant "read the disassembly" and `compiler` meant "asked
+// why the machine code looked like that". Neither is L3 or L4 in the current sense,
+// and a resumed lane that read them as such would believe it already holds evidence
+// nobody ever produced. They get their own value, which satisfies no rung.
+const STAGE_LEGACY = 'legacy_machine_code';
+const EVIDENCE_MODEL = 'geak.evidence-ladder/v2';
+
+// What a prior round actually reached, tolerant of both record formats.
+const reachedStageOf = (round) => {
+  if (!round) return STAGE_L1;
+  const ev = round.evidence;
+  if (ev && ev.model === EVIDENCE_MODEL) return ev.reached_stage || STAGE_L1;
+  if (round.evidence_depth && round.evidence_depth !== 'pattern') return STAGE_LEGACY;
+  return STAGE_L2;
+};
+
+// Whether L2 handed up something specific enough to attribute. The ladder's first
+// test in the paper is "has the current level localised a dominant bottleneck" --
+// not "is it still slow" -- and L3 needs a named kernel to trace, since a trajectory
+// is captured per function. Without one the escalation would spend a recompile to
+// produce a trajectory of whatever translation unit was guessed at.
+const hasDominantHotKernel = (profile) => {
+  if (!profile || typeof profile !== 'object') return false;
+  const kernels = Array.isArray(profile.top_kernels) ? profile.top_kernels : [];
+  return kernels.some(k => k && typeof k.name === 'string' && k.name.trim().length > 0);
+};
+
+// The escalation decision, as a named function so the JS suite can EXECUTE it
+// against fabricated histories. Returns {requested, from, reason, skip_reason}
+// where `requested` is null or STAGE_L3.
 //
-// The trigger is deliberately EARLY -- one non-improving round. `MAX_NO_IMPROVE`
-// defaults to 2, so a lane dies after two; a three-round stagnation window of the
-// kind `local_optimum.py` uses would never fire before the lane was already over.
-// The round that just failed to move is also the one whose mechanism is worth
-// checking, and by then its ISA archive already exists, so the evidence is free.
-const isaEvidenceDepth = (rounds, noImproveCount, enabled) => {
-  if (!enabled) return { depth: 'pattern', reason: '', from: '' };
+// L4 IS NOT REQUESTABLE HERE, and that is the fix rather than an omission. The
+// previous ladder could only reach `compiler` from a round whose prior depth was
+// already `isa`, which needed `noImprove >= 1` on the L3 round and then survival
+// into the next -- but a non-improving L3 round takes `noImprove` to 2 and
+// `MAX_NO_IMPROVE` defaults to 2, so the loop exits first. The L3 -> L4 chain was
+// unreachable under the default stop budget, and the only live path to L4 was
+// `priorRefuted`, which SKIPPED L3 entirely. So the ladder's deepest rung was
+// reached exclusively by the route that gave it nothing to work with.
+//
+// L4 is now entered from within the same round, immediately after L3 returns
+// `needs_compiler` with a pass and a question. That is also what the paper
+// describes: escalation to compiler source is a continuation of the attribution,
+// not a separate round's decision.
+//
+// The trigger stays deliberately EARLY -- one non-improving round. A three-round
+// stagnation window of the kind `local_optimum.py` uses would never fire before the
+// lane was already over.
+const evidenceLadder = (rounds, noImproveCount, enabled, profile) => {
+  if (!enabled) return { requested: null, from: '', reason: '', skip_reason: '' };
   const list = Array.isArray(rounds) ? rounds : [];
   const prior = list.length ? list[list.length - 1] : null;
-  const priorDepth = prior && prior.evidence_depth ? prior.evidence_depth : 'pattern';
-  // A REFUTED mechanism is a stronger signal than a flat round: the machine code has
-  // already answered "did it land" with no, so the open question is which backend
-  // constraint refused it. Asking the ISA layer again would re-derive what we know.
+  const from = reachedStageOf(prior);
+  // A REFUTED mechanism is a stronger trigger than a flat round: the machine code
+  // has already answered "did it land" with no. But it routes to L3, not past it.
+  // "My edit did not reach the binary" is first of all a question about WHICH PASS
+  // undid it, and that is an L3 question; only if L3 names the pass and cannot say
+  // why does it become a compiler-source question. The old code jumped straight to
+  // the compiler here, which was forced by L3 having no pass-level capability to
+  // jump to.
   const priorRefuted = !!(prior && Array.isArray(prior.results) &&
     prior.results.some(r => r && r.mechanism === 'refuted'));
   if (!(noImproveCount >= 1) && !priorRefuted) {
-    return { depth: 'pattern', reason: '', from: '' };
+    return { requested: null, from, reason: '', skip_reason: '' };
   }
-  if (priorDepth === 'isa' || priorRefuted) {
+  if (!hasDominantHotKernel(profile)) {
     return {
-      depth: 'compiler', from: priorDepth,
-      reason: priorRefuted
-        ? 'the previous round\'s machine code refuted the mechanism it declared, so the open '
-          + 'question is which backend constraint refused it, not whether it landed'
-        : `machine-code evidence was already collected at depth "${priorDepth}" and the round `
-          + 'still did not move, so the plateau needs a compiler-side explanation',
+      requested: null, from, reason: '',
+      skip_reason: 'the escalation trigger fired but L2 has not named a dominant hot kernel, and a '
+        + 'trajectory is captured per function -- without one, L3 would trace whichever '
+        + 'translation unit was guessed at and attribute this plateau to it',
     };
   }
   return {
-    depth: 'isa', from: priorDepth,
-    reason: `${noImproveCount} non-improving round(s); before proposing another source direction, `
-      + 'establish from the machine code whether the last one was actually realised -- a '
-      + 'compiler-removed edit reads exactly like an idea that did not help',
+    requested: STAGE_L3, from,
+    reason: priorRefuted
+      ? 'the previous round\'s machine code refuted the mechanism it declared, so the open question '
+        + 'is which lowering stage undid it -- a pass-level question, not yet a compiler-source one'
+      : `${noImproveCount} non-improving round(s); before proposing another source direction, `
+        + 'establish from the lowering trajectory where the last one stopped surviving -- a '
+        + 'pass-removed edit reads exactly like an idea that did not help',
+    skip_reason: '',
   };
 };
 
+// A positive attribution is only admissible if it carries the two fields that make
+// it one. This is the schema-level half of the rule the L3 role states in prose: the
+// ISA archive may corroborate a conclusion, never be its source. An `attributed`
+// return citing machine-code statistics and naming no pass is precisely the old
+// behaviour, and it would sail through a check that only looked at `status`.
+const admissibleAttribution = (attribution) => {
+  if (!attribution || !attribution.diagnosis) return '';
+  const status = String(attribution.status || '');
+  if (status !== 'attributed' && status !== 'needs_compiler') return '';
+  if (!String(attribution.attributed_pass || '').trim()) {
+    return `status "${status}" with no attributed_pass: an attribution that names no pass cannot `
+      + 'be escalated and cannot be acted on -- it is a machine-code statistic wearing a '
+      + 'diagnosis\'s label';
+  }
+  if (!String(attribution.stage_transition || '').trim()) {
+    return `status "${status}" with no stage_transition: without the two stages a reader cannot `
+      + 're-run the finding, and an unverifiable attribution is the one output this layer must '
+      + 'not produce';
+  }
+  return '';
+};
+
+// Whether L3's return actually earns an L4 escalation. Both fields required: L4's
+// whole cost control is that it is handed one question with a stopping condition.
+const wantsCompilerEscalation = (attribution) => (
+  !!attribution && attribution.status === 'needs_compiler'
+  && String(attribution.compiler_question || '').trim().length > 0
+  && Array.isArray(attribution.suspected_passes) && attribution.suspected_passes.length > 0
+);
+
 // The other half of the round's evidence contract: what the round REACHED, given
-// what it asked for and whether an attribution came back. Named, for the same
-// reason as the ladder above -- the first version of this lived inline and its
-// guard matched a string that also appeared in the comment beside it, so the
-// mutation that broke the rule sailed through a check that looked specific.
+// what it asked for and what came back. Named, for the same reason as the ladder
+// above -- the first version of this lived inline and its guard matched a string
+// that also appeared in the comment beside it, so the mutation that broke the rule
+// sailed through a check that looked specific.
 //
-//   pattern                          nothing deeper was asked for
-//   isa | compiler                   an analysis at that depth returned a diagnosis
-//   pattern_after_failed_escalation  it was asked for and produced nothing
+//   L2_profile                 nothing deeper was asked for (the normal round)
+//   L3_ir | L4_compiler_source an analysis at that rung returned a diagnosis
+//   requested_but_unreached    it was asked for and produced nothing
 //
-// An `inconclusive` attribution COUNTS as reaching the depth: a plateau the evidence
+// An `inconclusive` attribution COUNTS as reaching the rung: a plateau the evidence
 // genuinely cannot explain is a real finding, and an analyst forced to produce a
-// mechanism instead of admitting that is an analyst inventing one.
+// mechanism instead of admitting that is an analyst inventing one. `unavailable`
+// does NOT count -- there was nothing to read, which is the failed-escalation case.
 //
-// The third value exists because neither of the other two is true of a failed
-// escalation. Recording `isa` says "we read the machine code and it did not help";
-// recording `pattern` says "we never looked". A later planner acting on either would
-// be acting on a false negative one level above the one this whole layer catches.
-const isaReachedDepth = (requestedDepth, attribution, enabled) => {
-  if (!enabled || requestedDepth === 'pattern') return 'pattern';
-  return attribution ? requestedDepth : 'pattern_after_failed_escalation';
+// The third value exists because neither of the others is true of a failed
+// escalation. Recording L3 says "we reconstructed the trajectory and it did not
+// help"; recording L2 says "we never looked". A later planner acting on either
+// would be acting on a false negative one level above the one this layer catches.
+const reachedStage = (requested, irAttribution, compilerAttribution, enabled) => {
+  if (!enabled || !requested) return STAGE_L2;
+  if (compilerAttribution && compilerAttribution.status !== 'unavailable') return STAGE_L4;
+  if (irAttribution && irAttribution.status !== 'unavailable') return STAGE_L3;
+  return STAGE_FAILED;
 };
 
 const TWIN_LANGUAGES = ['hip', 'cuda'];
@@ -1930,90 +2060,148 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // The trigger is deliberately EARLY. `MAX_NO_IMPROVE` defaults to 2, so a lane
   // dies after two non-improving rounds; a three-round stagnation window would
   // never fire before the lane was already over. So one non-improving round is
-  // enough to ask for machine-code evidence on the next attempt -- the round that
-  // just failed to move is exactly the one whose mechanism is worth checking, and
-  // by then its ISA archive already exists.
-  const isaDepthState = isaEvidenceDepth(history.rounds, noImprove, ISA_ENABLED);
-  if (isaDepthState.depth !== 'pattern') {
-    log(`  [isa] evidence depth for round ${round}: ${isaDepthState.from || 'pattern'} -> `
-      + `${isaDepthState.depth}. ${isaDepthState.reason}`);
+  // enough to ask for a lowering trajectory on the next attempt -- the round that
+  // just failed to move is exactly the one whose mechanism is worth checking.
+  const ladderState = evidenceLadder(history.rounds, noImprove, LADDER_ENABLED, profileSummary);
+  // Read once per round from the same profile the ladder consults, so the ISA
+  // receipt and the escalation decision cannot disagree about which kernel is hot.
+  const hotKernelNames = (profileSummary && Array.isArray(profileSummary.top_kernels)
+    ? profileSummary.top_kernels : [])
+    .map(k => k && typeof k.name === 'string' ? k.name.trim() : '')
+    .filter(Boolean);
+  if (ladderState.requested) {
+    log(`  [ladder] round ${round}: ${ladderState.from} -> ${ladderState.requested}. `
+      + `${ladderState.reason}`);
+  } else if (ladderState.skip_reason) {
+    log(`  [ladder] round ${round}: escalation NOT requested -- ${ladderState.skip_reason}`);
   }
 
   // Run the deep analysis BEFORE planning, so the plan is shaped by it. Running it
   // after would produce a document nobody acted on this round, which is how a
   // "hierarchy" becomes paperwork.
-  let isaAttribution = null;
-  let isaAnalysisSkipped = '';
-  if (isaDepthState.depth !== 'pattern') {
+  let irAttribution = null;
+  let compilerAttribution = null;
+  let isaAnalysisSkipped = ladderState.skip_reason || '';
+  if (ladderState.requested === STAGE_L3) {
     if (!isaCanonicalArchive) {
-      // Named, not silent. Without the canonical archive there is no parent to
-      // attribute against, and inventing one from a fresh build would compare the
-      // plateau against a binary that is not the incumbent.
-      isaAnalysisSkipped = `depth "${isaDepthState.depth}" was requested but the canonical tree `
-        + 'has no ISA archive yet (normal before the first committed round, and after any '
-        + 'canonical that carried none), so there is nothing to attribute the plateau against';
-      log(`  [isa] deep analysis SKIPPED: ${isaAnalysisSkipped}`);
+      // Named, not silent. The ISA archive is what ties a recompiled trajectory to
+      // the binary that was actually measured; without it `ir_capture.py` can still
+      // produce stages, but nothing can say they belong to the incumbent, and an
+      // attribution to a neighbouring binary reads exactly like a real one.
+      isaAnalysisSkipped = 'L3 was requested but the canonical tree has no ISA archive yet '
+        + '(normal before the first committed round, and after any canonical that carried none), '
+        + 'so a captured trajectory could not be tied to the binary that was measured';
+      log(`  [ladder] L3 SKIPPED: ${isaAnalysisSkipped}`);
     } else {
-      const deepRole = isaDepthState.depth === 'compiler' ? 'compiler_engineer' : 'profile_engineer';
-      isaAttribution = await agentT(
-        roleAgent(deepRole, isaDepthState.depth === 'compiler' ? 'compiler_attribution' : 'isa_attribution',
-          isaDepthState.depth === 'compiler'
-            ? 'Explain which backend constraint refused the last mechanism, and what the next edit must satisfy.'
-            : 'Attribute this plateau to the machine code of the current canonical tree.', {
+      irAttribution = await agentT(
+        roleAgent('ir_engineer', 'ir_attribution',
+          'Name the lowering stage and pass where the source intent stopped surviving, and the '
+          + 'structural condition the next rewrite must satisfy.', {
             EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR, WORKSPACE: CANONICAL,
             KERNEL_KNOWLEDGE_DIR,
+            IR_CAPTURE_HELPER: `${WORKFLOW_DIR}/scripts/ir_capture.py`,
+            IR_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/ir_signals.py`,
+            // Supplied for provenance and for an optional closing corroboration --
+            // NOT as the evidence. See ir_engineer.md "The ISA rule", and
+            // `admissibleAttribution` below, which refuses a positive status that
+            // names no pass precisely so this input cannot quietly become the source.
             ISA_ARCHIVE: isaCanonicalArchive,
             ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
-            ISA_CAPTURE_HELPER: `${WORKFLOW_DIR}/scripts/isa_capture.py`,
-            ISA_DEPTH: isaDepthState.depth,
-            // Tier 2 of the compiler role, and unset on this image: /opt/rocm/llvm ships
-            // the built toolchain, not llvm/lib/Target/AMDGPU. Spread only when an
-            // operator actually supplies a checkout, so the role sees its absence and
-            // finishes on Tier 1 or returns inconclusive -- rather than being handed an
-            // empty string it might read as "look somewhere".
-            ...(COMPILER_SOURCE_DIR ? { COMPILER_SOURCE_DIR } : {}),
-            ESCALATION_FROM: isaDepthState.from || 'pattern',
-            ESCALATION_REASON: isaDepthState.reason,
+            ESCALATION_FROM: ladderState.from,
+            ESCALATION_REASON: ladderState.reason,
             PROFILE_SUMMARY: profileSummary,
             HISTORY: history,
-            OUTPUT_PATH: `${EVAL_DIR}/round_${round}_isa_attribution.md`,
+            OUTPUT_PATH: `${EVAL_DIR}/round_${round}_ir_attribution.md`,
           }),
-        { phase: 'Optimize', label: `${deepRole}:${isaDepthState.depth} r${round}`,
-          schema: ISA_ATTRIBUTION_SCHEMA });
-      if (!isaAttribution || !isaAttribution.diagnosis) {
-        isaAnalysisSkipped = `depth "${isaDepthState.depth}" returned no usable diagnosis`;
-        isaAttribution = null;
-        log(`  [isa] deep analysis produced nothing usable; planning proceeds on pattern evidence`);
+        { phase: 'Optimize', label: `ir_engineer:L3 r${round}`, schema: IR_ATTRIBUTION_SCHEMA });
+
+      const inadmissible = admissibleAttribution(irAttribution);
+      if (inadmissible) {
+        isaAnalysisSkipped = `L3 returned an inadmissible attribution -- ${inadmissible}`;
+        log(`  [ladder] L3 REFUSED: ${inadmissible}`);
+        irAttribution = null;
+      } else if (!irAttribution || !irAttribution.diagnosis) {
+        isaAnalysisSkipped = 'L3 returned no usable diagnosis';
+        irAttribution = null;
+        log('  [ladder] L3 produced nothing usable; planning proceeds on profiling evidence');
       } else {
-        log(`  [isa] ${isaDepthState.depth} attribution: status=${isaAttribution.status} `
-          + `${isaAttribution.status === 'attributed'
-            ? `-> next edit must satisfy: ${String(isaAttribution.source_change_required || '(unstated)').slice(0, 160)}`
-            : `(${String(isaAttribution.diagnosis).slice(0, 160)})`}`);
+        log(`  [ladder] L3 attribution: status=${irAttribution.status}`
+          + (irAttribution.attributed_pass ? ` pass=${irAttribution.attributed_pass}` : '')
+          + (irAttribution.stage_transition ? ` (${irAttribution.stage_transition})` : '')
+          + ` -- ${String(irAttribution.status === 'attributed'
+            ? `next edit must satisfy: ${irAttribution.source_change_required || '(unstated)'}`
+            : irAttribution.diagnosis).slice(0, 160)}`);
+      }
+
+      // L4, in THIS round, and only on a question L3 actually formed. This is the
+      // whole reachability fix: waiting for the next round would put the decision
+      // behind a stop budget that ends the lane first.
+      if (wantsCompilerEscalation(irAttribution)) {
+        log(`  [ladder] L3 -> L4: ${String(irAttribution.compiler_question).slice(0, 180)}`);
+        compilerAttribution = await agentT(
+          roleAgent('compiler_engineer', 'compiler_attribution',
+            'Recover the constraint behind the pass L3 named, and the source condition that would '
+            + 'satisfy it.', {
+              EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR, WORKSPACE: CANONICAL,
+              KERNEL_KNOWLEDGE_DIR,
+              IR_ARCHIVE: irAttribution.archive || '',
+              IR_ATTRIBUTION: irAttribution,
+              IR_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/ir_signals.py`,
+              IR_CAPTURE_HELPER: `${WORKFLOW_DIR}/scripts/ir_capture.py`,
+              // Tier 1's provenance check needs both of these.
+              ISA_ARCHIVE: isaCanonicalArchive,
+              ISA_CAPTURE_HELPER: `${WORKFLOW_DIR}/scripts/isa_capture.py`,
+              ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
+              // Tier 2, and unset on this image: /opt/rocm/llvm ships the built
+              // toolchain, not llvm/lib/Target/AMDGPU. Spread only when an operator
+              // actually supplies a checkout, so the role sees its absence and
+              // finishes on Tier 0/1 -- rather than being handed an empty string it
+              // might read as "look somewhere".
+              ...(COMPILER_SOURCE_DIR ? { COMPILER_SOURCE_DIR } : {}),
+              ESCALATION_FROM: STAGE_L3,
+              ESCALATION_REASON: irAttribution.compiler_question,
+              PROFILE_SUMMARY: profileSummary,
+              HISTORY: history,
+              OUTPUT_PATH: `${EVAL_DIR}/round_${round}_compiler_attribution.md`,
+            }),
+          { phase: 'Optimize', label: `compiler_engineer:L4 r${round}`,
+            schema: IR_ATTRIBUTION_SCHEMA });
+        if (!compilerAttribution || !compilerAttribution.diagnosis) {
+          compilerAttribution = null;
+          log('  [ladder] L4 produced nothing usable; the round keeps L3\'s attribution');
+        } else {
+          log(`  [ladder] L4 attribution: status=${compilerAttribution.status} `
+            + `tier=${compilerAttribution.tier_used != null ? compilerAttribution.tier_used : '?'} `
+            + `-- ${String(compilerAttribution.source_change_required
+              || compilerAttribution.diagnosis).slice(0, 160)}`);
+        }
+      } else if (irAttribution && irAttribution.status === 'needs_compiler') {
+        // Named rather than silently downgraded: `needs_compiler` without a pass
+        // list AND a question is a request for an unbounded investigation, and the
+        // reason it is refused belongs in the record.
+        log('  [ladder] L3 asked for L4 without both suspected_passes and a compiler_question; '
+          + 'refused, because an unnarrowed compiler investigation has no stopping condition');
       }
     }
   }
+  // The attribution the planner acts on: L4's when it produced one, else L3's. They
+  // are not merged -- a compiler-level constraint supersedes the IR-level statement
+  // of the same problem, and carrying both would let a planner satisfy the weaker one.
+  const isaAttribution = compilerAttribution || irAttribution;
 
-  // What this round actually REACHED, as distinct from what it asked for. Three
-  // values, and the third is why this is not a boolean:
-  //
-  //   pattern                          no escalation was requested
-  //   isa | compiler                   an analysis at that depth returned a diagnosis
-  //   pattern_after_failed_escalation  escalation was requested and produced nothing
-  //
-  // `inconclusive` COUNTS as reaching the depth. A plateau the evidence genuinely
-  // cannot explain is a real finding, and an analyst forced to produce a mechanism
-  // rather than admit that is an analyst inventing one -- which is how speculation
-  // enters a ledger that later rounds treat as fact.
-  //
-  // The third value exists because collapsing it into plain `pattern` loses the one
-  // thing the next planner needs: writing `isa` on a round whose analysis never ran
-  // says "we looked at the machine code and it did not help", and writing `pattern`
-  // says "we never looked". Neither is true of a failed escalation, and the first is
-  // a false negative one level up from the one this whole layer exists to catch.
-  const isaEffectiveDepth = isaReachedDepth(isaDepthState.depth, isaAttribution, ISA_ENABLED);
-  if (ISA_ENABLED && isaDepthState.depth !== 'pattern' && isaEffectiveDepth !== isaDepthState.depth) {
-    log(`  [isa] round ${round} asked for depth "${isaDepthState.depth}" and reached `
-      + `"${isaEffectiveDepth}". The record states what it reached, never what it wanted, `
+  // What this round actually REACHED, as distinct from what it asked for. See
+  // `reachedStage`: the `requested_but_unreached` value exists because collapsing it
+  // into plain L2 loses the one thing the next planner needs. Writing L3 on a round
+  // whose analysis never ran says "we reconstructed the trajectory and it did not
+  // help"; writing L2 says "we never looked". Neither is true of a failed
+  // escalation, and the first is a false negative one level up from the one this
+  // whole layer exists to catch.
+  const stageReached = reachedStage(ladderState.requested, irAttribution, compilerAttribution,
+    LADDER_ENABLED);
+  if (ISA_ENABLED && ladderState.requested && stageReached !== ladderState.requested
+      && stageReached !== STAGE_L4) {
+    log(`  [ladder] round ${round} asked for "${ladderState.requested}" and reached `
+      + `"${stageReached}". The record states what it reached, never what it wanted, `
       + 'so no later planner reads an unbacked escalation as evidence already spent.');
   }
 
@@ -2024,12 +2212,17 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     // directions it ruled out -- the paper's point being that deep evidence earns
     // its cost mostly by REJECTING plausible directions, not by discovering winners.
     ...(ISA_ENABLED ? {
-      // The depth REACHED, not the one requested. Handing the planner the request
+      // The stage REACHED, not the one requested. Handing the planner the request
       // would tell it evidence exists that does not.
-      ISA_EVIDENCE_DEPTH: isaEffectiveDepth,
-      ...(isaDepthState.reason ? { ISA_ESCALATION_REASON: isaDepthState.reason } : {}),
+      ISA_EVIDENCE_DEPTH: stageReached,
+      ...(ladderState.reason ? { ISA_ESCALATION_REASON: ladderState.reason } : {}),
       ...(isaAttribution ? { ISA_ATTRIBUTION: isaAttribution } : {}),
       ...(isaAnalysisSkipped ? { ISA_ANALYSIS_SKIPPED: isaAnalysisSkipped } : {}),
+      // Both rungs, when both ran. The planner acts on `ISA_ATTRIBUTION` (L4's if it
+      // exists); this pair is here so a reader of the round can see that L4's
+      // constraint came from a pass L3 named, rather than from a fresh guess.
+      ...(irAttribution ? { IR_ATTRIBUTION: irAttribution } : {}),
+      ...(compilerAttribution ? { COMPILER_ATTRIBUTION: compilerAttribution } : {}),
     } : {}),
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     // (127). Both frames, each labelled, so a planner cannot silently read one as the other.
@@ -2255,6 +2448,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
             // Both mean the same thing to the verifier: diff-based claims are
             // indeterminate this round; report that, do not substitute another tree.
             ...(isaCanonicalArchive ? { ISA_PARENT_ARCHIVE: isaCanonicalArchive } : {}),
+            // The kernels L2 said the time is in. A claim holds if ANY shared kernel
+            // moved in the claimed direction -- which is the right rule and stays --
+            // but it means a mechanism can land on a cold sibling and the receipt
+            // read exactly like one that landed on the route being measured. Passed
+            // so the diff can SAY which kernel satisfied it. It never causes a
+            // refusal; see isa_signals.py `--hot-kernel`.
+            ...(hotKernelNames.length ? { ISA_HOT_KERNELS: hotKernelNames } : {}),
           } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
@@ -2804,9 +3004,34 @@ matter how the rest of the run looked.`,
     // level; state it directly" -- and the consistency check below is what stops a
     // depth from being claimed without evidence.
     ...(ISA_ENABLED ? {
-      evidence_depth: isaEffectiveDepth,
-      escalation_from: isaDepthState.from || '',
-      escalation_reason: isaDepthState.reason || '',
+      // Versioned, and separated into request / reach / status / artifact. The
+      // previous record collapsed these into one `evidence_depth` string, which
+      // meant "we asked for machine-code evidence" and "we have machine-code
+      // evidence" were the same field on a resumed lane. `model` is what lets
+      // `reachedStageOf` tell a v2 record from one written before this file
+      // existed -- an older round says `isa`, which is neither L3 nor L4, and
+      // reading it as either would hand the next planner evidence nobody produced.
+      evidence: {
+        model: EVIDENCE_MODEL,
+        requested_stage: ladderState.requested || null,
+        reached_stage: stageReached,
+        status: (isaAttribution && isaAttribution.status) || (ladderState.requested
+          ? 'unavailable' : 'not_requested'),
+        attributed_pass: (irAttribution && irAttribution.attributed_pass) || '',
+        stage_transition: (irAttribution && irAttribution.stage_transition) || '',
+        tier_used: compilerAttribution && compilerAttribution.tier_used != null
+          ? compilerAttribution.tier_used : null,
+        ir_artifact_path: (irAttribution && irAttribution.summary_path) || '',
+        compiler_artifact_path: (compilerAttribution && compilerAttribution.summary_path) || '',
+        skip_reason: isaAnalysisSkipped || '',
+      },
+      // Retained under their old names for one release: `test_lane_gates.js`, the
+      // report phase and any STATE written by a previous build read these, and
+      // renaming them in the same change that renamed the vocabulary would make a
+      // resume failure indistinguishable from a ladder bug.
+      evidence_depth: stageReached,
+      escalation_from: ladderState.from || '',
+      escalation_reason: ladderState.reason || '',
       isa_attribution_path: isaAttribution && isaAttribution.summary_path
         ? isaAttribution.summary_path : '',
       analysis_skipped_reason: isaAnalysisSkipped || '',
@@ -2834,19 +3059,30 @@ phase('Report');
 // one anyway is how a knowledge base fills with rules nobody validated.
 let isaSynthesis = null;
 if (ISA_ENABLED) {
-  const deepRounds = (history.rounds || []).filter(r =>
-    (r.evidence_depth && r.evidence_depth !== 'pattern') ||
-    (Array.isArray(r.results) && r.results.some(x => x && x.mechanism === 'refuted')));
+  const deepRounds = (history.rounds || []).filter(r => {
+    const stage = reachedStageOf(r);
+    return stage === STAGE_L3 || stage === STAGE_L4 || stage === STAGE_LEGACY
+      || (Array.isArray(r.results) && r.results.some(x => x && x.mechanism === 'refuted'));
+  });
   if (deepRounds.length) {
     isaSynthesis = await agentT(
       roleAgent('tech_lead', 'synthesize_isa_lessons',
         'Distil this run\'s machine-code evidence into reusable rules, or report that none qualified.', {
           EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, KERNEL_KNOWLEDGE_DIR, HISTORY: history,
           ISA_ATTRIBUTIONS: deepRounds.map(r => ({
-            round: r.round, evidence_depth: r.evidence_depth,
+            round: r.round, evidence_depth: reachedStageOf(r),
             escalation_reason: r.escalation_reason || '',
-            attribution_path: r.isa_attribution_path || '',
-            analysis_skipped_reason: r.analysis_skipped_reason || '',
+            // The pass, when the round has a v2 record. This is what makes a
+            // synthesised rule reusable at L3 rather than only at the ISA layer:
+            // "signal X means direction Y" is a machine-code rule, "pass P drops
+            // structure S unless condition C" is a lowering one.
+            attributed_pass: (r.evidence && r.evidence.attributed_pass) || '',
+            stage_transition: (r.evidence && r.evidence.stage_transition) || '',
+            attribution_path: (r.evidence && r.evidence.ir_artifact_path)
+              || r.isa_attribution_path || '',
+            compiler_attribution_path: (r.evidence && r.evidence.compiler_artifact_path) || '',
+            analysis_skipped_reason: (r.evidence && r.evidence.skip_reason)
+              || r.analysis_skipped_reason || '',
             mechanisms: (r.results || []).map(x => x && x.mechanism).filter(Boolean),
           })),
           OUTPUT_PATH: `${KERNEL_KNOWLEDGE_DIR}/isa_signals/learned_rules.md`,

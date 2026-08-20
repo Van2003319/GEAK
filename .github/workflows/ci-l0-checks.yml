@@ -85,7 +85,13 @@ jobs:
             e2e_workflow/scripts/tests/test_harness_lib.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
-            geak/test_bootstrap.py
+            geak/test_bootstrap.py \
+            kernel_workflow/scripts/test_ir_capture.py \
+            kernel_workflow/scripts/test_ir_signals.py \
+            kernel_workflow/scripts/test_isa_signals.py \
+            kernel_workflow/scripts/test_isa_capture.py \
+            kernel_workflow/scripts/test_script_conventions.py \
+            kernel_workflow/scripts/test_role_script_references.py
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even
@@ -200,10 +206,13 @@ jobs:
         run: node kernel_workflow/scripts/test_candidate_floor.js
       - name: kernel mode-dispatch regression
         run: node kernel_workflow/scripts/test_mode_dispatch.js
-      - name: kernel QD-archive regression
-        run: node kernel_workflow/scripts/test_qd_archive.js
-      - name: kernel QD-v2 helper regressions
-        run: python3 -m unittest discover -s kernel_workflow/scripts -p 'test_qd_*.py'
+      # The lane's admission gates AND the evidence ladder, executed. This job used
+      # to run two QD suites that no longer exist -- the scripts were removed and the
+      # steps were not, so `node-regression` had been failing on a missing file
+      # rather than on a defect. A red job nobody reads is worse than no job: it
+      # trains the reader to ignore the one signal it was added to give.
+      - name: kernel lane gates + evidence ladder regression
+        run: node kernel_workflow/scripts/test_lane_gates.js
 
   dry-run:
     name: run_e2e dry-run mapping

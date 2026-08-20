@@ -64,6 +64,7 @@ Exit codes (the `hip_twin_sync.py` convention):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -291,10 +292,20 @@ def capture(out_dir: Path, source_root: Path, scan_roots: list[Path],
             continue
         for offset, length in iter_code_objects(blob):
             raw = objects_dir / f"{index}.co"
-            raw.write_bytes(blob[offset:offset + length])
+            payload = blob[offset:offset + length]
+            raw.write_bytes(payload)
             entry = {
                 "index": index, "origin": str(artifact), "offset": offset,
                 "bytes": length, "object": f"objects/{index}.co",
+                # The actual bytes of the code object, so "did codegen change" can be
+                # answered by comparison rather than by inference. `isa_signals.py`'s
+                # `_identical` compares an opcode multiset plus the register/LDS/scratch
+                # budget, and its own docstring is careful to say "as far as these
+                # signals can see" -- an edit that changes operands, immediates or
+                # instruction ORDER without changing the census is invisible to it and
+                # is currently reported as byte-identical codegen, which
+                # `mechanism_verdict` then converts into a hard `refuted`.
+                "sha256": hashlib.sha256(payload).hexdigest(),
             }
             notes_text = ""
             if readelf is not None:

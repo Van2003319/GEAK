@@ -142,16 +142,29 @@ passes them):**
   wrapper, hard constraint gates). Plan toward the addendum's weighted target.
 
 <a id="isa-evidence-hooks"></a>
-**ISA evidence hooks — unlike the deep-mode hooks above, these are the NORMAL case** (present whenever
-the lane runs `isa_evidence=observe|gate`, and `observe` is the default):
-- `ISA_EVIDENCE_DEPTH` — what the ladder actually REACHED, never what it asked for. `pattern` = nothing
-  deeper ran. `isa` / `compiler` = an analysis at that depth returned a diagnosis.
-  `pattern_after_failed_escalation` = machine-code evidence was requested and produced nothing, so you
-  are planning at the cheap level; say so rather than citing evidence that does not exist.
+**Evidence-ladder hooks — unlike the deep-mode hooks above, these are the NORMAL case** (present
+whenever the lane runs `isa_evidence=observe|gate`, and `observe` is the default):
+- `ISA_EVIDENCE_DEPTH` — what the ladder actually REACHED, never what it asked for.
+  `L2_profile` = nothing deeper ran; the round is planned on the counters.
+  `L3_ir` = the lowering trajectory was reconstructed and returned a diagnosis.
+  `L4_compiler_source` = that diagnosis was escalated to a pass-constraint question and answered.
+  `requested_but_unreached` = escalation was requested and produced nothing, so you are planning at
+  the cheap level; say so rather than citing evidence that does not exist.
+  `legacy_machine_code` = a round banked before this ladder existed, whose evidence was a disassembly
+  reading. It is NOT an L3 or L4 result: it names no pass, so it cannot discharge a
+  `source_change_required` and it cannot be cited as a trajectory.
 - `ISA_ESCALATION_REASON` — why the ladder spent the run's most expensive evidence.
-- `ISA_ANALYSIS_SKIPPED` — a depth was requested and could not run (normally: the canonical tree carries
-  no archive yet). Treat the round as `pattern` and do not describe it as machine-code-informed.
-- `ISA_ATTRIBUTION` — the analysis itself, when one came back. Two of its fields BIND this round's plan:
+- `ISA_ANALYSIS_SKIPPED` — an escalation was requested and could not run (normally: the canonical tree
+  carries no ISA archive yet, so a captured trajectory could not be tied to the measured binary; or L2
+  named no dominant hot kernel). Treat the round as `L2_profile` and do not describe it as
+  trajectory-informed.
+- `IR_ATTRIBUTION` / `COMPILER_ATTRIBUTION` — the two rungs separately, when both ran. Present so you
+  can see that L4's constraint came from a pass L3 named rather than from a fresh guess.
+  `IR_ATTRIBUTION.attributed_pass` and `.stage_transition` are the pass and the stage pair; quote them
+  when a direction claims to satisfy the condition, because a direction that cites neither is not
+  responding to this evidence.
+- `ISA_ATTRIBUTION` — the analysis you act on: L4's when it produced one, otherwise L3's. Two of its
+  fields BIND this round's plan:
   - `ruled_out` is a refusal list, not a suggestion. Do not issue a direction it already killed. If you
     think one is still live, name it and name the new evidence — an unexplained re-issue spends a build
     rediscovering what was just paid for, which is the specific waste this ladder exists to prevent.
@@ -402,6 +415,11 @@ verifier's reading of the AMDGCN that was actually timed, not of the candidate's
   `not-realized`, keep the direction live, and make the next attempt's lesson about *why the compiler
   refused* — an alignment it could not prove, a builtin it lowered back, a tile too small for the
   wider access — not about whether the idea works.
+  A `refuted` receipt is **not itself an L4 conclusion.** It says the edit did not reach the binary; it
+  does not say which pass undid it, and it names no constraint. The ladder now routes a refutation to
+  L3, which reconstructs the trajectory and names the pass, and only then to L4. Treating the receipt
+  as if it were a compiler finding is what the previous ladder did — it jumped straight to the compiler
+  role carrying nothing but disassembly statistics, so that role could only guess at the whole backend.
 - `indeterminate` means the evidence to judge was missing (no parent archive yet, tool unavailable,
   nothing captured). Draw no conclusion from it in either direction. It is not weak support for the
   result and it is not a defect in the candidate.

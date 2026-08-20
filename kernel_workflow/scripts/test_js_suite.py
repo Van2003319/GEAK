@@ -185,16 +185,32 @@ MUTANTS = [
     ("the ladder stops escalating on a stagnating lane",
      "  if (!(noImproveCount >= 1) && !priorRefuted) {",
      "  if (true) {"),
-    ("a refuted mechanism no longer escalates to the compiler",
-     "  if (priorDepth === 'isa' || priorRefuted) {",
-     "  if (priorDepth === 'isa') {"),
-    ("a requested evidence depth is recorded as though it were reached",
-     "  return attribution ? requestedDepth : 'pattern_after_failed_escalation';",
-     "  return requestedDepth;"),
-    ("an inconclusive attribution stops counting as reaching the depth",
-     "  if (!enabled || requestedDepth === 'pattern') return 'pattern';",
-     "  if (!enabled || requestedDepth === 'pattern') return 'pattern';\n"
-     "  if (attribution && attribution.status !== 'attributed') return 'pattern';"),
+    ("a refuted mechanism stops escalating at all",
+     "  if (!(noImproveCount >= 1) && !priorRefuted) {",
+     "  if (!(noImproveCount >= 1)) {"),
+    ("the ladder escalates without a localised hot kernel",
+     "  if (!hasDominantHotKernel(profile)) {",
+     "  if (false) {"),
+    ("a requested evidence stage is recorded as though it were reached",
+     "  return STAGE_FAILED;",
+     "  return requested;"),
+    ("an inconclusive attribution stops counting as reaching the rung",
+     "  if (irAttribution && irAttribution.status !== 'unavailable') return STAGE_L3;",
+     "  if (irAttribution && irAttribution.status === 'attributed') return STAGE_L3;"),
+    # The two that keep L3 from decaying back into disassembly reading. An
+    # `attributed` return naming no pass is exactly what the previous L3 produced,
+    # and it is the shape a mutation would restore by relaxing either guard.
+    ("an attribution naming no pass is admitted anyway",
+     "  if (!String(attribution.attributed_pass || '').trim()) {",
+     "  if (false) {"),
+    ("L4 is entered on a request that carries no question",
+     "  && String(attribution.compiler_question || '').trim().length > 0",
+     "  && true"),
+    # Legacy STATE. A resumed lane reading a pre-v2 round as L3/L4 would hand the
+    # next planner evidence nobody ever produced.
+    ("a pre-v2 round is read as though it held IR evidence",
+     "  if (round.evidence_depth && round.evidence_depth !== 'pattern') return STAGE_LEGACY;",
+     "  if (round.evidence_depth && round.evidence_depth !== 'pattern') return round.evidence_depth;"),
 ]
 
 # Finding (65) spans two files: the lane decides the verdict, kernel_workflow.js

@@ -506,6 +506,13 @@ def build_signals(archive: Path) -> dict:
     else:
         exit_code = EXIT_OK
 
+    # The digests of the code objects themselves, when the capture recorded them.
+    # Sorted, because the ORDER objects were sliced out of a fat binary is not
+    # meaningful and two captures of the same build must compare equal.
+    digests = sorted(
+        str(o["sha256"]) for o in (manifest.get("objects") or [])
+        if isinstance(o, dict) and o.get("sha256"))
+
     return {
         "schema": SCHEMA_SIGNALS,
         "exit_code": exit_code,
@@ -514,6 +521,7 @@ def build_signals(archive: Path) -> dict:
         "source_hash": manifest.get("source_hash"),
         "kernel_count": len(kernels),
         "kernels": kernels,
+        "code_object_digests": digests,
         "unavailable": sorted(unavailable),
     }
 
@@ -678,7 +686,9 @@ def _identical(a: dict, b: dict) -> bool:
     return all(_res(a, f) == _res(b, f) for f in fields)
 
 
-def diff_signals(before: dict, after: dict, claims: list[str]) -> dict:
+def diff_signals(before: dict, after: dict, claims: list[str],
+                 hot_kernels: list[str] | None = None) -> dict:
+    hot_kernels = [k for k in (hot_kernels or []) if k]
     left, right = _by_name(before), _by_name(after)
     shared = sorted(set(left) & set(right))
     only_before = sorted(set(left) - set(right))
@@ -707,8 +717,29 @@ def diff_signals(before: dict, after: dict, claims: list[str]) -> dict:
     # kernels only: if the symbol set moved, codegen certainly changed, and
     # calling that "unchanged" would be the false reassurance in the opposite
     # direction.
-    unchanged = bool(shared) and not only_before and not only_after and \
-        all(k["identical"] for k in per_kernel)
+    #
+    # Two ways to establish it, and the stronger one is preferred when both
+    # archives carry digests. `_identical` compares an opcode multiset and the
+    # register/LDS/scratch budget -- which is what the disassembly can show, and
+    # is blind to a change in operands, immediates or instruction ORDER. An edit
+    # that reschedules a loop without changing its census reads as byte-identical
+    # codegen under that test, and `mechanism_verdict` converts "unchanged" into a
+    # hard `refuted` regardless of what the per-claim checkers found. So the weaker
+    # test can refute a candidate that did change the binary.
+    #
+    # The digest can only ever move a verdict from "unchanged" to "changed", so
+    # this makes the gate strictly less trigger-happy and can never newly refuse
+    # anything. Which test was used is reported, because a receipt that does not
+    # say how it decided cannot be audited.
+    left_digests = before.get("code_object_digests") or []
+    right_digests = after.get("code_object_digests") or []
+    if left_digests and right_digests:
+        unchanged = left_digests == right_digests
+        unchanged_basis = "code_object_digest"
+    else:
+        unchanged = bool(shared) and not only_before and not only_after and \
+            all(k["identical"] for k in per_kernel)
+        unchanged_basis = "opcode_and_resource_census"
 
     verdicts = []
     for claim in claims:
@@ -731,8 +762,25 @@ def diff_signals(before: dict, after: dict, claims: list[str]) -> dict:
             results.append((name, realized, evidence))
         if any(r is True for _n, r, _e in results):
             hit = next(x for x in results if x[1] is True)
-            verdicts.append({"claim": claim, "realized": True,
-                             "evidence": f"{hit[0]}: {hit[2]}"})
+            verdict = {"claim": claim, "realized": True,
+                       "evidence": f"{hit[0]}: {hit[2]}",
+                       # WHICH kernel satisfied it. The any-kernel rule above is
+                       # deliberate and stays, but it means a claim can pass on a
+                       # symbol nobody was optimizing, and the receipt did not say
+                       # so. Reported, never enforced: making the hot kernel
+                       # mandatory would reinstate the false negative the rule
+                       # exists to prevent (`learned_rules.md`, "Two ISA-evidence
+                       # validity traps", where a verified -4.72% patch came back
+                       # refuted because every pre-existing symbol was legitimately
+                       # unchanged).
+                       "realized_in": hit[0]}
+            if hot_kernels and hit[0] not in hot_kernels:
+                verdict["realized_outside_target"] = True
+                verdict["evidence"] += (
+                    f" -- NOTE: {hit[0]} is not among the kernels this round targeted "
+                    f"({', '.join(sorted(hot_kernels))}), so the mechanism landed somewhere "
+                    "the plateau was not measured on")
+            verdicts.append(verdict)
         elif all(r is None for _n, r, _e in results):
             verdicts.append({"claim": claim, "realized": None,
                              "evidence": "; ".join(f"{n}: {e}" for n, _r, e in results)})
@@ -780,10 +828,18 @@ def diff_signals(before: dict, after: dict, claims: list[str]) -> dict:
         "only_in_from": only_before,
         "only_in_to": only_after,
         "unchanged_machine_code": unchanged,
+        "unchanged_machine_code_basis": unchanged_basis,
         "per_kernel": per_kernel,
         "claims": verdicts,
         "claims_refuted": refuted,
         "claims_indeterminate": indeterminate,
+        # Advisory, and separate from `claims_refuted` on purpose: a claim that
+        # landed on a non-target symbol is REALIZED, and the round is entitled to
+        # say so. What it is not entitled to do is present that as evidence about
+        # the route it was measuring.
+        "claims_realized_outside_target": [v["claim"] for v in verdicts
+                                           if v.get("realized_outside_target")],
+        "target_kernels": sorted(hot_kernels),
         "mechanism_realized": mechanism_verdict(observable, unchanged),
     }
 
@@ -1039,6 +1095,12 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("--to", dest="to_archive", required=True)
     diff.add_argument("--claim", action="append", default=[],
                       help="repeatable; a claim id from `isa_signals.py claims`")
+    diff.add_argument("--hot-kernel", action="append", default=[], dest="hot_kernel",
+                      help="repeatable; a kernel symbol this round was targeting. A claim that "
+                           "lands only outside this set is still REALIZED and is reported as "
+                           "such -- the flag adds `realized_outside_target` so a reader can see "
+                           "the mechanism arrived somewhere the plateau was not measured. It "
+                           "never causes a refusal.")
 
     checks = sub.add_parser("checks", help="run the rule table over one archive")
     checks.add_argument("--archive", required=True)
@@ -1076,7 +1138,7 @@ def main(argv: list[str]) -> int:
         return payload["exit_code"]
     before = build_signals(Path(args.from_archive))
     after = build_signals(Path(args.to_archive))
-    payload = diff_signals(before, after, list(args.claim))
+    payload = diff_signals(before, after, list(args.claim), list(args.hot_kernel))
     _emit(payload)
     return payload["exit_code"]
 

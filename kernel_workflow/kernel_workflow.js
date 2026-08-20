@@ -47,7 +47,7 @@ const KNOWN_ARGS = new Set([
   'kernel_path', 'workflow_dir', 'exp_root', 'eval_dir', 'task', 'mode', 'target_language',
   'op_spec', 'budget', 'deep_cost', 'min_improve', 'candidate_floor', 'progress_delta',
   'max_no_improve', 'route_bands', 'gpu_ids', 'gpu_mode', 'gpu_lock_env', 'apply_to_original',
-  'state_dir', 'incremental_analyze', 'isa_evidence', 'compiler_source_dir',
+  'state_dir', 'incremental_analyze', 'isa_evidence', 'ir_diagnostics', 'compiler_source_dir',
   'workload_spec_path', 'workload', 'perf_knowledge_dir', 'use_expert_skills', 'expert_skills_dir',
   'shared_kb', 'global_kb', 'e2e_feedback', 'harness_addendum',
   'dra_enabled', 'dra_max_questions', 'dra_blindspot', 'dra_max_blindspots',
@@ -404,6 +404,9 @@ const LANE_INHERITED = {
   ...(A.route_bands != null ? { route_bands: A.route_bands } : {}),
   ...(A.deep_cost != null ? { deep_cost: A.deep_cost } : {}),
   ...(A.isa_evidence != null ? { isa_evidence: A.isa_evidence } : {}),
+  // Separate from `isa_evidence` because the two layers cost different things: the
+  // ISA receipt reads the artifact that ran, the IR trajectory rebuilds one.
+  ...(A.ir_diagnostics != null ? { ir_diagnostics: A.ir_diagnostics } : {}),
   ...(A.compiler_source_dir != null ? { compiler_source_dir: A.compiler_source_dir } : {}),
   ...(A.gpu_lock_env != null ? { gpu_lock_env: A.gpu_lock_env } : {}),
   ...(A.harness_addendum != null ? { harness_addendum: A.harness_addendum } : {}),

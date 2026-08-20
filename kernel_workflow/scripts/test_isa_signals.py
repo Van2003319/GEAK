@@ -124,15 +124,19 @@ def notes(scratch: int = 0, vgpr: int = 96, lds: int = 8192, name: str = KERNEL)
 
 
 def make_archive(root: Path, disasm: str, note_text: str | None,
-                 source_hash: str = "a" * 64, arch: str = "gfx942") -> Path:
+                 source_hash: str = "a" * 64, arch: str = "gfx942",
+                 sha256: str | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "objects").mkdir(exist_ok=True)
     (root / "objects" / "0.disasm.txt").write_text(disasm, encoding="utf-8")
     if note_text is not None:
         (root / "objects" / "0.notes.txt").write_text(note_text, encoding="utf-8")
+    entry = {"index": 0}
+    if sha256 is not None:
+        entry["sha256"] = sha256
     (root / "manifest.json").write_text(json.dumps(
         {"schema": "geak.isa-archive/v1", "arch": arch, "source_hash": source_hash,
-         "exit_code": 0, "objects": [{"index": 0}]}, sort_keys=True), encoding="utf-8")
+         "exit_code": 0, "objects": [entry]}, sort_keys=True), encoding="utf-8")
     return root
 
 
@@ -334,13 +338,16 @@ class BuildSignalsTest(unittest.TestCase):
 
 
 class DiffTest(unittest.TestCase):
-    def _pair(self, left_disasm, right_disasm, left_notes=None, right_notes=None, claims=()):
+    def _pair(self, left_disasm, right_disasm, left_notes=None, right_notes=None, claims=(),
+              left_sha=None, right_sha=None, hot_kernels=None):
         with tempfile.TemporaryDirectory() as tmp:
             a = make_archive(Path(tmp) / "a", left_disasm, left_notes or notes(),
-                             source_hash="a" * 64)
+                             source_hash="a" * 64, sha256=left_sha)
             b = make_archive(Path(tmp) / "b", right_disasm, right_notes or notes(),
-                             source_hash="b" * 64)
-            return S.diff_signals(S.build_signals(a), S.build_signals(b), list(claims))
+                             source_hash="b" * 64, sha256=right_sha)
+            return S.diff_signals(S.build_signals(a), S.build_signals(b), list(claims),
+                                  list(hot_kernels or []))
+
 
     def test_identical_codegen_is_named_as_such(self):
         d = self._pair(DISASM, DISASM, claims=["widen_global_load"])
@@ -448,6 +455,128 @@ class DiffTest(unittest.TestCase):
         self.assertEqual(d["from"]["source_hash"], "a" * 64)
         self.assertEqual(d["to"]["source_hash"], "b" * 64)
 
+
+class ClaimLandedOnASiblingTest(unittest.TestCase):
+    """The other counter-example: the mechanism arrived, but not where it was aimed.
+
+    `diff_signals` holds a claim if ANY shared kernel moved in the claimed
+    direction, and that rule stays: requiring every kernel to move would fail a real
+    widening that landed in the one hot kernel, and requiring the HOT kernel
+    specifically would reinstate the false negative recorded in `learned_rules.md`
+    ("Two ISA-evidence validity traps"). What was missing is that the receipt did
+    not say WHICH kernel satisfied it, so a claim passing on a cold sibling read
+    exactly like one passing on the route being measured.
+
+    Reported, never enforced. The verdict below stays `realized`.
+    """
+
+    # Two kernels, and only the SECOND one widens. `KERNEL` is the hot one.
+    SIBLING = f"{KERNEL}_cold"
+
+    def _two_kernel(self, hot_body: str, cold_body: str) -> str:
+        return (f"custom_gemm.hsaco:\tfile format elf64-amdgpu\n\n"
+                f"Disassembly of section .text:\n\n"
+                f"0000000000000000 <{KERNEL}>:\n{hot_body}"
+                f"\ts_endpgm                                    // 000000000038: BF810000\n\n"
+                f"0000000000000100 <{self.SIBLING}>:\n{cold_body}"
+                f"\ts_endpgm                                    // 000000000138: BF810000\n")
+
+    def _pair(self, hot_kernels):
+        narrow = "\tglobal_load_dword v2, v[0:1], off           // 000000000010: DC500000\n"
+        wide = "\tglobal_load_dwordx4 v[2:5], v[0:1], off     // 000000000010: DC5C0000\n"
+        both_notes = notes(name=KERNEL) + "\n" + notes(name=self.SIBLING)
+        with tempfile.TemporaryDirectory() as tmp:
+            a = make_archive(Path(tmp) / "a", self._two_kernel(narrow, narrow), both_notes,
+                             source_hash="a" * 64)
+            # Only the cold sibling got wider; the hot kernel is untouched.
+            b = make_archive(Path(tmp) / "b", self._two_kernel(narrow, wide), both_notes,
+                             source_hash="b" * 64)
+            return S.diff_signals(S.build_signals(a), S.build_signals(b),
+                                  ["widen_global_load"], list(hot_kernels))
+
+    def test_the_claim_still_passes_and_names_where_it_landed(self):
+        d = self._pair([KERNEL])
+        verdict = next(c for c in d["claims"] if c["claim"] == "widen_global_load")
+        self.assertIs(verdict["realized"], True,
+                      "the any-kernel rule stands; this is a report, not a new refusal")
+        self.assertEqual(verdict["realized_in"], self.SIBLING)
+
+    def test_landing_outside_the_target_is_flagged(self):
+        d = self._pair([KERNEL])
+        verdict = next(c for c in d["claims"] if c["claim"] == "widen_global_load")
+        self.assertTrue(verdict["realized_outside_target"])
+        self.assertEqual(d["claims_realized_outside_target"], ["widen_global_load"])
+        self.assertIn("not among the kernels this round targeted", verdict["evidence"])
+
+    def test_it_is_not_a_refusal(self):
+        d = self._pair([KERNEL])
+        self.assertEqual(d["claims_refuted"], [])
+        self.assertIs(d["mechanism_realized"], True)
+
+    def test_no_target_list_makes_no_claim_about_targeting(self):
+        """With no hot kernels supplied there is nothing to compare against, and
+        inventing a target would be worse than declining to judge."""
+        d = self._pair([])
+        verdict = next(c for c in d["claims"] if c["claim"] == "widen_global_load")
+        self.assertNotIn("realized_outside_target", verdict)
+        self.assertEqual(d["claims_realized_outside_target"], [])
+
+    def test_a_claim_landing_on_the_target_is_not_flagged(self):
+        d = self._pair([self.SIBLING])
+        verdict = next(c for c in d["claims"] if c["claim"] == "widen_global_load")
+        self.assertNotIn("realized_outside_target", verdict)
+
+
+class CodeObjectDigestTest(unittest.TestCase):
+    """The counter-example the census cannot see.
+
+    `_identical` compares an opcode multiset plus the register/LDS/scratch budget.
+    An edit that reschedules a loop, or changes an immediate, or swaps two operands,
+    leaves all of that identical -- and `mechanism_verdict` turns
+    `unchanged_machine_code` into a hard `refuted` no matter what the per-claim
+    checkers concluded. So the weaker test can refute a candidate that DID change
+    the binary. The digest is the direct measurement.
+    """
+
+    def _pair(self, left_sha, right_sha, claims=("widen_global_load",)):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = make_archive(Path(tmp) / "a", DISASM, notes(), source_hash="a" * 64,
+                             sha256=left_sha)
+            b = make_archive(Path(tmp) / "b", DISASM, notes(), source_hash="b" * 64,
+                             sha256=right_sha)
+            return S.diff_signals(S.build_signals(a), S.build_signals(b), list(claims))
+
+    def test_same_census_but_different_bytes_is_not_unchanged(self):
+        d = self._pair("11" * 32, "22" * 32)
+        self.assertFalse(d["unchanged_machine_code"],
+                         "identical opcode and resource counts do not make identical codegen")
+        self.assertEqual(d["unchanged_machine_code_basis"], "code_object_digest")
+
+    def test_identical_bytes_still_read_as_unchanged(self):
+        d = self._pair("11" * 32, "11" * 32)
+        self.assertTrue(d["unchanged_machine_code"])
+        self.assertIs(d["mechanism_realized"], False,
+                      "an observable claim over genuinely byte-identical codegen is still refuted")
+
+    def test_without_digests_the_census_is_used_and_says_so(self):
+        """Archives captured before digests existed must keep working, and the
+        receipt has to say which test decided -- a verdict that does not state how
+        it was reached cannot be audited."""
+        d = self._pair(None, None)
+        self.assertTrue(d["unchanged_machine_code"])
+        self.assertEqual(d["unchanged_machine_code_basis"], "opcode_and_resource_census")
+
+    def test_a_one_sided_digest_falls_back_rather_than_guessing(self):
+        d = self._pair("11" * 32, None)
+        self.assertEqual(d["unchanged_machine_code_basis"], "opcode_and_resource_census")
+
+    def test_the_digest_can_only_loosen_the_gate(self):
+        """It moves verdicts from unchanged to changed, never the reverse, so it can
+        never newly refuse a candidate that the census would have admitted."""
+        census = self._pair(None, None)
+        digest = self._pair("11" * 32, "22" * 32)
+        self.assertTrue(census["unchanged_machine_code"])
+        self.assertFalse(digest["unchanged_machine_code"])
 
 class MechanismVerdictTest(unittest.TestCase):
     """Exhaustive, because collapsing the None is the one bug that inverts the

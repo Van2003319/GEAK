@@ -33,7 +33,18 @@ by an agent returning **structured JSON**.
 - **TechLead** = agent for analyze/roadmap, per-round planning (orthogonal directions + stop), the
   cross-round memory, and the final report.
 - **Engineers** = parallel specialist agents (optimize), plus `benchmark_engineer`, `profile_engineer`,
-  `verify_engineer`, and `integrator`.
+  `verify_engineer`, `ir_engineer`, `compiler_engineer`, and `integrator`.
+
+## Evidence ladder (L1–L4)
+When the search stalls, the lane escalates instead of guessing. `profile_engineer` classifies the
+bottleneck (L2); if that stalls and a dominant hot kernel is named, `ir_engineer` reconstructs the
+kernel's lowering trajectory and attributes the plateau to a specific compiler pass (L3); and only if
+L3 names a pass but cannot say *why* does `compiler_engineer` recover the constraint behind it (L4),
+in the same round. The AMDGCN layer (`isa_capture.py` / `isa_signals.py`) is a **verification**
+receipt — did the declared mechanism reach the binary — not a diagnostic rung.
+
+Full design, including what was wrong with the previous three-rung version and how each rule is
+pinned: [docs/compiler_grounded_evidence_ladder.md](docs/compiler_grounded_evidence_ladder.md).
 
 ## Pipeline
 `Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile → [Research (opt-in)] →`
@@ -240,11 +251,18 @@ kernel_lane.js         single-language WORKER (the deterministic optimize/author
 kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
                      author_engineer, benchmark_engineer, profile_engineer,
+                     ir_engineer (L3), compiler_engineer (L4),
                      verify_engineer, integrator, oracle_freezer (bake-off freeze),
                      researcher (DRA, opt-in)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
+docs/                compiler_grounded_evidence_ladder.md (L1-L4: what each level may claim)
 scripts/             gpu_lock.sh, profile_kernel.sh,
+                     ir_capture.py / ir_signals.py (L3: lowering trajectory + adjacent-pass
+                     attribution; recompiles in a scratch tree, provenance-checked against the
+                     measured binary),
+                     isa_capture.py / isa_signals.py (verification: did the declared mechanism
+                     reach the binary that ran; does NOT recompile),
                      test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane
                      routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`)
 ```

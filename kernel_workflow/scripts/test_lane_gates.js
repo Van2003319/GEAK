@@ -506,68 +506,190 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
   // Extracted as a named function precisely so this block can run it. A rule about
   // when to spend the run's most expensive evidence, defended only by a regex on its
   // log message, is the shape `audit_pin_coverage.py` already caught once.
-  const ladder = new Function(
-    grab(/const isaEvidenceDepth = \(rounds, noImproveCount, enabled\) => \{[\s\S]*?\n\};\n/,
-      'isaEvidenceDepth') + '\nreturn isaEvidenceDepth;')();
-  const rnd = (depth, mechanisms) => ({
-    evidence_depth: depth,
+  // Extracted as one contiguous block, which also pins that the ladder's vocabulary,
+  // its two admissibility predicates and its accounting stay together: they are one
+  // rule split across four names, and a mutation that moved one away from the others
+  // would be invisible to a per-function grab.
+  const L = new Function(
+    grab(/const STAGE_L1 = [\s\S]*?\nconst reachedStage = \([\s\S]*?\n\};\n/, 'the evidence ladder')
+    + '\nreturn { STAGE_L1, STAGE_L2, STAGE_L3, STAGE_L4, STAGE_FAILED, STAGE_LEGACY,'
+    + ' EVIDENCE_MODEL, reachedStageOf, hasDominantHotKernel, evidenceLadder,'
+    + ' admissibleAttribution, wantsCompilerEscalation, reachedStage };')();
+  const ladder = L.evidenceLadder;
+  // A profile that named a hot kernel. Required for any escalation: a trajectory is
+  // captured per function, so without one L3 would trace a guess.
+  const hot = { top_kernels: [{ name: '_Z10hot_kernelPf', pct_of_total: 91.2 }] };
+  const rnd = (stage, mechanisms) => ({
+    evidence: { model: L.EVIDENCE_MODEL, reached_stage: stage },
     results: (mechanisms || []).map(m => ({ mechanism: m })),
   });
 
-  ok(ladder([], 0, true).depth === 'pattern' && ladder([rnd('pattern')], 0, true).depth === 'pattern',
-    'a round that is still improving stays at pattern depth -- the ladder does not spend '
-    + 'machine-code analysis on a search that is working');
-  ok(ladder([rnd('pattern')], 1, true).depth === 'isa',
-    'ONE non-improving round escalates to machine-code evidence: MAX_NO_IMPROVE defaults to 2, '
-    + 'so a three-round stagnation window would never fire before the lane was already dead');
-  ok(/actually realised/.test(String(ladder([rnd('pattern')], 1, true).reason)),
-    'and the reason says what the evidence is for -- establishing whether the last direction '
-    + 'was realised at all, which a flat benchmark cannot distinguish from a bad idea');
-  ok(ladder([rnd('isa')], 1, true).depth === 'compiler' &&
-     ladder([rnd('isa')], 1, true).from === 'isa',
-    'a plateau that survived machine-code attribution escalates once more, to the compiler, '
-    + 'and records what it escalated FROM');
-  ok(ladder([rnd('pattern', ['refuted'])], 0, true).depth === 'compiler',
-    'a REFUTED mechanism jumps straight to the compiler even on an improving round: the ISA '
-    + 'has already answered "did it land" with no, so re-asking it re-derives what is known');
-  ok(ladder([rnd('pattern', ['realized'])], 0, true).depth === 'pattern' &&
-     ladder([rnd('pattern', ['indeterminate'])], 0, true).depth === 'pattern',
-    'and neither a realized nor an indeterminate verdict triggers it -- only a positive '
+  ok(ladder([], 0, true, hot).requested === null
+     && ladder([rnd(L.STAGE_L2)], 0, true, hot).requested === null,
+    'a round that is still improving does not escalate -- the ladder does not spend a recompile '
+    + 'on a search that is working');
+  ok(ladder([rnd(L.STAGE_L2)], 1, true, hot).requested === L.STAGE_L3,
+    'ONE non-improving round escalates to the IR trajectory: MAX_NO_IMPROVE defaults to 2, so a '
+    + 'three-round stagnation window would never fire before the lane was already dead');
+  ok(ladder([rnd(L.STAGE_L2)], 1, true, hot).from === L.STAGE_L2,
+    'and it records what it escalated FROM');
+
+  // THE INVERSION FIX. The previous ladder sent a refuted mechanism straight to the
+  // compiler role, skipping IR attribution entirely -- so the deepest rung was
+  // reached exclusively by the route that handed it nothing but disassembly
+  // statistics, which is why it could only ever guess at the whole backend.
+  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], 0, true, hot).requested === L.STAGE_L3,
+    'a REFUTED mechanism escalates to L3, NOT past it: "my edit did not reach the binary" is '
+    + 'first of all a question about which pass undid it, and that is an IR question');
+  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], 0, true, hot).requested !== L.STAGE_L4,
+    'and it specifically does not jump to the compiler, which is what the old ladder did');
+  ok(ladder([rnd(L.STAGE_L3)], 1, true, hot).requested !== L.STAGE_L4
+     && ladder([rnd(L.STAGE_L3)], 5, true, hot).requested !== L.STAGE_L4,
+    'L4 is NEVER requested at the top of a round, at any stagnation count: it is entered from '
+    + 'inside the round, on a question L3 formed. Requesting it here is what made it unreachable '
+    + 'under the default stop budget');
+
+  ok(ladder([rnd(L.STAGE_L2, ['realized'])], 0, true, hot).requested === null
+     && ladder([rnd(L.STAGE_L2, ['indeterminate'])], 0, true, hot).requested === null,
+    'neither a realized nor an indeterminate verdict triggers escalation -- only a positive '
     + 'contradiction does, so missing evidence never spends a deep round');
-  ok(ladder([rnd('pattern')], 3, true).depth === 'isa',
-    'the ladder climbs one step at a time; it does not skip to the compiler because the lane '
-    + 'has been flat longer');
-  ok(ladder([rnd('isa')], 5, false).depth === 'pattern',
-    'and with the ISA layer off it never escalates at all, whatever the history looks like');
+  ok(ladder([rnd(L.STAGE_L2)], 5, false, hot).requested === null,
+    'with the layer off it never escalates at all, whatever the history looks like');
+
+  // L2 must have localised something. The paper's first test is "has this level
+  // found the dominant bottleneck", not "is it still slow".
+  const noHot = { top_kernels: [] };
+  ok(ladder([rnd(L.STAGE_L2)], 1, true, noHot).requested === null
+     && /dominant hot kernel/.test(String(ladder([rnd(L.STAGE_L2)], 1, true, noHot).skip_reason)),
+    'a stalled round whose profile named no dominant hot kernel does not escalate, and says why: '
+    + 'a trajectory is per-function, so L3 would otherwise trace whichever translation unit was '
+    + 'guessed at and attribute this plateau to it');
+  ok(ladder([rnd(L.STAGE_L2)], 1, true, undefined).requested === null,
+    'and a missing profile is treated the same way rather than as permission');
+
+  // Legacy STATE. A resumed lane must not read a pre-v2 round as if it held the
+  // evidence this ladder produces.
+  ok(L.reachedStageOf({ evidence_depth: 'isa' }) === L.STAGE_LEGACY
+     && L.reachedStageOf({ evidence_depth: 'compiler' }) === L.STAGE_LEGACY,
+    'a round banked before this ladder existed reads as legacy machine-code evidence, never as '
+    + 'L3 or L4: it names no pass, so it can discharge nothing');
+  ok(ladder([{ evidence_depth: 'compiler' }], 1, true, hot).requested === L.STAGE_L3,
+    'and a resumed lane whose last round says "compiler" still starts at L3 -- it does not '
+    + 'inherit a rung nobody ever reached');
+
+  // Admissibility: the schema-level half of "ISA may corroborate, never be the source".
+  const full = { status: 'attributed', diagnosis: 'd', attributed_pass: 'si-load-store-opt',
+    stage_transition: '58 -> 59' };
+  ok(L.admissibleAttribution(full) === '',
+    'an attribution naming a pass and a stage pair is admissible');
+  // Each guard is exercised with the OTHER field present, so neither can be
+  // deleted and stay green behind the one beside it. The first version of this
+  // omitted `stage_transition` from the no-pass case, so both guards fired on one
+  // input and the mutation suite proved the pass check itself was unpinned.
+  ok(L.admissibleAttribution({ status: 'attributed', diagnosis: 'vgpr=152, scratch=0',
+    stage_transition: '58 -> 59' }) !== '',
+    'an `attributed` return that names NO pass is refused -- that is exactly the old L3 output, '
+    + 'true numbers from which no narrowed compiler question can be built');
+  ok(L.admissibleAttribution({ status: 'needs_compiler', diagnosis: 'd',
+    attributed_pass: 'p' }) !== '',
+    'and one with a pass but no stage transition is refused too: without the two stages the '
+    + 'finding cannot be re-run, and an unverifiable attribution is the one output this layer '
+    + 'must not produce');
+  ok(L.admissibleAttribution({ status: 'inconclusive', diagnosis: 'the trajectory does not '
+    + 'explain it' }) === '',
+    'but `inconclusive` needs no pass -- admitting the evidence did not answer is a real finding '
+    + 'and must stay reachable, or the analyst is pushed into inventing a mechanism');
+
+  // The L3 -> L4 handoff, and its refusal.
+  ok(L.wantsCompilerEscalation({ status: 'needs_compiler', suspected_passes: ['si-load-store-opt'],
+    compiler_question: 'which legality condition blocks the merge?' }) === true,
+    'a needs_compiler return carrying suspected passes AND one question escalates to L4');
+  ok(L.wantsCompilerEscalation({ status: 'needs_compiler', suspected_passes: [],
+    compiler_question: 'why is it slow?' }) === false
+     && L.wantsCompilerEscalation({ status: 'needs_compiler',
+       suspected_passes: ['p'], compiler_question: '  ' }) === false,
+    'and one missing either is refused: L4\'s whole cost control is that it is handed a question '
+    + 'with a stopping condition');
+  ok(L.wantsCompilerEscalation({ status: 'attributed', suspected_passes: ['p'],
+    compiler_question: 'q' }) === false,
+    'an `attributed` L3 does NOT escalate even if it filled the fields -- it reached a single '
+    + 'rewrite family, and spending L4 on top of that is the per-round tax this ladder avoids');
+
+  // Reachability under the DEFAULT stop budget, which is the defect this change fixes.
+  // MAX_NO_IMPROVE is 2, so noImprove can only ever be 1 when an escalation is
+  // decided; the old chain needed a SECOND round after an L3 round to reach the
+  // compiler, and the loop exits first.
+  {
+    // Read out of the lane rather than restated, for the reason `grabConst` exists:
+    // a guard that hardcoded 2 would keep passing after someone raised the budget,
+    // and the whole point of this check is that the budget is what made L4
+    // unreachable. `grabConst` cannot be used because this one is computed, so the
+    // default is taken from the expression that supplies it.
+    const maxNoImprove = Number(grab(
+      /const MAX_NO_IMPROVE = Math\.max\(1, parseInt\(A\.max_no_improve != null \? A\.max_no_improve : (\d+), 10\)\);/,
+      'the MAX_NO_IMPROVE default').match(/: (\d+), 10/)[1]);
+    let reachedL4 = false;
+    const history = [];
+    for (let noImprove = 0; noImprove < maxNoImprove; noImprove++) {
+      const state = ladder(history, noImprove, true, hot);
+      if (state.requested === L.STAGE_L3) {
+        const l3 = { status: 'needs_compiler', diagnosis: 'd', attributed_pass: 'si-insert-waitcnts',
+          stage_transition: '92 -> 93', suspected_passes: ['si-insert-waitcnts'],
+          compiler_question: 'which dependency forces the wait?' };
+        if (L.admissibleAttribution(l3) === '' && L.wantsCompilerEscalation(l3)) reachedL4 = true;
+      }
+      history.push(rnd(state.requested === L.STAGE_L3 ? L.STAGE_L3 : L.STAGE_L2));
+    }
+    ok(reachedL4,
+      'L4 is reachable within the DEFAULT stop budget. It was not before: `compiler` could only '
+      + 'be requested from a round whose prior depth was already `isa`, which needed the L3 round '
+      + 'to survive into the next -- but a non-improving L3 round takes noImprove to '
+      + `${maxNoImprove} and the loop exits. The only live path to the deepest rung was the one `
+      + 'that skipped L3');
+  }
 
   // Wiring (55): a gate whose result is computed and discarded is a comment.
-  ok(/const isaDepthState = isaEvidenceDepth\(history\.rounds, noImprove, ISA_ENABLED\);/.test(src),
+  ok(/const ladderState = evidenceLadder\(history\.rounds, noImprove, LADDER_ENABLED, profileSummary\);/.test(src),
     'the round loop actually consults the ladder rather than deciding depth inline');
+  ok(/if \(wantsCompilerEscalation\(irAttribution\)\) \{/.test(src)
+     && src.indexOf('roleAgent(\'compiler_engineer\'') > src.indexOf('roleAgent(\'ir_engineer\''),
+    'and L4 is dispatched from inside the L3 branch, after L3 returned -- not from the top of a '
+    + 'later round');
+  ok(/const inadmissible = admissibleAttribution\(irAttribution\);/.test(src),
+    'the admissibility check runs on the real return, so an attribution naming no pass cannot '
+    + 'reach the planner');
   // Executed, not regex-matched. The first version of this asserted that the string
   // `pattern_after_failed_escalation` appeared in the lane -- and it did, in the
   // COMMENT beside the code, so the mutation that deleted the rule left the check
   // green. A guard that a comment can satisfy is not a guard.
-  const reached = new Function(
-    grab(/const isaReachedDepth = \(requestedDepth, attribution, enabled\) => \{[\s\S]*?\n\};\n/,
-      'isaReachedDepth') + '\nreturn isaReachedDepth;')();
+  const reached = L.reachedStage;
   const someAttribution = { status: 'attributed', diagnosis: 'x' };
-  ok(reached('isa', someAttribution, true) === 'isa' &&
-     reached('compiler', someAttribution, true) === 'compiler',
-    'a depth whose analysis returned a diagnosis is recorded as reached');
-  ok(reached('isa', { status: 'inconclusive', diagnosis: 'the ISA does not explain it' }, true) === 'isa',
-    'an INCONCLUSIVE attribution still counts as reaching the depth -- a plateau the evidence '
+  ok(reached(L.STAGE_L3, someAttribution, null, true) === L.STAGE_L3 &&
+     reached(L.STAGE_L3, someAttribution, someAttribution, true) === L.STAGE_L4,
+    'a rung whose analysis returned a diagnosis is recorded as reached, and L4 supersedes L3 '
+    + 'when both ran');
+  ok(reached(L.STAGE_L3, { status: 'inconclusive', diagnosis: 'the trajectory does not explain it' },
+    null, true) === L.STAGE_L3,
+    'an INCONCLUSIVE attribution still counts as reaching the rung -- a plateau the evidence '
     + 'cannot explain is a real finding, and an analyst forced to produce a mechanism instead of '
     + 'admitting that is an analyst inventing one');
-  ok(reached('isa', null, true) === 'pattern_after_failed_escalation' &&
-     reached('compiler', null, true) === 'pattern_after_failed_escalation',
-    'but a requested depth with NO attribution behind it is neither `isa` nor `pattern`: the '
-    + 'first says "we looked and it did not help", the second says "we never looked", and a '
-    + 'failed escalation is a false negative one level above the one this layer catches');
-  ok(reached('pattern', null, true) === 'pattern' && reached('isa', someAttribution, false) === 'pattern',
-    'no escalation, and the layer off, both record plain pattern');
-  ok(/evidence_depth: isaEffectiveDepth/.test(src) &&
-     /const isaEffectiveDepth = isaReachedDepth\(isaDepthState\.depth, isaAttribution, ISA_ENABLED\);/.test(src),
-    'and the round record actually stores that computed value rather than the requested depth');
+  ok(reached(L.STAGE_L3, { status: 'unavailable', diagnosis: 'capture failed' }, null, true)
+       === L.STAGE_FAILED,
+    'but `unavailable` does NOT: there was nothing to read, which is the failed-escalation case, '
+    + 'and collapsing it into `inconclusive` would tell the next round to stop asking');
+  ok(reached(L.STAGE_L3, null, null, true) === L.STAGE_FAILED,
+    'a requested rung with NO attribution behind it is neither L3 nor L2: the first says "we '
+    + 'reconstructed the trajectory and it did not help", the second says "we never looked", and '
+    + 'a failed escalation is a false negative one level above the one this layer catches');
+  ok(reached(null, null, null, true) === L.STAGE_L2 &&
+     reached(L.STAGE_L3, someAttribution, null, false) === L.STAGE_L2,
+    'no escalation, and the layer off, both record plain L2');
+  ok(/reached_stage: stageReached/.test(src) && /evidence_depth: stageReached/.test(src) &&
+     /const stageReached = reachedStage\(ladderState\.requested, irAttribution, compilerAttribution,/.test(src),
+    'and the round record actually stores that computed value rather than the requested rung');
+  ok(/model: EVIDENCE_MODEL/.test(src) && /requested_stage: ladderState\.requested \|\| null/.test(src),
+    'the record is versioned and keeps request and reach in SEPARATE fields -- collapsing them is '
+    + 'what let "we asked for deep evidence" read as "we have deep evidence" on a resumed lane');
   ok(/const isaReason = isaEvidenceReject\(r\.ver\);/.test(src) &&
      /if \(metricReason \|\| isaReason\) \{/.test(src),
     'the candidate admission path actually consults it, and does so WITHOUT joining '

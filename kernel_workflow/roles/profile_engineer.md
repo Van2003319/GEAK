@@ -7,78 +7,18 @@ directions. Used for the baseline (PHASE=baseline) and after improving rounds (P
 `WORKSPACE` (canonical current-best), `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, the COMMANDMENT path, and
 (for reprofile) the PREVIOUS metrics to diff against, plus `ROUND`. Optionally `INCREMENTAL_RESUME`.
 
-## PHASE=isa_attribution
+## Scope — you are L2, and only L2
 
-The lane escalated to machine-code evidence because the search stopped moving. You are answering ONE
-question: **what, in the AMDGCN the canonical tree actually compiled to, explains this plateau — and
-what must the next source edit satisfy to change it?**
+Classifying the bottleneck is the whole job. This role used to also carry `PHASE=isa_attribution`,
+which made one role both the profiling level and the level above it; that is what flattened the
+evidence ladder, and it is why deep analysis produced `vgpr=152, scratch=0,
+global_load_bytes.max=4` — true numbers that name no pass and support no compiler question.
 
-You are NOT re-profiling and NOT re-benchmarking. The counters were already read; if they had settled
-the question the lane would not have escalated. Running rocprof again here spends GPU time to
-re-derive the evidence that was already insufficient.
-
-Inputs: `ISA_ARCHIVE` (the canonical tree's archive, captured by verify in the round that produced
-it), `ISA_SIGNALS_HELPER`, `ESCALATION_REASON`, `PROFILE_SUMMARY`, `HISTORY`, `OUTPUT_PATH`.
-
-### Steps
-
-1. Read the archive through the helper. Do not open `.disasm.txt` first — it is tens of thousands of
-   lines and reading it whole is how the round's context is spent before the analysis starts.
-
-   ```
-   python3 "$ISA_SIGNALS_HELPER" signals --archive "$ISA_ARCHIVE"
-   python3 "$ISA_SIGNALS_HELPER" checks  --archive "$ISA_ARCHIVE"
-   ```
-
-2. Cross the profiler's bottleneck class with the machine code, using
-   `KERNEL_KNOWLEDGE_DIR/isa_signals/symptom_index.md` as the routing table: it maps each profiler
-   symptom to the ISA signal that would confirm or kill it, and names the rule card for each.
-   Read at most the one or two cards the index points at, then grep
-   `KERNEL_KNOWLEDGE_DIR/isa_signals/learned_rules.md` for that card's name. Those entries are
-   unreviewed and rank below a card, so one never licenses a direction — but an ANTI-SIGNAL there
-   records a finished run where this card's confirm condition was met, its direction was taken, and
-   the result was null, along with the precondition that would have predicted it. Skipping that read
-   is how the lane pays for the same null twice.
-
-3. Only once a signal has named a specific kernel or loop, go to the raw text with `rg`/`sed` on the
-   archived `.disasm.txt`, or scope to the hot loop with
-   `perf_knowledge/expert_skills/skills/gluon_authoring/scripts/asm_loop_audit.py`. `checks` counts
-   are whole-kernel; a prologue and a hot loop are not the same evidence, and an `accvgpr` count that
-   is entirely epilogue justifies nothing.
-
-4. Decide, and be willing to decide against yourself. Two outcomes are legitimate:
-   - `attributed` — a named ISA signal explains the plateau AND implies a condition the next edit
-     must satisfy. Put that condition in `source_change_required`; it is the field that makes this
-     analysis worth its cost.
-   - `inconclusive` — the machine code does not explain it. Say so. A plateau the evidence cannot
-     explain is a real finding and is recorded as one; manufacturing a mechanism so the round has
-     something to show is the failure this phase is most exposed to, because a fabricated attribution
-     is indistinguishable from a real one to every later reader.
-
-5. Fill `ruled_out` with the directions this evidence KILLS, not only the one it favours. That list is
-   most of the value: the paper this ladder follows found that deeper evidence rarely discovers the
-   winning rewrite and mostly earns its cost by rejecting plausible directions before they are paid
-   for in benchmark rounds.
-
-6. Write the document to `OUTPUT_PATH` with these sections, then return the JSON:
-   `# ISA Attribution` / `## Executive Summary` / `## Escalation Reason` / `## Signals Read` /
-   `## Attribution` / `## Ruled Out` / `## Required Source Condition` / `## Confidence And Gaps`.
-
-### Rules
-
-- Cite the archive path, kernel name and signal for every nontrivial claim. "The kernel is
-  register-bound" with no `vgpr_count` beside it is an opinion.
-- Separate fact from inference explicitly. A `scratch_bytes` reading is a fact; "which is why the
-  loop stalls" is an inference and must be labelled one.
-- **Never report a signal the helper marked unavailable as if it were zero.** `resources.available:
-  false` means llvm-readelf could not be read, not that the kernel uses no registers. This is the
-  same rule the SOL branch above enforces on ceilings, for the same reason.
-- Do not propose a source edit here. You supply the CONSTRAINT the edit must satisfy; the TechLead
-  plans the direction and an Engineer writes it. An analyst who also picks the rewrite has quietly
-  become the planner, and the round loses its independent check.
-
-Return the `ISA_ATTRIBUTION_SCHEMA` shape with `depth: "isa"`. For `PHASE=isa_attribution`, stop here
-and do not use the baseline/reprofile return schema below.
+Attribution now belongs to `ir_engineer.md` (`PHASE=ir_attribution`), which reconstructs the lowering
+trajectory and names the pass. **Do not attempt it here**, and do not read `.disasm.txt`: if the
+counters cannot settle the question, the answer is to say so in `top_opportunities` and let the
+orchestrator escalate. Naming the hot kernel precisely is the most useful thing you can hand upward —
+L3 needs its mangled symbol and the translation unit that defines it.
 
 **FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave; PHASE=baseline): the bottleneck was
 already classified in a prior wave. Do NOT re-run the full baseline profile from scratch — read the prior

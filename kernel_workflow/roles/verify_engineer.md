@@ -155,12 +155,22 @@ absolute per-case latencies. The script trusts only your numbers.
 
     ```
     python3 "$ISA_SIGNALS_HELPER" diff --from "$ISA_PARENT_ARCHIVE" --to "$ISA_ARCHIVE_DIR" \
-        $(for c in $ISA_MECHANISM_CLAIMS; do printf -- '--claim %s ' "$c"; done)
+        $(for c in $ISA_MECHANISM_CLAIMS; do printf -- '--claim %s ' "$c"; done) \
+        $(for k in $ISA_HOT_KERNELS; do printf -- '--hot-kernel %s ' "$k"; done)
     python3 "$ISA_SIGNALS_HELPER" checks --archive "$ISA_ARCHIVE_DIR"
     ```
 
     Do **not** re-derive, edit, extend or drop the claims. They are the hypothesis under test; a
     verifier that rewrites the claim to match the evidence has verified nothing.
+
+    `ISA_HOT_KERNELS` (present when the profile named any) does not change a single verdict. A claim
+    holds if ANY shared kernel moved in the claimed direction, and that rule stays — requiring the hot
+    kernel would reinstate the false negative in `learned_rules.md`'s "Two ISA-evidence validity
+    traps". What the flag adds is `realized_in` and, when the two differ,
+    `realized_outside_target`: the mechanism arrived, but on a symbol the plateau was not measured on.
+    **Transcribe `claims_realized_outside_target` into `notes` when it is non-empty.** It is not a
+    refusal and must not be reported as one; it is the difference between "the edit worked" and "the
+    edit worked somewhere else", which the receipt previously could not express.
 
     **When `ISA_MECHANISM_CLAIMS` is empty and `ISA_MECHANISM_CLAIMS_FILE` is set**, read
     `mechanism_claims` out of that JSON file and use it verbatim. That variable appears only on the
