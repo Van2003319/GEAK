@@ -1373,3 +1373,26 @@ Standing decision for the next boundary: if wave 4 also banks nothing *with the 
 is a far stronger stop signal than wave 3's was, and I will treat it as terminal for the lane rather than
 launching a fifth. Wave 3's stop-gate could not distinguish "no headroom" from "wrong instrument"; wave 4
 can.
+
+### wave 3's completion record lands late, and it adds a THIRD measurement of the same code
+
+`wf_90377108-25c` returned after wave 4 was already up. Two things in it matter.
+
+**1. The error bar is now three points, not two, and it holds.** The harness ran its own independent
+validation of `cdb7932` -- `validation_status: accepted`, `validation_trust: verified`,
+`timing_basis: device` -- and got **1.2043**, against the tech_lead's 1.2054 and my epoch A
+`best_per_case` geomean of 1.1993. Total spread **0.51%** across three independent measurements of
+byte-identical code on two boxes and two epochs. That is a corroboration of the provenance note I wrote
+at the boundary, not a contradiction of it, and it puts a hard floor under the lane's own rule: a
+sub-2% cross-session claim on this suite is unreadable, and even sub-0.5% is at the edge of what three
+honest measurements of the *same binary* disagree by. (`final_arithmetic` is 1.2411 -- the arithmetic
+mean, not the scored statistic. The scored metric is the unweighted geomean; do not quote 1.24.)
+
+**2. The stop was not budget exhaustion -- wave 3 spent 5 of 12.** It stopped with **7 budget unspent**,
+by judgement rather than by running out. That materially strengthens the case for having launched wave 4:
+the lane did not run out of room, it ran out of *ideas of one particular shape*, which is precisely the
+distinction the closed-list relay was meant to attack. 22 agents, 0 errors, 2.46M subagent tokens, 2h37m.
+
+STATE deliberately NOT edited to record this -- wave 4 owns that file now, and a read-modify-write from
+outside a running wave is the lost-update this lane has already been bitten by. It goes here instead and
+folds into STATE at the next boundary.
