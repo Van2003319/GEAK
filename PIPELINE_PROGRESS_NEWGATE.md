@@ -1534,3 +1534,121 @@ claim.
 `lane_args --check` exit 0, rendered with `--print`, invoked verbatim. Same rule stands for the next
 boundary: if this wave banks nothing **with the closed list in hand**, that is terminal for the lane and
 I will not launch a fifth.
+
+
+---
+
+## 2026-08-20 04:xx — 运维改动：接受逻辑换成「均值向上 + 至少一条形状真的动了」
+
+**第二次有意的中途改动，改的仍是本 lane 的被测对象。** 由运行方决定，commit `6fc130fd`。
+从**下一波（波 5）**起生效——波 4 是 01:46:59 起的，嵌套 workflow 起波时就已载入 `kernel_lane.js`。
+
+### 新判据
+
+```
+suite geomean 相对同会话对照臂 > 1.0（没有阈值）
+  且 至少一条路线提升 > max(2%, 该路线在本纪元的实测底噪)
+  且 没有任何一条路线回退超过 10%
+```
+
+### 为什么换掉旧的并集
+
+旧规则是「逐路判据 ∪ suite 阈值」，外面再套一个**回归否决权**。那个否决权让本 lane 丢了两个最大的结果：
+
+- **wave 1 round 2** —— 11 条路里 10 条 +24%~+50%，因为 `decode_m2_square` 吐回 **0.0006 ms** 被拒。
+- **wave 1 round 3** —— 整合栈 suite **+5.35%**（改善的 8 条平均 +8.4%），因为三条路吐回 1.3%~2.8% 被拒。
+
+否决权优化的是「逐路帕累托改进」，而**本 lane 的记分牌是 11 例非加权 suite geomean**。
+拒绝一个让目标函数上升的候选，是在优化没人给它记分的东西。
+
+当初支持它的两条理由都不成立：一是"改默认不可能让任何运行更严"——wave 1 round 2 就是反例，
+而且那是这个 gate 第一次真的能跑的一轮；二是"11 条路各 +0.4% 是一次 ~4.4% 的 suite 胜利，
+逐路判据看不见"——**这是算错了**，11 个 1.004 的几何平均就是 1.004。这个数现在被守卫钉死了。
+
+拿本 lane 已经做过的每一次判决重放：新规则处处一致，**只有那两次拒绝翻成通过**。
+另外 wave 1 round 1 的 ACCEPT 也变干净了——它原来有一半靠 `prefill_m2048_square +0.32% vs band 0.27%`，
+那是当时人工标注过的抽样产物；2% 的门槛下它不参与判决，ACCEPT 完全由 `decode_m32_down +12.92%` 承担。
+
+### 为什么 2% 不是固定的
+
+同一个套件在同一台机器上，逐路噪声相差 **28 倍**。纪元 Z（tw035）有 **3 条路的实测底噪超过 2%**
+（`decode_m8_up` 7.64%、`prefill_m256_down` 7.02%、`prefill_m1024_down` 2.10%），
+固定 2% 在那三条路上读的是噪声。纪元 Y、A、B 上每条都低于 1.3%，表一条都不抬。
+所以 **2% 是规则、实测底噪是例外，且只能抬高不能降低**。
+
+10% 那道护栏不是噪声判据——它比测过的最宽底噪还大一个数量级，不会误伤真实工作。
+它只做一件事：不让"平均涨了"把某个 shape 变慢三成。底噪和护栏之间的回退**全部接受并记名**，
+因为只记胜利的 ledger 三波之后回答不了"哪个 shape 变慢了"。
+
+### 供给问题才是真问题
+
+gate 喂不进去就等于没跑：七个波次里它一行日志都没打过。
+原来的补救是从 baseline 的 n=5 重复现推 band——**这次直接删了，不是停用**：
+n=5 的极差测的是"有没有抽到飞点"，对着 24 次重复的标定偏紧 8.8 倍 / 偏松 2.9 倍。
+
+对的表本来就有（`measure_noise_floor.py`，8 次同变体预热重复，`2*MAD/median`），
+当初不能用是因为会过期——而纪元注册自动化之后，**每次换机都会重测**。于是：
+
+- `scripts/route_floors.py` 输出当前纪元的表，**provisional 的纪元直接拒绝**而不是吐出 fail-closed 默认值
+  （那会把每条路的门槛抬到 ~7%，整波都无法接受任何东西，还不出声）。
+- `lane_args.py` 在启动时解析 `"route_bands": "@current_epoch"`。**数字永远不写进 lane 文件**——
+  写下来的底噪就是会活得比它的机器更久的底噪，这正是 epoch-Q 那张表过期六个纪元还看着像当前值的原因。
+- lane 现在**每一轮只要有候选就调用 gate**。原来它以"表存在"为条件，那等于悄悄退回 suite 阈值。
+
+### 验证
+
+JS 384 项（5 个守卫）、Python 915 passed。gate 的阈值由守卫**从 lane 源码里抽取**而不是复述，
+所以改了 lane 的数字守卫不会继续通过。新增可执行守卫覆盖：无表时 gate 照跑、实测底噪只抬不降、
+部分表按路线回退而不是拒整个候选、两个条件各自单独失败、护栏在"平均很好"的候选上开火、以及刚好在护栏内不开火。
+
+### 仍然红的两条（不是这次造成的，需要你们决定）
+
+`test_noise_floor_stats.py` 两条，在 HEAD 上同样复现，只碰 `noise_floor_stats.py`（本次未修改该文件）：
+纪元 Z 把 `decode_m8_up` 测成 **7.64%**，比 `DEFAULT_NOISE_FLOOR`（7.2%）还宽，
+于是「未知路线/未知机器拿到任何地方最宽的底噪」这个 fail-closed 性质不再成立。
+修它要移动 `DEFAULT_NOISE_FLOOR` 的推导位置，而 provisional 表是**用这个常量造的**，
+改了会动到每台新机器开局的 fail-closed 底噪。**波次在跑的时候不该悄悄改一个 fail-closed 常量。**
+
+## wave 4b round 1: BANKED `4dd8f63` at **1.2707** -- +4.94% over the incumbent, and the plateau was not a plateau
+
+First bank since wave 2, and the largest single-round move this lane has made since wave 1.
+247 insertions / 131 deletions across 6 files including the core `custom_gemm.hip` -- i.e. the
+"coherent rewrite across body + plan + instantiation set" that wave 3's own stop note said was the
+only defensible remaining shape. It was right about the shape and wrong about the stopping.
+
+**Measured against the same-lock control, per route, against epoch B floors** (the methodology wave 3
+mandated -- never against the stored number):
+
+| | geomean vs oracle |
+|---|---|
+| candidate | **1.2707** |
+| same-lock control (incumbent, this session) | 1.2109 |
+| **candidate / control** | **+4.94%** |
+| stored `cumulative` 1.2054 (epoch Z, other session) | control is +0.46% above it -- drift, not progress |
+
+That +0.46% control-vs-stored gap sits inside the 0.51% three-measurement spread I documented at the
+wave-3 boundary, which is a satisfying independent confirmation that the error bar was honest.
+
+**8 of 11 routes win above their own floor, 3 are noise, ZERO regress.** The two that matter:
+
+- `prefill_m128_square` **0.8362 -> 0.9183 (+9.82%)** -- the route wave 3 declared shut after measuring
+  staging width, residency, barrier count, tile, slices, bytes-per-output and LDS conflicts all closed,
+  with its 79.3% SQ_WAIT_ANY unexplained. It moved nearly 10% the moment something attacked it as a
+  whole instead of one knob at a time.
+- `decode_m96_up` **0.9324 -> 1.0244 (+9.87%)** -- crosses oracle parity for the first time in this lane.
+- `prefill_m512_up` 1.0234 -> 1.0727, `prefill_m256_down` 1.0617 -> 1.1247.
+
+**What this says about the stop-gate, which is the part worth keeping.** Wave 3 satisfied all three
+stop clauses with receipts and left 7 of 12 budget unspent. Its clauses were *true* -- and its
+conclusion was still wrong, because every clause measured the exhaustion of one-knob arms and none of
+them could see headroom reachable only by a different move class. A stop-gate that cannot distinguish
+"no headroom" from "wrong instrument" will keep producing confident false stops. Launching over it was
+right, and the closed list is what made the retry cheap rather than a repeat.
+
+Also settles a caption question: the commit message's `(1.27x)` is the **absolute vs-oracle geomean**,
+matching 1.2707 -- not a wave-local figure. Wave 2's `(1.21x)` was likewise absolute (1.2054). My earlier
+note calling those captions wave-local was wrong.
+
+STATE not yet rewritten (`cumulative` still 1.2054, `last_round` still wave 3's 2) -- `update_memory`
+runs after the commit. **Falsifiable prediction for when it lands:** correct is **1.2707**; the frame bug
+would show as 1.2054 x 1.2707 = **1.5317**, and a subtler chaining error as 1.2054 x 1.0494 = **1.2650**.
