@@ -258,7 +258,11 @@ class RegisterEpochTest(unittest.TestCase):
         edits apply cleanly and the registration is still false. The tool has to
         find that by asking the module, which is the entire reason it re-imports
         rather than trusting its own replace count."""
-        stale = sorted(QRS.MACHINE_HOSTNAME)[0]
+        # Any registered letter EXCEPT the live one. Naming the live one appends a line identical
+        # to the existing assignment, and the anchor-count guard refuses first -- a correct
+        # refusal, but not the one this test is about. This read `sorted(...)[0]` until the
+        # alphabet wrapped past Z and epoch A became both the first letter and the current one.
+        stale = sorted(set(QRS.MACHINE_HOSTNAME) - {QRS.CURRENT_MACHINE})[0]
         self.stats.write_text(self.before + f'\nCURRENT_MACHINE = "{stale}"\n',
                               encoding="utf-8")
         mutated = self.stats.read_text(encoding="utf-8")

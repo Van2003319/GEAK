@@ -72,6 +72,12 @@ def improved_expr() -> str:
     is entirely a property of the legacy expression, so extracting it is still the right anchor.
     What the rename must not do is silently drop coverage of the newer, authoritative gate, so
     `RouteGateStillOverridesTheSuiteGate` below pins that it exists and can disagree.
+
+    The rule has since moved again, into `judgeCandidate(cand)`, so that SELECTING a winner and
+    ACCEPTING one are decided by one implementation rather than two. It is therefore written in
+    terms of `cand` rather than `winner`; the harness below binds both names to the same object, so
+    the extracted expression evaluates whichever way the lane spells it and this file does not have
+    to be edited again the next time the rule is hosted somewhere else.
     """
     m = re.search(r"^\s*const legacyImproved = (.+?);\s*$", SOURCE, re.M)
     if not m:
@@ -107,7 +113,8 @@ def run_resume(prior_state: dict, winner_geomean: float, min_improve: float,
           + f"var setup = {json.dumps({'resumed': True, 'prior_state': prior_state})};\n"
           + block + "\n"
           + f"var MIN_IMPROVE = {min_improve};\n"
-          + f"var winner = {json.dumps({'geomean': winner_geomean})};\n"
+          + f"var cand = {json.dumps({'geomean': winner_geomean})};\n"
+          + "var winner = cand;\n"
           + f"var improved = {improved_expr()};\n"
           + "JSON.stringify({cumulative: cumulative, prior: priorCumulativeVsSeed, "
             "vs_seed: cumulativeVsSeed(), improved: improved, logs: LOGS});")
@@ -216,13 +223,24 @@ class RouteGateStillOverridesTheSuiteGate(unittest.TestCase):
     """
 
     def test_the_route_gate_can_overturn_the_suite_gate(self):
-        self.assertIn("improved = routeVerdict.accepted", SOURCE,
+        self.assertIn("improved: rv.accepted", SOURCE,
                       "the per-route gate no longer overrides the suite-geomean verdict")
 
     def test_the_suite_gate_survives_as_the_other_arm_of_the_union(self):
-        self.assertIn("const suiteSaysYes = legacyImproved && !routeVerdict.regressed.length", SOURCE,
+        self.assertIn("const suiteSaysYes = legacyImproved && !rv.regressed.length", SOURCE,
                       "the suite verdict must remain a route to acceptance, minus banded regressions")
-        self.assertIn("improved = routeVerdict.accepted || suiteSaysYes", SOURCE)
+        self.assertIn("improved: rv.accepted || suiteSaysYes", SOURCE)
+
+    def test_the_decision_that_selects_is_the_decision_that_judges(self):
+        """The two halves used to be able to disagree, and did. Ranking is by suite geomean while
+        acceptance is per-route, and only the top-ranked candidate was ever offered to the gate --
+        so a round could hold a candidate the gate would accept and bank nothing. The selector now
+        calls the same predicate, which is the only form of the fix that cannot drift apart again.
+        """
+        self.assertIn("const passIdx = candidates.findIndex(c => judgeCandidate(c).improved);",
+                      SOURCE, "selection no longer uses the acceptance predicate")
+        self.assertIn("const verdict = winner ? judgeCandidate(winner) : null;", SOURCE,
+                      "the logged verdict is no longer the one selection was decided on")
 
     def test_the_suite_gate_is_still_computed_so_disagreements_are_auditable(self):
         # The override is only auditable if the number every prior round was judged on is still

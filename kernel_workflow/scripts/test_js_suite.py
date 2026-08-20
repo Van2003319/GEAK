@@ -142,9 +142,11 @@ MUTANTS = [
     ("the planner may overspend by the cost of one direction",
      "    if (plannedCost + d.cost > remaining) {",
      "    if (plannedCost > remaining) {"),
+    # The threshold moved into `judgeCandidate(cand)` when SELECTION and acceptance were made to
+    # share one implementation, so the mutant follows it. The invariant is untouched.
     ("a candidate wins the round without clearing MIN_IMPROVE",
-     "  const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));",
-     "  const legacyImproved = !!(winner && winner.geomean > cumulative);"),
+     "    const legacyImproved = cand.geomean > cumulative * (1 + MIN_IMPROVE);",
+     "    const legacyImproved = cand.geomean > cumulative;"),
     ("an incorrect candidate reaches the archive",
      "          says(r.ver.status, 'verified') && says(r.ver.correctness, 'pass'))) return false;",
      "          says(r.ver.status, 'verified'))) return false;"),
@@ -240,8 +242,8 @@ FLOOR_MUTANTS = [
     # suite pins that as an absence, so only a mutant that introduces the
     # forbidden form can show the pin fires.
     ("the commit gate is loosened to the candidate floor",
-     "const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));",
-     "const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + CANDIDATE_FLOOR));"),
+     "const legacyImproved = cand.geomean > cumulative * (1 + MIN_IMPROVE);",
+     "const legacyImproved = cand.geomean > cumulative * (1 + CANDIDATE_FLOOR);"),
     # `madeProgress` is now the union of this suite arm and a per-route arm, so the guard being
     # mutated lives on `suiteProgress`. The invariant is unchanged: without `bestSeen > 0` a
     # first-round winner just above the floor makes progress trivially true (bestSeen is 0) and
