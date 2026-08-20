@@ -27,6 +27,13 @@ SCRIPT = HERE / "route_floors.py"
 LIVE = QRS.CURRENT_MACHINE
 LIVE_HOST = QRS.MACHINE_HOSTNAME[LIVE]
 MEASURED = sorted(set(QRS.MEASURED_NOISE_FLOOR_BY_MACHINE) - QRS.PROVISIONAL_MACHINES)
+# The epoch these tests exercise the EMITTER against. Deliberately not the live one: for a window
+# after every machine change -- and this container changes machine every few hours -- the live epoch
+# is registered but not yet swept, so `resolve()` refuses it, correctly. Tests that went red during
+# that window would be red on schedule for reasons that are not defects, which is how a suite trains
+# people to ignore it. The live epoch gets its own tests below, and they skip when it is provisional.
+SAMPLE = MEASURED[-1] if MEASURED else None
+LIVE_IS_MEASURED = LIVE not in QRS.PROVISIONAL_MACHINES
 PROVISIONAL = sorted(QRS.PROVISIONAL_MACHINES & set(QRS.MEASURED_NOISE_FLOOR_BY_MACHINE))
 UNREGISTERED = next(c for c in "BCDEFGHIJK"
                     if c not in QRS.MACHINE_HOSTNAME
@@ -40,20 +47,20 @@ def run(*args: str) -> subprocess.CompletedProcess:
 
 class RouteFloorsTest(unittest.TestCase):
 
-    def test_the_live_epoch_emits_its_measured_table(self):
-        proc = run("--machine", LIVE)
+    def test_a_measured_epoch_emits_its_table(self):
+        proc = run("--machine", SAMPLE)
         self.assertEqual(0, proc.returncode, proc.stderr)
         got = json.loads(proc.stdout)
-        self.assertEqual(LIVE, got["machine"])
-        self.assertEqual(LIVE_HOST, got["host"])
+        self.assertEqual(SAMPLE, got["machine"])
+        self.assertEqual(QRS.MACHINE_HOSTNAME[SAMPLE], got["host"])
         self.assertTrue(got["measured"])
-        self.assertEqual(QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[LIVE].keys(), got["floors"].keys())
+        self.assertEqual(QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[SAMPLE].keys(), got["floors"].keys())
 
     def test_the_numbers_are_the_table_and_not_a_rounding_of_it(self):
         """A floor is compared against a per-route delta, so a lossy round trip
         moves the bar. Six decimals is four more than any floor carries."""
-        got = json.loads(run("--machine", LIVE).stdout)["floors"]
-        for route, want in QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[LIVE].items():
+        got = json.loads(run("--machine", SAMPLE).stdout)["floors"]
+        for route, want in QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[SAMPLE].items():
             with self.subTest(route=route):
                 self.assertAlmostEqual(want, got[route], places=6)
 
@@ -66,7 +73,10 @@ class RouteFloorsTest(unittest.TestCase):
         silently unable to accept anything."""
         if not PROVISIONAL:
             self.skipTest("no provisional epoch registered to test against")
-        proc = run("--machine", PROVISIONAL[0])
+        # Prefer the LIVE one when it is provisional: that is the case that actually occurs, in the
+        # window between registering a new box and sweeping its floors.
+        target = LIVE if not LIVE_IS_MEASURED else PROVISIONAL[0]
+        proc = run("--machine", target)
         self.assertEqual(3, proc.returncode)
         self.assertIn("PROVISIONAL", proc.stderr)
         self.assertIn("measure_noise_floor.py", proc.stderr,
@@ -75,7 +85,8 @@ class RouteFloorsTest(unittest.TestCase):
     def test_a_provisional_epoch_can_still_be_forced_and_says_so(self):
         if not PROVISIONAL:
             self.skipTest("no provisional epoch registered to test against")
-        proc = run("--machine", PROVISIONAL[0], "--allow-provisional")
+        target = LIVE if not LIVE_IS_MEASURED else PROVISIONAL[0]
+        proc = run("--machine", target, "--allow-provisional")
         self.assertEqual(0, proc.returncode, proc.stderr)
         floors = json.loads(proc.stdout)["floors"]
         self.assertEqual({QRS.DEFAULT_NOISE_FLOOR}, set(floors.values()))
@@ -90,12 +101,12 @@ class RouteFloorsTest(unittest.TestCase):
         thing it is pasted into is validated by lane_args.py. A fragment that
         does not parse would be found at launch, which is the one moment nobody
         has time to debug it."""
-        proc = run("--machine", LIVE, "--arg")
+        proc = run("--machine", SAMPLE, "--arg")
         self.assertEqual(0, proc.returncode, proc.stderr)
         obj = json.loads("{" + proc.stdout.rstrip().rstrip(",") + "}")
-        self.assertEqual(QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[LIVE].keys(),
+        self.assertEqual(QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[SAMPLE].keys(),
                          obj["route_bands"].keys())
-        self.assertIn(LIVE, obj["_route_bands_provenance"])
+        self.assertIn(SAMPLE, obj["_route_bands_provenance"])
         self.assertIn("measured", obj["_route_bands_provenance"],
                       "the fragment must carry which box and which epoch it describes; a floor "
                       "table with no provenance is how one went six epochs stale unnoticed")
@@ -106,6 +117,10 @@ class RouteFloorsTest(unittest.TestCase):
         import socket
         if QRS.machine_for_host(socket.gethostname()) != LIVE:
             self.skipTest("this host is not the live epoch's host")
+        if not LIVE_IS_MEASURED:
+            self.skipTest(f"epoch {LIVE} is registered but not yet swept -- the correct state for a "
+                          "box the container has just landed on, and `resolve()` refusing it is the "
+                          "behaviour tested above, not a defect here")
         self.assertEqual(json.loads(run().stdout)["machine"], LIVE)
 
     def test_it_refuses_on_a_host_the_live_epoch_does_not_describe(self):
