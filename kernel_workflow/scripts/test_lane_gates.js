@@ -684,6 +684,16 @@ console.log('\n# the commit gate needs no band file, and a measured table only T
     'the log names where a real table comes from; the previous supply failure was nobody knowing');
   ok(/Commit gate: suite geomean must improve at all AND/.test(src),
     'the rule in force is stated in the log at Setup, so the run says what it will accept');
+  // The effective-config echo is the OTHER place the rule is described, and it was missed when the
+  // derivation was deleted: it went on printing "will be DERIVED from the baseline repeats after
+  // the Benchmark phase" for a derivation that no longer existed. An echo whose whole purpose is to
+  // tell a reader what will decide the round, describing machinery that cannot run, is worse than
+  // no echo. Both descriptions must name the bar that is actually applied.
+  ok(!/will be DERIVED from the baseline repeats/.test(src),
+    'the config echo no longer promises a derivation that was deleted');
+  ok(/route_bands=\$\{ROUTE_BANDS_ARG[\s\S]{0,400}MIN_ROUTE_WIN \* 100/.test(src),
+    'the config echo names the actual bar in BOTH branches -- supplied and not -- so "no table" ' +
+    'reads as "held to the default" rather than as a missing feature');
 }
 
 console.log('\n# the gate compares against a SAME-SESSION control when the verifier returns one, executed');
