@@ -2354,11 +2354,68 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     }
   }
 
+  // The commit decision for ONE candidate, as a pure function. SELECTION below and the logged
+  // verdict further down both call it, so they cannot answer differently -- two implementations of
+  // "does this pass" is one more than can be trusted, and this particular pair is where the
+  // divergence fixed here actually lived.
+  const judgeCandidate = (cand) => {
+    const sameSession = !!cand.control_per_case;
+    const legacyImproved = cand.geomean > cumulative * (1 + MIN_IMPROVE);
+    const rv = ROUTE_BANDS
+      ? routeGate(cand.per_case, sameSession ? cand.control_per_case : bestPerCase, ROUTE_BANDS,
+        { targetRoutes: cand.target_routes })
+      : null;
+    if (!rv || !rv.applicable) {
+      return { sameSession, legacyImproved, routeVerdict: rv, suiteSaysYes: legacyImproved,
+        improved: legacyImproved };
+    }
+    const suiteSaysYes = legacyImproved && !rv.regressed.length;
+    return { sameSession, legacyImproved, routeVerdict: rv, suiteSaysYes,
+      improved: rv.accepted || suiteSaysYes };
+  };
+
   candidates.sort((a, b) => b.geomean - a.geomean);
+  // The highest geomean OFFERED this round, kept before any reordering below, because `bestSeen`
+  // means "the best any candidate measured, committed or not" and that must not change just
+  // because a different candidate was the one that could be banked.
+  const topOffered = candidates.length ? candidates[0].geomean : 0;
+  // SELECTION is "the best candidate that PASSES the gate", not "the best candidate".
+  //
+  // It used to be `candidates[0]`, ranked on suite geomean, while the ACCEPTANCE test below is
+  // per-route -- two criteria with nothing in between. So a round could be holding a candidate the
+  // gate would have accepted and still bank nothing. That is not hypothetical: on lane
+  // coldstart_newgate_20260819 wave 1 round 2 the top candidate (0.924) was refused for giving back
+  // 0.0006 ms on decode_m2_square, while the second (0.632) was ACCEPT with zero banded regressions
+  // and was never offered to the gate at all. The hole did not exist while both halves ranked on the
+  // same geomean; it was introduced by changing only the acceptance test, and it can only ever cost
+  // a round work it had already paid for.
+  //
+  // Deliberately NOT added: a floor requiring the chosen candidate to also beat `cumulative`.
+  // `cumulative` is an absolute from an earlier session, and refusing a candidate that is
+  // flat-or-better on every route against its OWN session's control, because a stale absolute
+  // drifted underneath it, would reintroduce exactly the cross-session comparison the control arm
+  // exists to remove. The disagreement is logged instead: it is a fact about the round, not a reason
+  // to discard the round's only bankable result.
+  const passIdx = candidates.findIndex(c => judgeCandidate(c).improved);
+  if (passIdx > 0) {
+    const chosen = candidates.splice(passIdx, 1)[0];
+    const refused = candidates[0];
+    log(`  [gate r${round}] the highest-geomean candidate (${refused.id}, ${refused.geomean.toFixed(5)}) ` +
+        `does not pass the commit gate, but ${chosen.id} (${chosen.geomean.toFixed(5)}) does; ` +
+        'selecting the best candidate that PASSES rather than banking nothing. Ranking is by suite ' +
+        'geomean and acceptance is per-route, so the top of the ranking is not always the one the ' +
+        'gate can take.');
+    if (chosen.geomean <= cumulative) {
+      log(`  [gate r${round}] NOTE: ${chosen.id}'s suite geomean ${chosen.geomean.toFixed(5)} does not ` +
+          `exceed the incumbent's stored ${cumulative.toFixed(5)}. Those two numbers come from ` +
+          'different sessions; the per-route verdict that accepted it is paired inside one. Committing ' +
+          'it will move `cumulative` DOWN even though no route regressed past its band.');
+    }
+    candidates.unshift(chosen);
+  }
   const winner = candidates[0] || null;
-  // SELECTION is unchanged: the winner is still the highest measured paired speedup. Only the
-  // COMMIT decision below can change, and only when a band table exists for it to read.
-  const legacyImproved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  const verdict = winner ? judgeCandidate(winner) : null;
+  const legacyImproved = !!(verdict && verdict.legacyImproved);
   let improved = legacyImproved;
   let routeVerdict = null;
   if (winner && ROUTE_BANDS) {
@@ -2369,11 +2426,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // marginal round. Falling back to `bestPerCase` is still much better than the suite geomean, so
     // its absence degrades the gate rather than disabling it; which side was used is always logged,
     // because "compared across sessions" is a caveat a reader of the verdict has to be handed.
-    const sameSession = !!winner.control_per_case;
-    const incumbentSide = sameSession ? winner.control_per_case : bestPerCase;
-    routeVerdict = routeGate(winner.per_case, incumbentSide, ROUTE_BANDS, {
-      targetRoutes: winner.target_routes,
-    });
+    const sameSession = verdict.sameSession;
+    routeVerdict = verdict.routeVerdict;
     if (routeVerdict.applicable) {
       // UNION, with the regression veto as the safety property -- not a replacement.
       //
@@ -2406,8 +2460,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // tighter than its real noise and veto on it. Raise the baseline repeat count before reading a
       // single-route veto as a real regression. Do not "fix" it by dropping the veto: an averaged
       // suite number cannot see a route-local regression at all, which is why the veto is here.
-      const suiteSaysYes = legacyImproved && !routeVerdict.regressed.length;
-      improved = routeVerdict.accepted || suiteSaysYes;
+      const suiteSaysYes = verdict.suiteSaysYes;
+      improved = verdict.improved;
       log(`  [gate r${round}] per-route: ${routeVerdict.accepted ? 'ACCEPT' : 'REFUSE'} -- ${routeVerdict.reason}`);
       if (!routeVerdict.accepted && suiteSaysYes) {
         log(`  [gate r${round}] committing anyway on the SUITE test (${winner.geomean.toFixed(5)} vs ` +
@@ -2586,7 +2640,10 @@ matter how the rest of the run looked.`,
     committedThisRound = commitOK;
   }
 
-  if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
+  // `topOffered`, not `winner.geomean`: the winner may be a lower-ranked candidate that the gate
+  // could take while the top one could not, and "the best any candidate measured" must not fall
+  // just because a different one was the one banked.
+  if (topOffered > bestSeen) bestSeen = topOffered;
   // `committedThisRound`, never `improved`. `improved` is decided BEFORE the commit is attempted,
   // so a winner that repeatedly fails to LAND (patch will not apply, hand-merge conflict, commit
   // agent dead or honestly reporting committed:false) reset this counter every round while

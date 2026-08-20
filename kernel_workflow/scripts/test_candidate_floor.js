@@ -106,7 +106,7 @@ ok(txt({ candidate_floor: 0.5 }) === '0.5', 'and a lowered floor renders faithfu
 ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({ candidate_floor: 0.55 }));
 
 console.log('\n# the commit gate is NOT loosened by any of this');
-ok(/const legacyImproved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
+ok(/const legacyImproved = cand\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\);/.test(src),
    'banking still requires beating cumulative by MIN_IMPROVE');
 // The suite threshold above is the FALLBACK and also one half of a union: a per-route band table
 // (derived from the baseline repeats by default) can accept a candidate the suite test refuses, and
@@ -115,9 +115,17 @@ ok(/const legacyImproved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ 
 // missing -- not either test accepting.
 ok(/let improved = legacyImproved;/.test(src) && /if \(winner && ROUTE_BANDS\) \{/.test(src),
    'the suite threshold is where the commit decision starts, before any per-route verdict');
-ok(/const suiteSaysYes = legacyImproved && !routeVerdict\.regressed\.length;/.test(src) &&
-   /improved = routeVerdict\.accepted \|\| suiteSaysYes;/.test(src),
+ok(/const suiteSaysYes = legacyImproved && !rv\.regressed\.length;/.test(src) &&
+   /improved: rv\.accepted \|\| suiteSaysYes/.test(src),
    'the union can only ACCEPT via a test that passed; a banded regression vetoes both arms');
+// The veto now also decides SELECTION, not just acceptance of the top-ranked candidate: the
+// selector walks candidates in geomean order and takes the first this same predicate passes. That
+// direction can only bank a round that would otherwise have banked nothing, so it cannot loosen the
+// gate -- but it does mean the veto is applied to every candidate rather than to one, which is a
+// strictly wider application of the safety property this file is about.
+ok(/const passIdx = candidates\.findIndex\(c => judgeCandidate\(c\)\.improved\);/.test(src),
+   'selection uses the SAME predicate as acceptance, so a candidate cannot be selected by one rule ' +
+   'and judged by another');
 ok(/const suiteProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
    'the suite progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
 // A route win is progress too, because the suite geomean divides a single-route win by the route

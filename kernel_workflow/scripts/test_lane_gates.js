@@ -572,13 +572,14 @@ console.log('\n# the budget, the commit threshold and the correctness gate');
   // threshold alone would keep passing if the fallback were deleted and the per-route verdict
   // became unconditional, and a check on the per-route branch alone would keep passing if the
   // derivation were deleted and the gate silently went back to never running.
-  ok(/const legacyImproved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
+  // Anchored inside `judgeCandidate`, where the per-candidate decision now lives so that SELECTION
+  // and the logged verdict cannot answer differently. The threshold itself is untouched.
+  ok(/const legacyImproved = cand\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\);/.test(src),
     'the suite-geomean threshold survives as the no-band fallback');
-  ok(/let improved = legacyImproved;/.test(src),
-    'the legacy threshold is the starting commit decision, not one branch of two');
-  ok(/if \(winner && ROUTE_BANDS\) \{/.test(src) &&
-     /if \(routeVerdict\.applicable\) \{/.test(src) &&
-     /improved = routeVerdict\.accepted \|\| suiteSaysYes;/.test(src),
+  ok(/suiteSaysYes: legacyImproved,\n\s*improved: legacyImproved \};/.test(src),
+    'the legacy threshold is the whole decision when no band table applies, not one branch of two');
+  ok(/if \(!rv \|\| !rv\.applicable\) \{/.test(src) &&
+     /improved: rv\.accepted \|\| suiteSaysYes/.test(src),
     'the per-route verdict joins the suite threshold as a union when bands exist AND it is applicable');
   // Finding (62) split this from one conjunction into a gate plus a named metric
   // refusal, so the shape changed; the threshold it enforces did not.
@@ -700,10 +701,12 @@ console.log('\n# the gate compares against a SAME-SESSION control when the verif
   }
 
   // The wiring: preferred when present, degraded-but-used when absent, and always stated.
-  ok(/const sameSession = !!winner\.control_per_case;/.test(src) &&
-     /const incumbentSide = sameSession \? winner\.control_per_case : bestPerCase;/.test(src),
+  // Anchored inside `judgeCandidate` since the per-candidate decision moved there; the invariant is
+  // unchanged, and it now holds for every candidate the selector considers rather than only the
+  // top-ranked one.
+  ok(/const sameSession = !!cand\.control_per_case;/.test(src),
     'the gate prefers the same-session control and falls back to the stored table');
-  ok(/routeGate\(winner\.per_case, incumbentSide, ROUTE_BANDS/.test(src),
+  ok(/routeGate\(cand\.per_case, sameSession \? cand\.control_per_case : bestPerCase, ROUTE_BANDS/.test(src),
     'the chosen incumbent side is what the gate actually reads');
   ok(/incumbent side: /.test(src),
     'which incumbent side decided the verdict is logged every round, not inferred');
@@ -751,11 +754,17 @@ console.log('\n# the two gates are a UNION with a regression veto, and a route w
   ok(mixed.applicable && !mixed.accepted && mixed.regressed.join() === 'b',
     'a route regressed past its band is refused however good the average looks');
 
-  ok(/const suiteSaysYes = legacyImproved && !routeVerdict\.regressed\.length;/.test(src),
+  ok(/const suiteSaysYes = legacyImproved && !rv\.regressed\.length;/.test(src),
     'the suite test survives as a second route to acceptance, minus any banded regression');
-  ok(/improved = routeVerdict\.accepted \|\| suiteSaysYes;/.test(src),
-    'the commit decision is the UNION -- so making the per-route gate the default cannot make any ' +
-    'run STRICTER than it was, which was the entire complaint against the old gate');
+  ok(/improved: rv\.accepted \|\| suiteSaysYes/.test(src),
+    'the commit decision is the UNION of the two tests, so a win either one can see is banked');
+  // Deliberately NOT asserted here any more: that this default "cannot make a run stricter". The
+  // veto is outside the union, so it can and does -- coldstart_newgate_20260819 wave 1 round 2
+  // refused a candidate the legacy gate would have committed. The claim was in this message and in
+  // the lane's own comment; both were wrong, and an assertion that restates a falsified claim is
+  // worse than no assertion, because it reads as evidence.
+  ok(/turning this default on CAN make a run stricter/.test(src),
+    'the lane states that the veto can make a run stricter, rather than claiming it cannot');
   ok(/committing anyway on the SUITE test/.test(src),
     'a commit that only the suite test justifies says so, rather than looking like a route win');
 
@@ -775,6 +784,94 @@ console.log('\n# the two gates are a UNION with a regression veto, and a route w
   ok(!/routeProgress = .*targetRoutes/.test(src),
     'progress does not require the win to be on the DECLARED route -- a stopping rule errs toward ' +
     'continuing, since a false stall costs the whole remaining wave');
+}
+
+console.log('\n# SELECTION is the best candidate that PASSES, not the best candidate, executed');
+{
+  // Ranking is by suite geomean; acceptance is per-route; and only `candidates[0]` was ever offered
+  // to the gate. So a round could be holding a candidate the gate would accept and still bank
+  // nothing. Observed, not hypothetical: coldstart_newgate_20260819 wave 1 round 2 refused the top
+  // candidate (0.924) for giving back 0.0006 ms on decode_m2_square while the second (0.632) was
+  // ACCEPT with zero banded regressions and was never asked. The hole did not exist while both
+  // halves ranked on the same geomean -- it was introduced by changing only the acceptance test,
+  // which is why the fix belongs to the same change and not to a later one.
+  const gateBlock = grab(/const routeGate = \(candPerCase, incPerCase, bands, opts\) => \{[\s\S]*?\n\};\n/,
+    'routeGate');
+  const judgeBlock = grab(/ {2}const judgeCandidate = \(cand\) => \{[\s\S]*?\n {2}\};\n/, 'judgeCandidate');
+  const selectBlock = grab(
+    / {2}candidates\.sort\(\(a, b\) => b\.geomean - a\.geomean\);[\s\S]*?\n {2}const winner = candidates\[0\] \|\| null;\n/,
+    'the selection block');
+
+  // Executed against the lane's own source, not a paraphrase: a selector that reordered correctly
+  // in a reimplementation would prove nothing about the one that runs.
+  const select = (cands, o) => new Function('CANDS', 'O', `
+    ${gateBlock}
+    const log = () => {};
+    const round = 1;
+    const MIN_IMPROVE = O.MIN_IMPROVE, ROUTE_BANDS = O.ROUTE_BANDS;
+    const cumulative = O.cumulative, bestPerCase = O.bestPerCase;
+    const candidates = CANDS;
+    ${judgeBlock}
+    ${selectBlock}
+    return { winnerId: winner && winner.id, topOffered, improved: judgeCandidate(winner).improved };
+  `)(cands, o);
+
+  const bands = { a: 0.02, b: 0.02, c: 0.02 };
+  const base = [{ name: 'a', optimized_ms: 0.100 }, { name: 'b', optimized_ms: 0.200 },
+                { name: 'c', optimized_ms: 0.300 }];
+  const cand = (id, geomean, ms) => ({
+    id, geomean, per_case: [{ name: 'a', optimized_ms: ms.a }, { name: 'b', optimized_ms: ms.b },
+                            { name: 'c', optimized_ms: ms.c }],
+    control_per_case: base,
+  });
+  const o = { MIN_IMPROVE: 0.005, ROUTE_BANDS: bands, cumulative: 0.5, bestPerCase: base };
+
+  // `a` regressed 10% past its 2% band: refused however good the suite number is.
+  const topRefused = cand('top', 0.924, { a: 0.110, b: 0.180, c: 0.300 });
+  // `a` improved 10% past its band, nothing regressed: ACCEPT.
+  const lowerPasses = cand('lower', 0.632, { a: 0.090, b: 0.200, c: 0.300 });
+  // Both routes regressed: nothing to fall back to.
+  const alsoRefused = cand('lower2', 0.600, { a: 0.130, b: 0.260, c: 0.300 });
+
+  {
+    const r = select([topRefused, lowerPasses], o);
+    ok(r.winnerId === 'lower' && r.improved === true,
+      'a lower-ranked candidate that PASSES is selected over a top-ranked one that does not, so a ' +
+      'round holding a bankable result does not come away empty', `winner=${r.winnerId}`);
+    ok(r.topOffered === 0.924,
+      'bestSeen still tracks the highest geomean OFFERED, not the one banked -- otherwise selecting ' +
+      'a lower candidate would quietly lower the bar the stall counter measures against',
+      String(r.topOffered));
+  }
+  {
+    const r = select([lowerPasses, topRefused].sort((x, y) => y.geomean - x.geomean), o);
+    ok(r.winnerId === 'lower', 'the input order does not matter -- selection re-sorts first');
+  }
+  {
+    // The top one passing must behave exactly as before: no reordering, no new logging path.
+    const topPasses = cand('top', 0.924, { a: 0.090, b: 0.200, c: 0.300 });
+    const r = select([topPasses, lowerPasses], o);
+    ok(r.winnerId === 'top' && r.improved === true,
+      'when the top candidate passes it is still the winner -- the fix adds a fallback, it does not ' +
+      'change which candidate is preferred');
+  }
+  {
+    const r = select([topRefused, alsoRefused], o);
+    ok(r.winnerId === 'top' && r.improved === false,
+      'when NOTHING passes the top candidate is still the winner and still refused, so the refusal ' +
+      'is reported against the best measurement of the round rather than against a leftover');
+  }
+  {
+    // A gate that cannot run must not silently become a selector. With no bands every candidate
+    // falls back to the legacy suite test, and the top one wins it by construction.
+    const r = select([topRefused, lowerPasses], { ...o, ROUTE_BANDS: null });
+    ok(r.winnerId === 'top', 'with no band table the legacy suite ranking is unchanged');
+  }
+  ok(/selecting the best candidate that PASSES rather than banking nothing/.test(src),
+    'a round that had to reach past the top-ranked candidate says so, because "the winner" and ' +
+    '"the best measurement" stop being the same object at that point');
+  ok(/will move `cumulative` DOWN even though no route regressed/.test(src),
+    'selecting a candidate whose suite number is below the incumbent is allowed but never silent');
 }
 
 console.log('\n# the ISA parent archive follows the TREE, not the commit event, executed');
