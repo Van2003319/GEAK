@@ -113,11 +113,17 @@ ok(/const legacyImproved = cand\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\);/.
 // the suite test can accept one no single band clears. Pinned here because this file's subject is
 // "the commit gate is not loosened", and the thing that would loosen it is the REGRESSION VETO going
 // missing -- not either test accepting.
-ok(/let improved = legacyImproved;/.test(src) && /if \(winner && ROUTE_BANDS\) \{/.test(src),
-   'the suite threshold is where the commit decision starts, before any per-route verdict');
-ok(/const suiteSaysYes = legacyImproved && !rv\.regressed\.length;/.test(src) &&
-   /improved: rv\.accepted \|\| suiteSaysYes/.test(src),
-   'the union can only ACCEPT via a test that passed; a banded regression vetoes both arms');
+ok(/let improved = legacyImproved;/.test(src) && /if \(winner\) \{/.test(src),
+   'the suite threshold is the value the commit decision STARTS at, and the gate runs on every ' +
+   'round that produced a candidate -- no longer only on rounds that happened to carry a table');
+// The union is gone; the commit decision is now the gate's own conjunction (suite improved AND one
+// route past its bar), with a catastrophic-regression fence outside it. What this file is about --
+// "the candidate floor cannot loosen the commit gate" -- is unchanged and if anything easier to
+// state: CANDIDATE_FLOOR appears in neither condition.
+ok(/improved: rv\.accepted/.test(src) && !/rv\.accepted \|\| suiteSaysYes/.test(src),
+   'the commit decision is the gate verdict alone; there is no second arm to loosen');
+ok(/if \(catastrophic\.length\) \{/.test(src) && /CATASTROPHIC_REGRESSION = 0\.10;/.test(src),
+   'and the one refusal that survives a good average is the catastrophic fence, not the floor');
 // The veto now also decides SELECTION, not just acceptance of the top-ranked candidate: the
 // selector walks candidates in geomean order and takes the first this same predicate passes. That
 // direction can only bank a round that would otherwise have banked nothing, so it cannot loosen the

@@ -77,6 +77,40 @@ def known_args(source: Path) -> set[str]:
     return set(re.findall(r"'([a-z_][a-z0-9_]*)'", m.group(1)))
 
 
+# A value that must be RESOLVED at launch rather than written down, because what it names changes
+# faster than the file does.
+#
+# `route_bands` is the only one so far and it is the reason this exists: the per-route floors are a
+# property of the box, this container changes box every few hours, and the one floor table ever
+# committed to disk went six epochs stale while still looking like a current measurement. Writing
+# today's numbers into a lane file would reproduce that exactly -- correct on the day, silently
+# describing another machine by the next restore.
+#
+# Resolution happens in `--check` too, so an epoch whose floors were never measured is a refusal
+# BEFORE the wave starts rather than a table of fail-closed defaults that quietly holds every route
+# to ~7% for the whole run.
+RESOLVERS: dict[str, str] = {"route_bands": "@current_epoch"}
+
+
+def _resolve_directives(args: dict) -> dict:
+    out = dict(args)
+    for key, token in RESOLVERS.items():
+        if out.get(key) != token:
+            continue
+        if key != "route_bands":
+            raise LaneArgsError(f"no resolver implemented for {key!r}")
+        try:
+            import route_floors
+        except ImportError as exc:                       # pragma: no cover - import guard
+            raise LaneArgsError(f"cannot import route_floors to resolve {token}: {exc}") from exc
+        try:
+            out[key] = route_floors.resolve()
+        except route_floors.FloorsUnavailable as exc:
+            raise LaneArgsError(
+                f"{key!r} is {token!r} but this epoch cannot supply a measured table: {exc}") from exc
+    return out
+
+
 def load(path: Path) -> tuple[dict, dict]:
     """Return (args, declared_requirements). `_`-prefixed keys are comments."""
     try:
@@ -90,7 +124,8 @@ def load(path: Path) -> tuple[dict, dict]:
     require = raw.get("_require") or {}
     if not isinstance(require, dict):
         raise LaneArgsError(f"{path}: `_require` must be an object of {{key: expected_value}}")
-    return {k: v for k, v in raw.items() if not k.startswith("_")}, require
+    return _resolve_directives(
+        {k: v for k, v in raw.items() if not k.startswith("_")}), require
 
 
 def _parse_cli_require(items: list[str]) -> dict:
@@ -184,8 +219,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {p}", file=sys.stderr)
         return 3
     args, declared = load(a.file)
+    resolved = sorted(k for k, tok in RESOLVERS.items() if k in args and args[k] != tok)
     print(f"OK: {a.file} -- {len(args)} arguments, all accepted by the entry points"
-          + (f"; {len(declared)} protocol value(s) pinned and matching" if declared else ""))
+          + (f"; {len(declared)} protocol value(s) pinned and matching" if declared else "")
+          + ("".join(f"; {k} resolved at launch to {len(args[k])} entries" for k in resolved
+             if isinstance(args[k], dict))))
     return 0
 
 

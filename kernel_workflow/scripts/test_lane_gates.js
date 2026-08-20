@@ -19,6 +19,23 @@ const grab = (re, name) => {
   if (!m) throw new Error(`could not extract ${name} from kernel_lane.js`);
   return m[0];
 };
+// The gate's thresholds, read out of the lane rather than restated here. A guard that hardcoded 2%
+// would keep passing after someone changed the lane to 5%, which is the one thing a threshold guard
+// must not do -- and this file's whole subject is thresholds.
+const grabConst = (name) => {
+  const m = src.match(new RegExp(`^const ${name} = ([0-9.]+);`, 'm'));
+  if (!m) throw new Error(`could not extract ${name} from kernel_lane.js`);
+  return parseFloat(m[1]);
+};
+const MIN_ROUTE_WIN = grabConst('MIN_ROUTE_WIN');
+const CATASTROPHIC_REGRESSION = grabConst('CATASTROPHIC_REGRESSION');
+// `routeGate` closes over both constants, so an extraction that did not supply them would throw at
+// call time -- and a guard that throws reports a lane defect where there is only a harness gap.
+const makeGate = () => new Function(
+  `const MIN_ROUTE_WIN = ${MIN_ROUTE_WIN};
+   const CATASTROPHIC_REGRESSION = ${CATASTROPHIC_REGRESSION};
+   ${grab(/const routeGate = \(candPerCase, incPerCase, bands, opts\) => \{[\s\S]*?\n\};\n/, 'routeGate')}
+   return routeGate;`)();
 
 console.log('\n# the correctness gate and the primary-metric selector, executed');
 {
@@ -574,13 +591,21 @@ console.log('\n# the budget, the commit threshold and the correctness gate');
   // derivation were deleted and the gate silently went back to never running.
   // Anchored inside `judgeCandidate`, where the per-candidate decision now lives so that SELECTION
   // and the logged verdict cannot answer differently. The threshold itself is untouched.
+  // The legacy suite threshold is no longer any part of the commit decision. It survives for two
+  // narrower jobs, both pinned here: the degraded path when the paired per-case times are missing
+  // entirely, and the audit line that reports whenever the live gate and the number every prior
+  // round was judged on disagree.
   ok(/const legacyImproved = cand\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\);/.test(src),
-    'the suite-geomean threshold survives as the no-band fallback');
-  ok(/suiteSaysYes: legacyImproved,\n\s*improved: legacyImproved \};/.test(src),
-    'the legacy threshold is the whole decision when no band table applies, not one branch of two');
+    'the suite-geomean threshold survives as the degraded fallback');
   ok(/if \(!rv \|\| !rv\.applicable\) \{/.test(src) &&
-     /improved: rv\.accepted \|\| suiteSaysYes/.test(src),
-    'the per-route verdict joins the suite threshold as a union when bands exist AND it is applicable');
+     /suiteSaysYes: legacyImproved,\n\s*improved: legacyImproved \};/.test(src),
+    'and it is the WHOLE decision only when the gate cannot run at all');
+  ok(/improved: rv\.accepted/.test(src),
+    'when the gate can run, its own verdict is the decision -- no second arm can carry a candidate ' +
+    'it refused, and no threshold can refuse one it accepted');
+  ok(/OVERTURNS the legacy suite-geomean gate/.test(src),
+    'a disagreement with the legacy number is logged in both directions, so the change of gate is ' +
+    'auditable against what every prior round was judged on');
   // Finding (62) split this from one conjunction into a gate plus a named metric
   // refusal, so the shape changed; the threshold it enforces did not.
   ok(/says\(r\.ver\.correctness, 'pass'\)\)\) return false;/.test(src) &&
@@ -588,79 +613,77 @@ console.log('\n# the budget, the commit threshold and the correctness gate');
     'the verified filter still gates on correctness and the candidate floor');
 }
 
-console.log('\n# the per-route gate must be REACHABLE without a hand-maintained band file, executed');
+console.log('\n# the commit gate needs no band file, and a measured table only TIGHTENS it, executed');
 {
-  // Why this section exists. The per-route gate and its Python twin were both written, both
-  // correct, and both defended by tests -- and across seven waves of the greedy lane the gate
-  // logged NOTHING, because its only band source was an `args.route_bands` table nobody passed and
-  // the sole file on disk was six epochs stale. A gate that cannot be fed is a gate that does not
-  // run, and the suite threshold it was written to overrule went on refusing verified single-route
-  // wins the whole time. So what is pinned here is not the arithmetic (test_route_gate.py owns
-  // that) but the SUPPLY: bands come from data every run already produces.
-  const block = grab(/const BAND_MIN_REPEATS = 3;[\s\S]*?const bandsFromSamples = \(perCase\) => \{[\s\S]*?\n\};\n/,
-    'bandsFromSamples');
-  const { bandsFromSamples, BAND_MIN, BAND_MIN_REPEATS } = new Function(
-    `${block}\nreturn {bandsFromSamples, BAND_MIN, BAND_MIN_REPEATS};`)();
+  // Why this section exists. The per-route gate and its Python twin were both written, both correct,
+  // and both defended by tests -- and across seven waves the gate logged NOTHING, because its only
+  // band source was an `args.route_bands` table nobody passed and the sole file on disk was six
+  // epochs stale. A gate that cannot be fed is a gate that does not run.
+  //
+  // The first answer to that was to derive a table in-lane from the baseline's five repeats. That is
+  // now deleted: at n=5 a min-max range measures whether a flyer landed in the sample, not the
+  // route, and against a 24-repeat calibration it came out 8.8x too tight on one route and 2.9x too
+  // loose on another. The second answer, pinned here, is that the gate needs NO table: every route
+  // is held to MIN_ROUTE_WIN unless a measured floor says that route is noisier than that.
+  const routeGate = makeGate();
+  const inc = [{ name: 'a', optimized_ms: 0.100 }, { name: 'b', optimized_ms: 0.200 }];
+  const cand = (aMs) => [{ name: 'a', optimized_ms: aMs }, { name: 'b', optimized_ms: 0.200 }];
 
-  const row = (name, samples) => ({ name, latency_ms: samples[0], samples_ms: samples });
+  ok(MIN_ROUTE_WIN === 0.02,
+    'the default bar is the operator\'s 2%; if this changes, every assertion below moves with it',
+    String(MIN_ROUTE_WIN));
 
-  // The statistic, and that it agrees with the Python twin's definition: full min-max spread over
-  // the median. test_route_gate.py::BandsFromSamplesTest pins the identical numbers on the other
-  // side, which is the only thing keeping two hand-written implementations of one rule together.
+  // No table at all is the normal case, not a degraded one.
   {
-    const r = bandsFromSamples([row('a', [0.100, 0.104, 0.096])]);
-    ok(r.bands != null && Math.abs(r.bands.a - (0.104 - 0.096) / 0.100) < 1e-9,
-      'the band is the full spread over the median', r.reason);
+    const v = routeGate(cand(0.097), inc, null);        // a is 3% faster
+    ok(v.applicable && v.accepted && v.improved.join() === 'a',
+      'with NO floor table the gate still runs and accepts a route past the default bar', v.reason);
   }
-  // A zero spread must not become a zero band. Three identical coarse-timer reads would otherwise
-  // make every rounding difference read as `improved` -- the gate banking noise on exactly the
-  // routes where it is quietest, which is the opposite of what it is for.
   {
-    const r = bandsFromSamples([row('a', [0.2, 0.2, 0.2])]);
-    ok(r.bands != null && r.bands.a === BAND_MIN,
-      'a zero spread is clamped to BAND_MIN rather than left at zero', r.reason);
+    const v = routeGate(cand(0.099), inc, null);        // a is 1% faster: real, but under the bar
+    ok(v.applicable && !v.accepted && /no single route cleared/.test(v.reason),
+      'a 1% route gain is refused by the default bar even though the suite improved -- this is the ' +
+      'deliberate cost of a fixed 2%, and it is the reason a measured table may only RAISE it',
+      v.reason);
   }
-  ok(BAND_MIN === 0.002 && BAND_MIN_REPEATS === 3,
-    'the floor constants match measure_noise_floor.py (asserted on the Python side too)');
-
-  // Every refusal returns a REASON and never throws. `samples_ms` is optional by contract
-  // (benchmark_engineer.md: "Omitting the field is not an error and the run proceeds"), so a throw
-  // here would abort a run over a field the agent is allowed to leave out.
-  for (const [bad, why] of [
-    [[row('a', [0.1, 0.1])], 'two samples cannot define a spread'],
-    [[{ name: 'a', latency_ms: 0.1 }], 'a latency with no samples_ms'],
-    [[row('a', [0.1, 0.11, 0.09]), { name: 'b', latency_ms: 0.2 }], 'one route missing samples'],
-    [[row('a', [0.1, 0.11, -1])], 'a negative sample'],
-    [[row('a', [0.1, 0.11, Infinity])], 'a non-finite sample'],
-    [[{ samples_ms: [0.1, 0.11, 0.09] }], 'a row with no route name'],
-    [[row('a', [0.1, 0.11, 0.09]), row('a', [0.1, 0.11, 0.09])], 'a duplicate route'],
-    [[], 'an empty table'],
-  ]) {
-    const r = bandsFromSamples(bad);
-    ok(r.bands === null && typeof r.reason === 'string' && r.reason.length > 0,
-      `refused with a reason, not a throw and not a partial table: ${why}`,
-      JSON.stringify(r.bands));
-  }
-  // A PARTIAL table is the failure worth naming separately: it would leave `routeGate` refusing the
-  // unbanded route with "no measured band for ...", which reads as a candidate defect rather than
-  // as our own missing measurement.
+  // A measured floor WIDER than the default raises that route's bar. This is the epoch Z case:
+  // decode_m8_up measured 7.64%, so a 3% move there is noise being read as a mechanism.
   {
-    const r = bandsFromSamples([row('a', [0.1, 0.11, 0.09]), { name: 'b', latency_ms: 0.2 }]);
-    ok(r.bands === null, 'one unusable route refuses the WHOLE table, never a partial one');
+    const v = routeGate(cand(0.097), inc, { a: 0.0764 });
+    ok(v.applicable && !v.accepted && /its measured floor/.test(v.reason),
+      'a measured floor wider than the default raises that route\'s bar, so a 3% move on a route ' +
+      'measured at 7.64% is not a mechanism', v.reason);
+  }
+  // A measured floor NARROWER than the default changes nothing. Every floor on epochs Y, A and B is
+  // in this range, so on a quiet box the table is inert and 2% governs -- which is what makes the
+  // operator's number the rule and the table the exception.
+  {
+    const v = routeGate(cand(0.097), inc, { a: 0.002, b: 0.002 });
+    ok(v.applicable && v.accepted,
+      'a measured floor narrower than the default does not lower the bar below it');
+    const under = routeGate(cand(0.099), inc, { a: 0.002, b: 0.002 });
+    ok(!under.accepted,
+      'and a 1% gain stays refused even where the route measured 0.2% -- the table cannot open the ' +
+      'gate wider than the operator set it');
+  }
+  // A partial table is no longer a refusal. It used to be ("no measured band for route(s) ..."),
+  // which read as a candidate defect rather than as our own missing measurement.
+  {
+    const v = routeGate(cand(0.097), inc, { a: 0.001 });   // b has no entry
+    ok(v.applicable && v.accepted,
+      'a table missing a route falls back to the default bar for that route rather than refusing ' +
+      'the whole candidate');
   }
 
-  // The wiring, lexically: derived by default, arg as override, and the fallback says so out loud.
-  ok(/const ROUTE_BANDS_ARG = \(\(\) => \{/.test(src),
-    'args.route_bands is now the OVERRIDE (ROUTE_BANDS_ARG), not the only source');
-  ok(/const ROUTE_BANDS = ROUTE_BANDS_ARG \|\| ROUTE_BAND_DERIVED\.bands;/.test(src),
-    'the effective band table prefers an explicit table and otherwise uses the derived one');
-  ok(/bandsFromSamples\(BASELINE_PER_CASE\)/.test(src),
-    'the derived table is built from the baseline the benchmark engineer just measured');
-  ok(/Commit gate: SUITE GEOMEAN at MIN_IMPROVE=/.test(src),
-    'a run that falls back to the suite gate LOGS that it did -- the silent-off failure this ' +
-    'whole section exists to prevent');
-  ok(/Commit gate: PER-ROUTE, /.test(src),
-    'a run on the per-route gate says so, with the band span, so the log shows which gate decided');
+  // The wiring, lexically.
+  ok(/const ROUTE_BANDS = ROUTE_BANDS_ARG;/.test(src),
+    'the effective table is the supplied one, with no in-lane derivation behind it');
+  ok(!/bandsFromSamples/.test(src),
+    'the n=5 derivation is deleted, not left dormant -- a dormant estimator is one someone re-enables');
+  ok(/scripts\/route_floors\.py/.test(src),
+    'the log names where a real table comes from; the previous supply failure was nobody knowing');
+  ok(/Commit gate: suite geomean must improve at all AND/.test(src),
+    'the rule in force is stated in the log at Setup, so the run says what it will accept');
 }
 
 console.log('\n# the gate compares against a SAME-SESSION control when the verifier returns one, executed');
@@ -671,9 +694,7 @@ console.log('\n# the gate compares against a SAME-SESSION control when the verif
   // comparing against a control measured in the candidate's own session." The verifiers already
   // build that arm; until now there was no field to return it in, so the gate compared this round's
   // candidate against a table measured in an earlier round -- a drift larger than the gains judged.
-  const gateBlock = grab(/const routeGate = \(candPerCase, incPerCase, bands, opts\) => \{[\s\S]*?\n\};\n/,
-    'routeGate');
-  const { routeGate } = new Function(`${gateBlock}\nreturn {routeGate};`)();
+  const routeGate = makeGate();
   const bands = { a: 0.02, b: 0.02 };
 
   // A control row is `{name, optimized_ms}` with NO speedup -- the denominator measuring itself, so
@@ -706,7 +727,7 @@ console.log('\n# the gate compares against a SAME-SESSION control when the verif
   // top-ranked one.
   ok(/const sameSession = !!cand\.control_per_case;/.test(src),
     'the gate prefers the same-session control and falls back to the stored table');
-  ok(/routeGate\(cand\.per_case, sameSession \? cand\.control_per_case : bestPerCase, ROUTE_BANDS/.test(src),
+  ok(/routeGate\(cand\.per_case, sameSession \? cand\.control_per_case : bestPerCase,\s*\n\s*ROUTE_BANDS/.test(src),
     'the chosen incumbent side is what the gate actually reads');
   ok(/incumbent side: /.test(src),
     'which incumbent side decided the verdict is logged every round, not inferred');
@@ -723,67 +744,106 @@ console.log('\n# the gate compares against a SAME-SESSION control when the verif
     'not thrown away');
 }
 
-console.log('\n# the two gates are a UNION with a regression veto, and a route win is progress, executed');
+console.log('\n# the commit rule is a CONJUNCTION with a catastrophic fence, executed');
 {
-  // Two separate unit errors, one cause: a suite geomean was being used to judge single-route work.
-  //   * at the COMMIT gate it refused verified route wins (what the band table was added to fix);
-  //   * at the STALL counter it ends the WAVE -- MAX_NO_IMPROVE defaults to 2, so two rounds scored
-  //     as stalls stop the loop with budget unspent. Wave 6 stopped after 3 rounds on 8 of 12.
-  // The commit gate had to become a union rather than a replacement, because the per-route test has
-  // the mirror-image blind spot: eleven routes each +0.4% is a real ~4.4% suite win that clears no
-  // single band.
-  const gateBlock = grab(/const routeGate = \(candPerCase, incPerCase, bands, opts\) => \{[\s\S]*?\n\};\n/,
-    'routeGate');
-  const { routeGate } = new Function(`${gateBlock}\nreturn {routeGate};`)();
+  // What this replaced, and what the old rule cost. The gate used to be a UNION of a per-route test
+  // and a suite threshold, with a REGRESSION VETO sitting outside the union: any route past its band
+  // in the wrong direction refused the candidate however good the average. Two refusals on the
+  // record, both of them the largest result of their day:
+  //   * wave 1 round 2 -- ten of eleven routes +24%..+50%, refused for 0.0006 ms on decode_m2_square.
+  //   * wave 1 round 3 -- +5.35% suite (the eight improved routes averaged +8.4%), refused on three
+  //     routes giving back 1.3%-2.8%.
+  // The veto optimised Pareto-improvement across routes; this lane is scored on the unweighted suite
+  // geomean. Refusing a candidate that improves the objective is optimising something nobody
+  // measures. Two arguments were made for the veto and neither survives: that a union "cannot make a
+  // run stricter" (falsified by round 2, the first round the gate was reachable) and that eleven
+  // routes at +0.4% is a "~4.4% suite win" the per-route test would miss -- which was arithmetic
+  // error. The geomean of eleven 1.004s is 1.004, asserted below so it cannot be believed again.
+  const routeGate = makeGate();
   const routes = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k'];
-  const bands = Object.fromEntries(routes.map(r => [r, 0.02]));
   const rows = (f) => routes.map(r => ({ name: r, optimized_ms: 0.100 * f(r), speedup: 1 / f(r) }));
   const inc = rows(() => 1);
 
-  // The union's reason for existing, as arithmetic rather than assertion.
-  const broad = routeGate(rows(() => 0.996), inc, bands);      // every route -0.4%
-  ok(broad.applicable && !broad.accepted && !broad.regressed.length,
-    'a broad thin gain clears NO band, so the per-route test alone would refuse a real suite win',
-    broad.reason);
-  const single = routeGate(rows(r => (r === 'a' ? 0.93 : 1)), inc, bands);
-  ok(single.applicable && single.accepted,
-    'a single-route win clears its band, which the suite geomean divides by the route count');
+  // The arithmetic that was got wrong, pinned as a number.
+  {
+    const v = routeGate(rows(() => 0.996), inc, null);       // every route 0.4% FASTER
+    ok(Math.abs(v.suiteRatio - 1 / 0.996) < 1e-9 && v.suiteRatio < 1.005,
+      'eleven routes each 0.4% faster is a 0.4% suite win, not 4.4% -- the geomean does not add ' +
+      'across routes, and the claim that it did was an argument for the rule this replaced',
+      String(v.suiteRatio));
+    ok(v.applicable && !v.accepted && /no single route cleared/.test(v.reason),
+      'a broad thin gain is REFUSED: the average moved but nothing cleared its own bar. This is the ' +
+      'known cost of requiring one concrete route, and it is deliberate -- a suite average that ' +
+      'improves while no route clears its noise is the shape a round of measurement luck takes',
+      v.reason);
+  }
+  // Condition 2 alone is not enough either: a route can clear its bar while the suite goes backwards.
+  {
+    // b gives back 8%: past its own noise, but deliberately INSIDE the catastrophic fence, so the
+    // refusal below is the suite condition doing the work and not the fence.
+    const v = routeGate(rows(r => (r === 'a' ? 0.96 : (r === 'b' ? 1.08 : 1))), inc, null);
+    ok(v.applicable && !v.accepted && /suite geomean did not improve/.test(v.reason),
+      'a route clearing its bar cannot bank a candidate that made the suite worse -- both ' +
+      'conditions are required, which is the whole difference from the union', v.reason);
+  }
+  // Both conditions met: the single-route win the suite geomean divides by eleven.
+  {
+    const v = routeGate(rows(r => (r === 'a' ? 0.93 : 1)), inc, null);
+    ok(v.applicable && v.accepted && v.improved.join() === 'a',
+      'a single-route win of 7% is banked, though it moves the eleven-route geomean only 0.62%',
+      v.reason);
+  }
+  // THE BEHAVIOUR CHANGE, as arithmetic: wave 1 round 2's shape is now accepted.
+  {
+    const v = routeGate(rows(r => (r === 'a' ? 0.80 : (r === 'b' ? 1.05 : 1))), inc, null);
+    ok(v.applicable && v.accepted && v.regressed.join() === 'b' && v.suiteRatio > 1,
+      'a candidate that gives ground on one route while the suite improves is now BANKED, and the ' +
+      'route it paid with is named rather than used to refuse it', v.reason);
+  }
+  // ...but not without limit. The fence is not a noise judgement: it sits an order of magnitude
+  // outside the widest floor ever measured on this task (7.64%), so it cannot refuse real work.
+  {
+    const bad = 1 + CATASTROPHIC_REGRESSION + 0.03;
+    const v = routeGate(rows(r => (r === 'a' ? 0.50 : (r === 'b' ? bad : 1))), inc, null);
+    ok(v.applicable && !v.accepted && v.catastrophic.join() === 'b' && /catastrophic/.test(v.reason),
+      'a route regressed past the fence refuses the candidate however good the average -- "the ' +
+      'average improved" must not be able to ship one shape a third slower', v.reason);
+    ok(v.suiteRatio > 1,
+      'and the fence fires on a candidate whose suite number is GOOD, which is the only case where ' +
+      'it does any work', String(v.suiteRatio));
+  }
+  {
+    const edge = 1 + CATASTROPHIC_REGRESSION - 0.005;
+    const v = routeGate(rows(r => (r === 'a' ? 0.50 : (r === 'b' ? edge : 1))), inc, null);
+    ok(v.accepted && !v.catastrophic.length,
+      'just inside the fence is accepted, so the fence is a cliff at a stated number and not a ' +
+      'gradual tightening nobody can predict');
+  }
 
-  // The veto is what is NOT unioned.
-  const mixed = routeGate(rows(r => (r === 'a' ? 0.80 : (r === 'b' ? 1.10 : 1))), inc, bands);
-  ok(mixed.applicable && !mixed.accepted && mixed.regressed.join() === 'b',
-    'a route regressed past its band is refused however good the average looks');
-
-  ok(/const suiteSaysYes = legacyImproved && !rv\.regressed\.length;/.test(src),
-    'the suite test survives as a second route to acceptance, minus any banded regression');
-  ok(/improved: rv\.accepted \|\| suiteSaysYes/.test(src),
-    'the commit decision is the UNION of the two tests, so a win either one can see is banked');
-  // Deliberately NOT asserted here any more: that this default "cannot make a run stricter". The
-  // veto is outside the union, so it can and does -- coldstart_newgate_20260819 wave 1 round 2
-  // refused a candidate the legacy gate would have committed. The claim was in this message and in
-  // the lane's own comment; both were wrong, and an assertion that restates a falsified claim is
-  // worse than no assertion, because it reads as evidence.
-  ok(/turning this default on CAN make a run stricter/.test(src),
-    'the lane states that the veto can make a run stricter, rather than claiming it cannot');
-  ok(/committing anyway on the SUITE test/.test(src),
-    'a commit that only the suite test justifies says so, rather than looking like a route win');
+  ok(/improved: rv\.accepted/.test(src) && !/rv\.accepted \|\| suiteSaysYes/.test(src),
+    'the commit decision IS the gate verdict -- there is no second arm that can carry a candidate ' +
+    'the gate refused');
+  ok(/banked while giving ground on/.test(src),
+    'a commit that cost ground on some route says which routes and by how much; the ledger has to ' +
+    'be able to answer "which shape got slower" three waves later');
 
   // The stall counter.
   ok(/const suiteProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
     'the old suite progress test is preserved under its own name');
-  ok(/const routeProgress = !!\(routeVerdict && routeVerdict\.applicable && routeVerdict\.improved\.length\s*&& !routeVerdict\.regressed\.length\)/.test(src),
-    'a round that cleared a route band counts as progress');
+  ok(/const routeProgress = !!\(routeVerdict && routeVerdict\.applicable && routeVerdict\.improved\.length\s*&& !routeVerdict\.catastrophic\.length\)/.test(src),
+    'a round in which any route cleared its bar counts as progress, and only the fence can veto that');
   ok(/const madeProgress = suiteProgress \|\| routeProgress;/.test(src),
     'progress is the union of the two, so a route win cannot be scored as a stall');
   ok(/if \(madeProgress \|\| committedThisRound\) \{ noImprove = 0; \} else \{ noImprove\+\+; \}/.test(src),
     'the stall counter still also resets on a landed commit -- (127) unchanged');
   ok(/the search ADVANCED on route evidence/.test(src),
     'a round rescued from being scored a stall says which routes rescued it');
-  // routeProgress is deliberately BROADER than the commit gate: it ignores target narrowing, because
-  // the cost of a false "stalled" is every remaining round of the wave.
-  ok(!/routeProgress = .*targetRoutes/.test(src),
-    'progress does not require the win to be on the DECLARED route -- a stopping rule errs toward ' +
-    'continuing, since a false stall costs the whole remaining wave');
+  // routeProgress is deliberately BROADER than the commit gate in two ways: it ignores the suite
+  // condition and it ignores routes that gave ground within noise, because the cost of a false
+  // "stalled" is every remaining round of the wave while a false "advancing" costs one.
+  ok(!/routeProgress = .*suiteRatio/.test(src),
+    'progress does not require the suite to have followed -- a route that moved is evidence the ' +
+    'search found something, and a stopping rule errs toward continuing');
 }
 
 console.log('\n# SELECTION is the best candidate that PASSES, not the best candidate, executed');
@@ -805,6 +865,8 @@ console.log('\n# SELECTION is the best candidate that PASSES, not the best candi
   // Executed against the lane's own source, not a paraphrase: a selector that reordered correctly
   // in a reimplementation would prove nothing about the one that runs.
   const select = (cands, o) => new Function('CANDS', 'O', `
+    const MIN_ROUTE_WIN = ${MIN_ROUTE_WIN};
+    const CATASTROPHIC_REGRESSION = ${CATASTROPHIC_REGRESSION};
     ${gateBlock}
     const log = () => {};
     const round = 1;
@@ -826,12 +888,14 @@ console.log('\n# SELECTION is the best candidate that PASSES, not the best candi
   });
   const o = { MIN_IMPROVE: 0.005, ROUTE_BANDS: bands, cumulative: 0.5, bestPerCase: base };
 
-  // `a` regressed 10% past its 2% band: refused however good the suite number is.
-  const topRefused = cand('top', 0.924, { a: 0.110, b: 0.180, c: 0.300 });
-  // `a` improved 10% past its band, nothing regressed: ACCEPT.
+  // Fixtures written against the CONJUNCTION, not the old veto. `top` gives back 8% on `a` -- past
+  // its noise, deliberately inside the catastrophic fence -- and its 2% gain on `b` cannot pull the
+  // suite back above 1.0, so it fails on the suite condition.
+  const topRefused = cand('top', 0.924, { a: 0.108, b: 0.196, c: 0.300 });
+  // `a` improves 10% and nothing gives ground: both conditions met.
   const lowerPasses = cand('lower', 0.632, { a: 0.090, b: 0.200, c: 0.300 });
-  // Both routes regressed: nothing to fall back to.
-  const alsoRefused = cand('lower2', 0.600, { a: 0.130, b: 0.260, c: 0.300 });
+  // Suite down and nothing clears its bar: neither condition met.
+  const alsoRefused = cand('lower2', 0.600, { a: 0.108, b: 0.200, c: 0.300 });
 
   {
     const r = select([topRefused, lowerPasses], o);
@@ -862,10 +926,13 @@ console.log('\n# SELECTION is the best candidate that PASSES, not the best candi
       'is reported against the best measurement of the round rather than against a leftover');
   }
   {
-    // A gate that cannot run must not silently become a selector. With no bands every candidate
-    // falls back to the legacy suite test, and the top one wins it by construction.
+    // No floor table no longer means "no gate" -- every route falls back to MIN_ROUTE_WIN -- so
+    // selection must still reach past a failing top candidate. Under the previous design this case
+    // read the opposite way, because an absent table disabled the gate entirely.
     const r = select([topRefused, lowerPasses], { ...o, ROUTE_BANDS: null });
-    ok(r.winnerId === 'top', 'with no band table the legacy suite ranking is unchanged');
+    ok(r.winnerId === 'lower',
+      'with no floor table the gate still runs on the default bar, so selection still prefers the ' +
+      'candidate that passes');
   }
   ok(/selecting the best candidate that PASSES rather than banking nothing/.test(src),
     'a round that had to reach past the top-ranked candidate says so, because "the winner" and ' +
