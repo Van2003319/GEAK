@@ -1891,3 +1891,52 @@ re-issued next round or next wave. The wave-3 closed-list fix does not cover thi
 for the next quiet boundary (STATE is rewritten by the lane on bank, so not while this wave is live):
 promote the recovered r1_d1 findings into `insights`, and treat `round_*/engineer_*/worker_result.json`
 as the authoritative engineer record rather than the journal.
+
+### wave 5 round 1 — verdict: BANKS NOTHING. Two corrections to my entries above.
+
+Round 1 committed nothing. `STATE.cumulative` correctly stays **1.2707**.
+
+**CORRECTION 1 — `CUMULATIVE_VS_SEED: 1` was NOT a false alarm.** I saw that value in the agent logs,
+dismissed it as a template-string grep hit, and reported it as such. It was real, and it is the frame
+hazard firing **in the opposite direction**. `resolveVsSeedFrame` did resolve ABSOLUTE as predicted,
+but the ABSOLUTE branch returns `cumulative` verbatim — and `cumulative` is wave-local 1.0 **by
+construction** until something banks. So a wave that banks nothing emits `CUMULATIVE_VS_SEED = 1`,
+which if written to STATE would report a 1.27× lane as 1.00×: finding (127)'s *truncation* failure
+rather than its double-count failure. The tech_lead caught it (insight 1) and preserved both passed
+values in `cumulative_vs_seed_input` / `wave_local_cumulative_input`. My assessment that the frame
+defect was "fixed on disk, hazard cleared" was **too strong**: the resolver fixed the double-count
+and left a symmetric truncation bug in the same function. Concrete fix for the next quiet boundary:
+in the ABSOLUTE branch, when nothing has committed this wave, return `priorCumulativeVsSeed`, not
+`cumulative`. Standing rule the lane adopted regardless: *cumulative may only move when a verified
+candidate beats the in-session incumbent; a wave that banks nothing leaves it untouched, whatever
+the script passes.*
+
+**CORRECTION 2 — r1_d1's return was not lost in transport, and the tech_lead was not blind to it.**
+I recorded a "RELAY DEFECT" on the theory that the findings never reached the tech_lead. Wrong on
+both halves: the tech_lead performed the same on-disk forensics I did and carried the direction as
+insight 16 ("UNADJUDICATED AND ENGINEER-MEASURED NEGATIVE... treat as open but discouraged; if
+re-issued, demand a settled tree and a patch"). And the real cause is worse than a lost return —
+per insight 14, r1_d1 **left a live workspace still being rewritten during verification**: the
+admission predicate flipped from the `m==120` ablation back to `m==128` between two of the verifier's
+reads, so no number could be attributed to a fixed source state. That also means the numbers I
+recovered from its `report.md` are the engineer's self-report off a moving tree, not verified: the
+tech_lead's on-disk read of its last full run gives geomean 1.2467 with `prefill_m128_square` 0.9018
+(~2.2% regression), against the report's own 1.2441 / +2.4%. Same sign and rough magnitude,
+different tree state. **The substantive physics stands** — oracle geometry matched still loses 1.67×,
+converging with r1_d0 — but it is an engineer claim, not an adjudicated measurement, and the lane is
+right to label it so. The genuine process defect is the one the tech_lead named: a direction
+intending to report a negative must still emit `best_patch.diff` of the arm it measured, or freeze
+its tree before the verifier runs. A moving tree is unverifiable by construction.
+
+**Round scorecard.** 2 of 3 directions delivered no patch, so two thirds of the round was
+unadjudicable by anyone but its author. r1_d0's revert was the *correct* form of this ("do not bank
+anything from this engineer", self-declared, tree reverted); r1_d1's was not. Both no-patch verifies
+correctly reported `policy_pass: false` rather than "nothing unsafe ran, so true" — absent code is
+not cleared code. The same-lock interleaved control earned its cost again by preventing a false
+positive on r1_d2: candidate runs spanned 0.65% while the interleaved incumbent spanned 0.02%.
+
+**Carried forward for round 2** (tech_lead's `suggest_next`): fix the process first; then cheapest-
+first the one-lock getenv `kSliceFits` ablation off the *shipped* binary to decompose the wave-4 win
+between bf16 plane width and slice re-fit; then true ping-pong / double-buffered LDS on ids 9/22 (the
+only pipelining form without the `ds_write` WAR), and the split-K fix-up's ~4.4 us internal fixed
+term. My epoch-C BOX facts propagated intact as insight 26.
