@@ -1195,8 +1195,16 @@ phase('Setup');
       `${A.progress_delta == null ? ' (= min_improve)' : ''}`);
   log(`  ${shown('isa_evidence', ISA_MODE)}  ${shown('mode', MODE)}  ` +
       `${shown('gpu_mode', GPU_MODE)}  gpu_ids=${GPU_IDS}`);
-  log(`  route_bands=${ROUTE_BANDS_ARG ? `${Object.keys(ROUTE_BANDS_ARG).length} supplied via args`
-    : 'not supplied -- will be DERIVED from the baseline repeats after the Benchmark phase'}`);
+  // Stale text is worse here than no text: this echo exists so a reader can see what will decide
+  // the round before any GPU time is spent, and it went on promising a derivation that had been
+  // deleted. `not supplied` is not a degraded state any more -- it means every route is held to
+  // MIN_ROUTE_WIN -- so the line has to say which of the two is in force.
+  log(`  route_bands=${ROUTE_BANDS_ARG
+    ? `${Object.keys(ROUTE_BANDS_ARG).length} measured floor(s) supplied; a route is held to `
+      + `max(${(MIN_ROUTE_WIN * 100).toFixed(2)}%, its own floor)`
+    : `not supplied -- every route is held to the ${(MIN_ROUTE_WIN * 100).toFixed(2)}% default. `
+      + 'On a box where a route measures noisier than that, its movement will read as a mechanism '
+      + 'when it is noise; pass scripts/route_floors.py output to fix that'}`);
   log(`  state_dir=${STATE_DIR || '(none -- this is a COLD start, not a continuation)'}`);
   log(`  workload_aligned=${HAS_WORKLOAD ? 'yes (PRIMARY metric is the time-weighted ratio-of-sums)'
     : 'no (PRIMARY metric is the unweighted geomean)'}`);
