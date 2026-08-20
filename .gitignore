@@ -222,5 +222,17 @@ kernel_eval/
 exp/
 # Torch JIT extension build cache (e2e_workflow/.torch_ext) — generated, not source
 .torch_ext/
+# torch's hipify twins. `cpp_extension.load()` rewrites src/X.hip into
+# src/X_hip.hip and ninja compiles the TWIN; the only difference is the launch
+# syntax (`k<<<g,b,0,s>>>(a)` becomes `hipLaunchKernelGGL((k), dim3(g), dim3(b), 0, s, a)`).
+# They are regenerated from the original whenever it changes — measured on
+# torch 2.11 / ROCm 7.2.3: hipify compares content and rewrites on difference, and
+# a tree with the twins deleted rebuilds them byte-identically in 12s.
+# So they are generated output, not source. Committing them duplicated every HIP
+# kernel in the repo and, worse, offered a second copy for an edit to land in —
+# one that the next build silently overwrites from the original.
+*_hip.hip
+# and manual backups OF a twin, which are backups of generated output
+*_hip.hip.orig_*
 # bench_e2e.sh default output dir (OUT_DIR=$(pwd)/e2e_bench_out) — runtime measurements
 e2e_bench_out/

@@ -2,16 +2,43 @@
 """Check that every hipified `X.hip` / `X_hip.hip` pair is in lockstep.
 
 Why this exists (finding 87). torch's cpp_extension hipify rewrites `X.hip` into
-`X_hip.hip`, prints "[skipped, already hipified]" when the twin already exists,
-and ninja then compiles *the twin*:
+`X_hip.hip`, and ninja then compiles *the twin*:
 
     custom_gemm_hip.cuda.o  <-  src/custom_gemm_hip.hip
 
-So an edit applied only to `src/custom_gemm.hip` changes nothing that runs. The
-build succeeds, the kernel runs, correctness passes, and the benchmark reports a
-null result for a change that was never compiled. That is the worst shape a
-measurement bug can take: it is indistinguishable from an honest negative, and
-an honest negative is what closes a search direction.
+The build succeeds, the kernel runs, correctness passes, and a benchmark can
+report a null result for a change that was never compiled. That is the worst
+shape a measurement bug can take: it is indistinguishable from an honest
+negative, and an honest negative is what closes a search direction.
+
+WHICH DIRECTION ACTUALLY DRIFTS, MEASURED. This docstring used to say the twin is
+skipped whenever it already exists, so an edit to `src/custom_gemm.hip` alone
+"changes nothing that runs". That is not what this toolchain does, and the
+correction matters because it points the guard at the other file. On torch
+2.11.0 / ROCm 7.2.3, `hipify_python.preprocessor` ends:
+
+    do_write = True
+    if os.path.exists(fout_path):
+        do_write = open(fout_path).read() != output_source
+    if do_write: ... "[ok]"
+    else:        ... "[skipped, already hipified]"
+
+so the skip means the twin ALREADY EQUALS the freshly hipified original -- it is
+up to date, not stale. Verified end to end: editing only the original and
+re-running hipify reports `[ok]` and the twin picks up the edit; deleting both
+twins and rebuilding the task regenerates them byte-identically in 12s.
+
+The consequence runs the other way. The twin is DERIVED, so an edit applied only
+to `src/custom_gemm_hip.hip` is what gets silently discarded, overwritten from
+the original by the next build whose sources changed. That is the drift this
+tool is worth running for, and it is why the twins are no longer tracked in git
+(see .gitignore): a committed copy of generated output is an invitation to edit
+the copy.
+
+The `[skipped, no changes]` status is a third case worth knowing: when a source
+has no CUDA construct to rewrite, hipify produces NO twin and the original is
+compiled directly. That is why `gemm_bindings.cpp` has no partner and why a
+missing twin is not by itself a defect.
 
 The rule enforced here: the two files may differ ONLY in hipify's launch-syntax
 rewriting. Everything else -- kernel bodies, template parameters, constants,
