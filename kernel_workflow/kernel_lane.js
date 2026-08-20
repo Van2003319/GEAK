@@ -134,9 +134,43 @@ const PROGRESS_DELTA = (() => {
   const v = parseFloat(A.progress_delta != null ? A.progress_delta : MIN_IMPROVE);
   return Number.isFinite(v) && v > -1 ? v : MIN_IMPROVE;
 })();
-// Per-route repeat bands, as {route: fraction}. An OPTIONAL OVERRIDE: when absent the lane derives
-// the table from the baseline's own repeats after the Benchmark phase (see ROUTE_BANDS below), so
-// the per-route gate is the DEFAULT path and not something a caller has to know to switch on.
+// A candidate is banked when BOTH of these hold, measured against an incumbent arm re-run in the
+// candidate's own session:
+//
+//   1. the suite geomean improved at all (> 1.0, no threshold), and
+//   2. at least one route improved by more than max(MIN_ROUTE_WIN, that route's measured floor).
+//
+// ...unless some route regressed past CATASTROPHIC_REGRESSION, which refuses regardless.
+//
+// Why these two and not the previous pair. The suite average alone cannot see a single-route
+// mechanism: an eleven-route geomean turns a real +7% route win into +0.62%, so a threshold on the
+// average is close to "never commit". The per-route test alone cannot see whether the change was
+// worth making at all. Requiring both means the average carries the "is this a net win" question
+// and the route carries the "did anything actually happen" question, which is the split the
+// evidence supports -- and neither has to answer the other's question badly.
+//
+// What was removed, and why it was wrong. The old rule was a UNION of a per-route test and a suite
+// threshold, with a REGRESSION VETO outside the union: any route past its band in the wrong
+// direction refused the candidate however good the average. Two costs, both paid on this lane:
+//
+//   * wave 1 round 2 -- ten of eleven routes +24%..+50%, refused because decode_m2_square gave back
+//     0.0006 ms. The legacy gate would have committed it.
+//   * wave 1 round 3 -- an integrated stack at +5.35% suite (the eight improved routes averaged
+//     +8.4%), refused on three routes giving back 1.3%-2.8%.
+//
+// The veto optimised Pareto-improvement across routes. This lane is scored on the unweighted suite
+// geomean. A gate that refuses a candidate which improves the objective is optimising something
+// nobody is measuring, and those two refusals are what it cost. A defence of the veto also argued
+// that a union "cannot make a run stricter"; the first round the gate was ever reachable falsified
+// that, and a second argument for it -- that eleven routes at +0.4% is a "~4.4% suite win" the
+// per-route test would miss -- was simply arithmetic error: the geomean of eleven 1.004s is 1.004.
+//
+// What survives from the veto is CATASTROPHIC_REGRESSION, which is not a noise judgement. It sits
+// an order of magnitude outside the widest floor ever measured here, so it cannot refuse real work;
+// it exists so "the average improved" cannot ship one shape a third slower.
+//
+// Per-route measured noise floors, as {route: fraction}. OPTIONAL, and now only ever a TIGHTENING:
+// with no table every route is held to MIN_ROUTE_WIN.
 //
 // Why the per-route gate exists: COMMANDMENT's claim rule and the tech-lead close-out both say a
 // single-route mechanism must be judged by that route's absolute microseconds, with the suite
@@ -145,18 +179,24 @@ const PROGRESS_DELTA = (() => {
 // mechanism reaches the gate reading +0.6%, under the noise, and MIN_IMPROVE on top of that is
 // equivalent to "never commit".
 //
-// Why it had to become the default rather than stay an argument. It shipped as `args.route_bands`
-// with the only band source being `route_gate.py:bands_from_repeats()`, which wants N whole suite
-// reports -- something no caller holds at the moment the gate is configured. So the table had to be
-// a hand-maintained per-host JSON, the canonical invocation never passed one, and across seven waves
-// the gate logged NOTHING: it decided nothing while looking like a shipped feature. Meanwhile the
-// suite gate refused a verified, correctness-passing, policy-clean +1.58% stack that this gate
-// accepts. Finding (87)'s lesson, again: "has existed and been correct for several rounds while
-// nothing called it", and the fix is not a better tool, it is calling it.
+// Where the table comes from now, and why that changed. It was derived in-lane from the baseline's
+// own `samples_ms` -- n=5, band = min-max range -- chosen because the only alternative then was a
+// hand-maintained per-host JSON that had gone six epochs stale. That derivation is now deleted: at
+// n=5 a min-max range is close to a Bernoulli draw on whether a flyer landed in the sample, and
+// against a 24-repeat calibration of the same routes it came out 8.8x too TIGHT on decode_m2_square
+// and 2.9x too LOOSE on prefill_m256_down. Wrong in both directions at once is exactly what a floor
+// must not be.
 //
-// The bands must be MEASURED, not guessed. On this lane they span 1.56% to 11.55% across routes, so
-// a single default would be wrong by ~7x -- which is why `routeGate` refuses a route it has no band
-// for rather than defaulting one.
+// The stale-table problem that ruled out the measured tables is also gone: `register_epoch.py` +
+// `measure_noise_floor.py` + `deprovisionalize_epoch.py` now run on every machine change, so
+// `noise_floor_stats.MEASURED_NOISE_FLOOR` describes the box the candidates are being judged on, 8
+// same-variant primed repeats, 2*MAD/median. That is the table to pass here. This script cannot
+// read files, so the caller passes it inline -- see `scripts/route_floors.py`.
+//
+// The spread is why a single number is not enough on its own: on epoch Z (tw035) three of eleven
+// routes measured WIDER than MIN_ROUTE_WIN -- decode_m8_up 7.64%, prefill_m256_down 7.02%,
+// prefill_m1024_down 2.10% -- so a flat 2% bar would have read noise as a mechanism on three
+// routes. On epochs Y and A every floor is under 1.3%, and the table changes nothing.
 const ROUTE_BANDS_ARG = (() => {
   const raw = A.route_bands;
   if (raw == null) return null;
@@ -174,7 +214,8 @@ const ROUTE_BANDS_ARG = (() => {
     }
   }
   if (obj && typeof obj === 'object' && obj.bands && typeof obj.bands === 'object') obj = obj.bands;
-  if (!obj || typeof obj !== 'object') throw new Error('args.route_bands must be an object of {route: band}');
+  if (obj && typeof obj === 'object' && obj.floors && typeof obj.floors === 'object') obj = obj.floors;
+  if (!obj || typeof obj !== 'object') throw new Error('args.route_bands must be an object of {route: floor}');
   const out = {};
   for (const [route, band] of Object.entries(obj)) {
     const v = parseFloat(band);
@@ -186,6 +227,16 @@ const ROUTE_BANDS_ARG = (() => {
   if (!Object.keys(out).length) throw new Error('args.route_bands is empty');
   return out;
 })();
+// The bar every route must clear before its movement counts as a mechanism rather than as luck.
+// 2% is the operator's number and it is the DEFAULT, not the rule: a measured floor wider than this
+// replaces it per route. It is comfortably above every floor measured on the three quiet epochs
+// this lane has run (max 1.24%), and comfortably below the size of win this lane actually banks on
+// its winning route (+12.9%, +30%, +66%).
+const MIN_ROUTE_WIN = 0.02;
+// Not a noise judgement and not tunable per epoch: an order of magnitude outside the widest floor
+// ever measured on this task (7.64%). Its whole job is to stop "the average improved" from shipping
+// one shape a third slower, which no suite geomean can see.
+const CATASTROPHIC_REGRESSION = 0.10;
 // Twin of `scripts/route_gate.py:decide()`. The two are NOT checked against each other by any
 // parity test: the Python side is pinned by test_route_gate.py::DecisionTest and this side by
 // test_lane_gates.js, so a divergence between them is exactly the failure neither guard sees.
@@ -195,8 +246,12 @@ const ROUTE_BANDS_ARG = (() => {
 // look like a pass, which is why the reason is logged either way.
 const routeGate = (candPerCase, incPerCase, bands, opts) => {
   const o = opts || {};
-  const na = (reason) => ({ applicable: false, accepted: false, reason, improved: [], regressed: [], routes: [] });
-  if (!bands || !Object.keys(bands).length) return na('no route bands supplied');
+  const na = (reason) => ({ applicable: false, accepted: false, reason, improved: [], regressed: [],
+    catastrophic: [], routes: [], suiteRatio: null });
+  // A missing floor table no longer disables the gate: MIN_ROUTE_WIN covers every route, and the
+  // table (when supplied) only raises the bar where a sweep measured the route to be noisier than
+  // that. What the gate cannot do without is the paired per-case times, which is what `na` is for.
+  bands = bands || {};
   const read = (rows, which) => {
     const out = {};
     for (const row of rows || []) {
@@ -218,99 +273,89 @@ const routeGate = (candPerCase, incPerCase, bands, opts) => {
 
   const missing = Object.keys(inc.rows).filter(r => cand.rows[r] == null).sort();
   if (missing.length) {
-    return { applicable: true, accepted: false, improved: [], regressed: [], routes: [],
+    return { applicable: true, accepted: false, improved: [], regressed: [], catastrophic: [],
+      routes: [], suiteRatio: null,
       reason: `candidate did not measure ${missing.length} incumbent route(s): ${missing.join(', ')}; ` +
-        'non-regression cannot be claimed for a route that was not measured' };
+        'neither a suite average nor a non-regression claim can be made over routes that were ' +
+        'not measured' };
   }
-  const unbanded = Object.keys(inc.rows).filter(r => bands[r] == null).sort();
-  if (unbanded.length) return na(`no measured band for route(s) ${unbanded.join(', ')}`);
-
-  const routes = [], improved = [], regressed = [];
+  // No per-route floor for a route is NOT a refusal any more. `MIN_ROUTE_WIN` is a floor under the
+  // floor: a route we have not measured is held to 2%, which is above every floor measured on the
+  // three quiet epochs this lane has run on and is the same number a reader would apply by hand.
+  // The measured table only ever RAISES the bar, and only where a sweep says it must.
+  const routes = [], improved = [], regressed = [], catastrophic = [];
+  let logSum = 0;
   for (const route of Object.keys(inc.rows).sort()) {
-    const band = bands[route], i = inc.rows[route], c = cand.rows[route];
+    const floor = bands[route] == null ? 0 : bands[route];
+    const need = Math.max(MIN_ROUTE_WIN, floor);
+    const i = inc.rows[route], c = cand.rows[route];
     const delta = (i - c) / i;                       // > 0 means the candidate is faster
-    const status = delta > band ? 'improved' : (-delta > band ? 'regressed' : 'flat');
-    routes.push({ route, incumbent_ms: i, candidate_ms: c, delta_frac: delta, band, status });
-    if (status === 'improved') improved.push(route);
+    logSum += Math.log(i / c);
+    const status = delta > need ? 'won'
+      : (-delta > CATASTROPHIC_REGRESSION ? 'catastrophic'
+        : (-delta > Math.max(floor, 0) ? 'regressed' : 'flat'));
+    routes.push({ route, incumbent_ms: i, candidate_ms: c, delta_frac: delta, floor, need, status });
+    if (status === 'won') improved.push(route);
     if (status === 'regressed') regressed.push(route);
+    if (status === 'catastrophic') { catastrophic.push(route); regressed.push(route); }
   }
+  const suiteRatio = Math.exp(logSum / routes.length);
   const pct = (x) => `${(x * 100).toFixed(2)}%`;
-  const done = (accepted, reason) => ({ applicable: true, accepted, reason, improved, regressed, routes });
-  if (regressed.length) {
-    return done(false, 'regressed past its own band on: ' + routes.filter(r => r.status === 'regressed')
-      .map(r => `${r.route} (${pct(-r.delta_frac)} vs band ${pct(r.band)})`).join(', '));
+  const done = (accepted, reason) => ({ applicable: true, accepted, reason, improved, regressed,
+    catastrophic, routes, suiteRatio });
+
+  // The "we would never ship this" fence, and the only refusal that survives a positive suite
+  // number. It is deliberately an order of magnitude outside every floor ever measured here (the
+  // widest is 7.64%), so it is not a noise judgement and cannot refuse real work: it exists so that
+  // "the average improved" cannot ship one shape a third slower.
+  if (catastrophic.length) {
+    return done(false, 'a route regressed catastrophically (past ' + pct(CATASTROPHIC_REGRESSION) +
+      ', an order of magnitude outside any measured floor): ' +
+      routes.filter(r => r.status === 'catastrophic')
+        .map(r => `${r.route} ${pct(-r.delta_frac)}`).join(', '));
   }
-  // A direction that declared a mechanism on one route does not get to bank a win that showed up
-  // somewhere else: that is how a measurement artefact is committed as a mechanism.
-  let wanted = improved;
-  if (Array.isArray(o.targetRoutes) && o.targetRoutes.length) {
-    const targets = new Set(o.targetRoutes);
-    wanted = improved.filter(r => targets.has(r));
-    if (!wanted.length) {
-      return done(false, 'no declared target route improved past its own band' +
-        (improved.length ? `; incidental gains on ${improved.join(', ')} are not the claimed mechanism` : ''));
-    }
+  // Condition 1: the suite average did not get worse. Computed HERE, over the paired per-route
+  // times, rather than taken from `winner.geomean`: both arms then come from one invocation, and
+  // the 1.5-3% an unchanged tree wanders between invocations cancels instead of deciding the round.
+  if (!(suiteRatio > 1)) {
+    return done(false, `the suite geomean did not improve (${suiteRatio.toFixed(5)} vs the ` +
+      'incumbent arm measured in the same session)');
   }
-  if (!wanted.length) return done(false, 'no route improved past its own band (all flat)');
-  const won = new Set(wanted);
-  return done(true, 'improved past band on: ' + routes.filter(r => won.has(r.route))
-    .map(r => `${r.route} (${pct(r.delta_frac)} vs band ${pct(r.band)})`).join(', '));
+  // Condition 2: something concrete moved. A suite average that improves while no single route
+  // clears its own noise is the shape a round of pure measurement luck takes, and banking it is how
+  // a lane ratchets upward on selection bias -- three candidates a round, and only the favourable
+  // draw is ever kept.
+  if (!improved.length) {
+    const nearest = routes.slice().sort((a, b) => b.delta_frac - a.delta_frac)[0];
+    return done(false, `the suite improved (${suiteRatio.toFixed(5)}) but no single route cleared ` +
+      `its own bar; the best was ${nearest.route} ${pct(nearest.delta_frac)} against a required ` +
+      `${pct(nearest.need)}${nearest.need > MIN_ROUTE_WIN
+        ? ` (its measured floor, wider than the ${pct(MIN_ROUTE_WIN)} default)` : ''}`);
+  }
+  // Targeting is a NOTE, not a veto. It used to refuse a win that landed off the declared route;
+  // `target_routes` came back on 1 of 26 engineer results, so in practice that rule refused work
+  // over a missing label far more often than it caught an artefact. The caller logs the mismatch.
+  return done(true, 'suite ' + suiteRatio.toFixed(5) + ' and cleared its own bar on: ' +
+    routes.filter(r => r.status === 'won')
+      .map(r => `${r.route} ${pct(r.delta_frac)} (needed ${pct(r.need)}${
+        r.need > MIN_ROUTE_WIN ? ', its measured floor' : ''})`).join(', ') +
+    (regressed.length ? `; gave ground within noise on ${regressed.join(', ')}` : ''));
 };
-// Both mirrored from `scripts/route_gate.py` (which mirrors them from
-// `measure_noise_floor.py`). MIN_REPEATS: two samples cannot distinguish a spread from a pair.
-// MIN_BAND: a band of 0 -- which three coarse-timer repeats produce readily -- would make every
-// rounding difference read as `improved`, i.e. the gate would bank noise on its QUIETEST routes.
-const BAND_MIN_REPEATS = 3;
-const BAND_MIN = 0.002;
-// Twin of `scripts/route_gate.py:bands_from_samples()`. Derives the per-route band table from the
-// baseline table the benchmark engineer already returns, where each row carries `samples_ms` -- "the
-// raw per-repeat latency for that case, at least three complete primed repeats, in the order
-// measured, not a summary" (benchmark_engineer.md step 5).
+// The n=5 band derivation that used to live here is DELETED, not disabled.
 //
-// This is what makes the per-route gate reachable with no band file, no epoch letter and no
-// task-specific table: every run measures its own baseline three times on the box that will judge
-// the candidates, so the band is this machine's own answer about how much an UNCHANGED tree wanders.
+// It read a band off `baseline_per_case[].samples_ms` as (max-min)/median, and it was the thing
+// that made the per-route gate reachable without a hand-maintained file -- which was the right
+// problem to solve and the wrong statistic to solve it with. Against a 24-repeat calibration of the
+// same routes it came back 8.8x too TIGHT on decode_m2_square (1.31% vs 11.55%) and 2.9x too LOOSE
+// on prefill_m256_down. At n=5 a min-max range is close to a Bernoulli draw on whether a flyer
+// landed in the sample, so it was not measuring the route, it was measuring the draw. It cost this
+// lane a real refusal: wave 1 round 2 vetoed on decode_m2_square's 1.31% band.
 //
-// ONE DEVIATION FROM THE PYTHON TWIN, deliberate and load-bearing: the Python raises, this returns
-// `{bands: null, reason}`. `samples_ms` is optional by contract, so a throw here would abort a run
-// over a field the benchmark engineer is allowed to omit. The caller falls back to the legacy suite
-// gate and logs the reason -- inert AND visible, never silently off.
-//
-// Refuses the WHOLE table when any route is unusable rather than returning a partial one: a partial
-// table makes `routeGate` refuse the unbanded route with "no measured band for ...", which reads as
-// a candidate defect, while an absent table is one clear line about us.
-const bandsFromSamples = (perCase) => {
-  const rows = Array.isArray(perCase) ? perCase : [];
-  if (!rows.length) return { bands: null, reason: 'baseline_per_case is empty' };
-  const out = {};
-  for (const row of rows) {
-    const name = row && (row.name || row.test_case_id);
-    if (!name) return { bands: null, reason: 'a baseline_per_case row has no route name' };
-    if (out[name] != null) return { bands: null, reason: `route ${name} appears twice` };
-    const raw = row.samples_ms;
-    if (!Array.isArray(raw)) {
-      return { bands: null, reason: `route ${name} carries no samples_ms array, so how much this ` +
-        'tree wanders on it was never measured (a band cannot be inferred from one latency)' };
-    }
-    const vals = [];
-    for (const v of raw) {
-      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
-        return { bands: null, reason: `route ${name} has a non-positive or non-finite sample (${v})` };
-      }
-      vals.push(v);
-    }
-    if (vals.length < BAND_MIN_REPEATS) {
-      return { bands: null, reason: `route ${name} has ${vals.length} sample(s), need at least ` +
-        `${BAND_MIN_REPEATS}` };
-    }
-    const sorted = vals.slice().sort((a, b) => a - b);
-    const mid = sorted.length >> 1;
-    const med = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-    if (!(med > 0)) return { bands: null, reason: `route ${name} has a non-positive median` };
-    out[name] = Math.max((sorted[sorted.length - 1] - sorted[0]) / med, BAND_MIN);
-  }
-  return { bands: out, reason: '' };
-};
+// What replaced it is not a better estimator here but a table measured properly somewhere else:
+// `measure_noise_floor.py` takes 8 same-variant primed repeats and reports 2*MAD/median per route,
+// and since epoch registration was automated it is re-measured on every machine change. Passed in
+// via `args.route_bands`; absent, every route is held to MIN_ROUTE_WIN.
+
 // Budget cost of ONE `deep_explore` direction. The deep-explore engineer does far more than a single
 // specialist — broad rewrite authority, its own multi-iteration measure→profile→rewrite loop — so it
 // is charged more than 1 against the direction budget (default 2). It also always runs in a DEDICATED
@@ -1346,38 +1391,28 @@ const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
-// --- The per-route commit gate's band table --------------------------------
-// Resolved HERE rather than beside the other args because it is a MEASUREMENT, and the measurement
-// does not exist until the benchmark engineer has run the baseline three times. `args.route_bands`
-// stays an override for a caller that has a better table (e.g. an 8-repeat per-epoch sweep); with no
-// override the lane derives its own from `baseline_per_case[].samples_ms`.
-//
-// Honest limitation, recorded rather than hidden: this table prices the tree the wave STARTED from.
-// Insight (49) found floors sort by TREE more than by box (up to 4.3x between trees several waves
-// apart), so after a round commits, the band describes the parent's parent. Within one wave the tree
-// moves by small patches and the drift is far below the 7x error a single default band would carry,
-// and the sharper fix for the residual is not a wider band but comparing against a control measured
-// in the candidate's OWN session -- which is what `control_per_case` does at the gate below.
-const ROUTE_BAND_DERIVED = ROUTE_BANDS_ARG ? { bands: null, reason: '' }
-  : bandsFromSamples(BASELINE_PER_CASE);
-const ROUTE_BANDS = ROUTE_BANDS_ARG || ROUTE_BAND_DERIVED.bands;
-const ROUTE_BANDS_SOURCE = ROUTE_BANDS_ARG ? 'args.route_bands'
-  : (ROUTE_BANDS ? 'derived from baseline_per_case[].samples_ms' : 'none');
-if (ROUTE_BANDS) {
-  const n = Object.keys(ROUTE_BANDS).length;
-  const span = Object.values(ROUTE_BANDS);
-  log(`Commit gate: PER-ROUTE, ${n} bands (${ROUTE_BANDS_SOURCE}), ` +
-      `${(Math.min(...span) * 100).toFixed(2)}%-${(Math.max(...span) * 100).toFixed(2)}% across routes. ` +
-      'A single-route mechanism is judged on its own route\'s absolute time; the suite geomean is ' +
-      'reported but does not decide.');
-} else {
-  // Never silent. A run that falls back to the suite gate is a run whose single-route wins are
-  // being divided by the route count, and that has to be visible in the log it produced.
-  log(`Commit gate: SUITE GEOMEAN at MIN_IMPROVE=${MIN_IMPROVE} -- the per-route gate is OFF because ` +
-      `no band table could be built (${ROUTE_BAND_DERIVED.reason || 'no reason recorded'}). ` +
-      'Every single-route win this run produces will reach the gate divided by the route count. To ' +
-      'fix it, have the benchmark engineer report samples_ms (>=3 primed repeats per case), or pass ' +
-      'args.route_bands.');
+// --- What the commit gate will hold each route to ---------------------------
+// The gate always runs now. With no measured table every route is held to MIN_ROUTE_WIN; a table
+// raises the bar on the routes a sweep found noisier than that, and on nothing else. There is no
+// longer a "the gate is off" state to fall back from, which is the point: for seven waves the
+// per-route gate logged nothing at all while looking like a shipped feature, because the only way
+// to feed it was a file nobody passed.
+const ROUTE_BANDS = ROUTE_BANDS_ARG;
+{
+  const bar = (r) => Math.max(MIN_ROUTE_WIN, (ROUTE_BANDS && ROUTE_BANDS[r]) || 0);
+  const names = (BASELINE_PER_CASE || []).map(r => r && (r.name || r.test_case_id)).filter(Boolean);
+  const raised = names.filter(r => bar(r) > MIN_ROUTE_WIN).sort();
+  log(`Commit gate: suite geomean must improve at all AND >=1 route must clear ` +
+      `${(MIN_ROUTE_WIN * 100).toFixed(2)}% (or its own measured floor, whichever is larger); ` +
+      `any route past -${(CATASTROPHIC_REGRESSION * 100).toFixed(0)}% refuses regardless. ` +
+      (ROUTE_BANDS
+        ? `Floor table supplied for ${Object.keys(ROUTE_BANDS).length} route(s); it raises the bar on ` +
+          (raised.length
+            ? `${raised.length}: ${raised.map(r => `${r} ${(bar(r) * 100).toFixed(2)}%`).join(', ')}.`
+            : 'none of this suite\'s routes (every measured floor is below the default).')
+        : 'No floor table supplied, so every route is held to the default. Pass one from ' +
+          'scripts/route_floors.py -- on a box where a route measures noisier than the default, ' +
+          'that route\'s movement is being read as a mechanism when it is noise.'));
 }
 
 // ===========================================================================
@@ -2361,17 +2396,22 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   const judgeCandidate = (cand) => {
     const sameSession = !!cand.control_per_case;
     const legacyImproved = cand.geomean > cumulative * (1 + MIN_IMPROVE);
-    const rv = ROUTE_BANDS
-      ? routeGate(cand.per_case, sameSession ? cand.control_per_case : bestPerCase, ROUTE_BANDS,
-        { targetRoutes: cand.target_routes })
-      : null;
+    // Always called, table or no table. This used to be conditional on ROUTE_BANDS, which was
+    // correct while an absent table meant the gate had nothing to judge with; it now means every
+    // route is held to MIN_ROUTE_WIN, so skipping the call would silently put the run back on the
+    // suite threshold -- the exact "shipped feature that decides nothing" state this replaced.
+    const rv = routeGate(cand.per_case, sameSession ? cand.control_per_case : bestPerCase,
+      ROUTE_BANDS, { targetRoutes: cand.target_routes });
     if (!rv || !rv.applicable) {
       return { sameSession, legacyImproved, routeVerdict: rv, suiteSaysYes: legacyImproved,
         improved: legacyImproved };
     }
-    const suiteSaysYes = legacyImproved && !rv.regressed.length;
-    return { sameSession, legacyImproved, routeVerdict: rv, suiteSaysYes,
-      improved: rv.accepted || suiteSaysYes };
+    // No union any more: the gate's own two conditions ARE the decision. `legacyImproved` is still
+    // computed, and still logged whenever the two disagree, because it is the number every prior
+    // round of this lane was judged on and a change of gate that cannot be audited against the old
+    // one is a change nobody can check.
+    return { sameSession, legacyImproved, routeVerdict: rv, suiteSaysYes: legacyImproved,
+      improved: rv.accepted };
   };
 
   candidates.sort((a, b) => b.geomean - a.geomean);
@@ -2418,7 +2458,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   const legacyImproved = !!(verdict && verdict.legacyImproved);
   let improved = legacyImproved;
   let routeVerdict = null;
-  if (winner && ROUTE_BANDS) {
+  if (winner) {
     // Prefer the incumbent arm re-measured in the candidate's OWN session. Both arms then come from
     // one invocation, so the 1.5-3% a single unchanged tree wanders BETWEEN invocations cancels
     // instead of being scored as the patch's effect -- and that drift is larger than the per-round
@@ -2429,46 +2469,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     const sameSession = verdict.sameSession;
     routeVerdict = verdict.routeVerdict;
     if (routeVerdict.applicable) {
-      // UNION, with the regression veto as the safety property -- not a replacement.
-      //
-      // The two tests answer different questions and both are real evidence: the per-route test asks
-      // "did a named route get faster beyond its own noise", the suite test asks "did the whole suite
-      // get faster by more than the threshold". Each sees a win the other cannot. The per-route test
-      // exists because an eleven-route geomean divides a single-route win by eleven. But the reverse
-      // blind spot is just as real and was nearly shipped here: eleven routes each improving 0.4% is
-      // a genuine suite win of ~4.4% that the per-route test scores as "all flat", because no single
-      // route clears its own band. Replacing one test with the other would have traded a known
-      // false refusal for a new one.
-      //
-      // What is NOT unioned is the regression veto. A candidate that pushed some route past its band
-      // in the wrong direction is refused however good its suite number looks, because that number is
-      // an average and the regression is a fact about a route.
-      //
-      // So the union WIDENS what commits, but the veto NARROWS it, and the veto is not subject to
-      // the union -- which means turning this default on CAN make a run stricter. An earlier version
-      // of this comment claimed it could not; wave coldstart_newgate_20260819 round 2 falsified that
-      // in the first round the gate was ever reachable. A candidate at 0.6114 -> 0.924 improved ten
-      // of eleven routes by +24%..+50% (prefill_m2048_square +46.66%, a 0.294 ms gain) and was
-      // refused on decode_m2_square giving back 2.40%, i.e. 0.0006 ms. `legacyImproved` was true, so
-      // with ROUTE_BANDS off that round commits and with it on it does not.
-      //
-      // Whether that refusal is CORRECT is a question about the band, not about this union. The band
-      // is a full min-max spread over the baseline's `samples_ms`, and on that wave n was 5; a
-      // 24-repeat calibration of the same route (PIPELINE_PROGRESS_GREEDY.md 13.6, absolute-us
-      // column) put its spread at 11.55% where n=5 gave 1.31%. At n=5 min-max is close to a
-      // Bernoulli draw on whether a flyer landed in the sample, so a route can be handed a band far
-      // tighter than its real noise and veto on it. Raise the baseline repeat count before reading a
-      // single-route veto as a real regression. Do not "fix" it by dropping the veto: an averaged
-      // suite number cannot see a route-local regression at all, which is why the veto is here.
-      const suiteSaysYes = verdict.suiteSaysYes;
+      // The decision is the gate's own conjunction: suite improved AND one route cleared its bar,
+      // minus a catastrophic-regression fence. See the header above `routeGate` for what this
+      // replaced and what the previous rule cost.
       improved = verdict.improved;
-      log(`  [gate r${round}] per-route: ${routeVerdict.accepted ? 'ACCEPT' : 'REFUSE'} -- ${routeVerdict.reason}`);
-      if (!routeVerdict.accepted && suiteSaysYes) {
-        log(`  [gate r${round}] committing anyway on the SUITE test (${winner.geomean.toFixed(5)} vs ` +
-            `cumulative ${cumulative.toFixed(5)} at MIN_IMPROVE=${MIN_IMPROVE}), with no route ` +
-            'regressed past its band. A broad gain spread thinly across routes clears no single ' +
-            'band while still being a real win; that is the per-route test\'s own blind spot, not a ' +
-            'reason to discard the candidate.');
+      log(`  [gate r${round}] ${routeVerdict.accepted ? 'ACCEPT' : 'REFUSE'} -- ${routeVerdict.reason}`);
+      if (routeVerdict.regressed.length && routeVerdict.accepted) {
+        // Banked WITH ground given up somewhere. Not a refusal -- the objective is the suite
+        // average and the average went up -- but the routes that paid for it are named, because a
+        // ledger that records only the win cannot answer "which shape got slower" three waves later.
+        log(`  [gate r${round}] banked while giving ground on ${routeVerdict.regressed.length} ` +
+            `route(s): ${routeVerdict.routes.filter(r => r.status === 'regressed')
+              .map(r => `${r.route} ${(-r.delta_frac * 100).toFixed(2)}% (floor ` +
+                        `${(r.floor * 100).toFixed(2)}%)`).join(', ')}. The suite average is the ` +
+            'objective, so this is accepted; it is named so the cost is on the record.');
       }
       log(`  [gate r${round}] incumbent side: ${sameSession
         ? 'the verifier\'s SAME-SESSION control arm (both arms from one invocation)'
@@ -2491,15 +2505,18 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
             `(${legacyImproved ? 'it would have committed' : 'it would have refused'}: ` +
             `winner ${winner.geomean.toFixed(5)} vs cumulative ${cumulative.toFixed(5)} ` +
             `at MIN_IMPROVE=${MIN_IMPROVE}). ${improved
-              ? 'A suite geomean divides a single-route win by the route count, which is what the '
-                + 'band table exists to undo.'
-              : 'A route regressed past its own band, which an averaged suite number cannot see.'}`);
+              ? 'A suite geomean divides a single-route win by the route count, and it is measured '
+                + 'against a stored absolute from an earlier session; this gate pairs both arms '
+                + 'inside one invocation and asks the route directly.'
+              : 'The suite average moved but nothing cleared its own noise, or a route regressed '
+                + 'catastrophically -- neither of which an averaged number can distinguish.'}`);
       }
     } else {
-      log(`  [gate r${round}] per-route gate NOT APPLICABLE (${routeVerdict.reason}); ` +
-          'falling back to the legacy suite-geomean gate. A missing band must not stall the lane, ' +
-          'but it must not look like a pass either -- have the benchmark engineer report ' +
-          'samples_ms (>=3 primed repeats per case), or pass args.route_bands.');
+      log(`  [gate r${round}] commit gate NOT APPLICABLE (${routeVerdict.reason}); ` +
+          `falling back to the legacy suite-geomean gate at MIN_IMPROVE=${MIN_IMPROVE}. This is not ` +
+          'a missing floor table -- the gate no longer needs one -- it is missing paired per-case ' +
+          'times, so nothing can be compared route by route. Have the verifier return per_case and ' +
+          'control_per_case.');
     }
   }
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
@@ -2520,12 +2537,18 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   // round and simultaneously counts it as a stall is measuring two different things and calling both
   // progress.
   //
-  // So a round that cleared a route's own band counts as progress. This is strictly more permissive,
-  // which is the correct direction for a STOPPING rule: the cost of a false "advancing" is one more
-  // round of a budget the caller already authorised, while the cost of a false "stalled" is every
-  // remaining round of the wave.
+  // So a round in which any route cleared its own bar counts as progress. This is strictly more
+  // permissive, which is the correct direction for a STOPPING rule: the cost of a false "advancing"
+  // is one more round of a budget the caller already authorised, while the cost of a false
+  // "stalled" is every remaining round of the wave.
+  //
+  // Deliberately broader than the commit gate in TWO ways now. It ignores the suite condition -- a
+  // route that genuinely moved is evidence the search found something, whether or not the average
+  // followed -- and it ignores routes that gave ground within noise. It still respects the
+  // catastrophic fence, because a round that made one shape a third slower has not advanced
+  // anything.
   const routeProgress = !!(routeVerdict && routeVerdict.applicable && routeVerdict.improved.length
-    && !routeVerdict.regressed.length);
+    && !routeVerdict.catastrophic.length);
   const madeProgress = suiteProgress || routeProgress;
   if (routeProgress && !suiteProgress) {
     log(`  [gate r${round}] the search ADVANCED on route evidence (${routeVerdict.improved.join(', ')}) ` +

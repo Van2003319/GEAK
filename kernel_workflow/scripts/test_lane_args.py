@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -214,6 +215,93 @@ class CliTest(unittest.TestCase):
         and is wrong, and the exit codes have to distinguish them for a launch script."""
         r = self.run_cli("--check", "/nonexistent/lane.json")
         self.assertEqual(2, r.returncode)
+
+
+class ResolvedAtLaunchTest(unittest.TestCase):
+    """`route_bands: "@current_epoch"` -- the one value that must not be written down.
+
+    The per-route floors describe the box, this container changes box every few
+    hours, and the only floor table ever committed went six epochs stale while
+    still reading like a current measurement. Writing today's numbers into a lane
+    file reproduces that exactly. So the file names the SOURCE and `--check`
+    resolves it, which also means an epoch with no measured floors is a refusal
+    before the wave starts rather than a table of fail-closed defaults that
+    quietly holds every route to ~7% for the whole run.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="laneargs_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write(self, **extra) -> Path:
+        p = self.tmp / "lane.json"
+        p.write_text(json.dumps({
+            "kernel_path": "/abs/k", "workflow_dir": "/abs/wf", **extra}), encoding="utf-8")
+        return p
+
+    def test_the_directive_resolves_to_the_live_epochs_measured_table(self):
+        import noise_floor_stats as QRS
+        import route_floors
+        try:
+            want = route_floors.resolve()
+        except route_floors.FloorsUnavailable as exc:
+            self.skipTest(f"this epoch cannot supply a table: {exc}")
+        args, _ = la.load(self.write(route_bands="@current_epoch"))
+        self.assertEqual(want, args["route_bands"])
+        # ...and it is the LIVE epoch's table, not some other epoch's that happens to have the same
+        # route names. That distinction is the whole point: every epoch's table has these same
+        # eleven keys, so a resolver pointed at the wrong one looks perfectly healthy.
+        self.assertEqual(set(QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[QRS.CURRENT_MACHINE]),
+                         set(args["route_bands"]))
+        for route, floor in QRS.MEASURED_NOISE_FLOOR_BY_MACHINE[QRS.CURRENT_MACHINE].items():
+            self.assertAlmostEqual(floor, args["route_bands"][route], places=6)
+
+    def test_an_explicit_table_is_left_exactly_as_written(self):
+        """The directive is opt-in. A caller that genuinely has a better table --
+        a fresh 8-repeat sweep it just took -- must still be able to pass it."""
+        table = {"decode_m2_square": 0.05}
+        args, _ = la.load(self.write(route_bands=table))
+        self.assertEqual(table, args["route_bands"])
+
+    def test_an_unresolvable_epoch_refuses_the_file_rather_than_the_wave(self):
+        """The failure this is really for. A provisional epoch's table is shaped
+        exactly like a measured one, so nothing downstream can tell them apart;
+        handed to the gate it raises every route's bar to the fail-closed default
+        and the wave runs unable to accept anything, with no line saying so."""
+        import route_floors
+        real = route_floors.resolve
+
+        def boom(*a, **k):
+            raise route_floors.FloorsUnavailable("epoch Q is PROVISIONAL -- not a measurement")
+        route_floors.resolve = boom
+        try:
+            with self.assertRaises(la.LaneArgsError) as caught:
+                la.load(self.write(route_bands="@current_epoch"))
+        finally:
+            route_floors.resolve = real
+        self.assertIn("PROVISIONAL", str(caught.exception))
+        self.assertIn("route_bands", str(caught.exception))
+
+    def test_check_reports_that_it_resolved_rather_than_reading_a_literal(self):
+        import route_floors
+        try:
+            route_floors.resolve()
+        except route_floors.FloorsUnavailable as exc:
+            self.skipTest(f"this epoch cannot supply a table: {exc}")
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "lane_args.py"), "--check", str(self.write(route_bands="@current_epoch"))],
+            capture_output=True, text=True)
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("resolved at launch", proc.stdout,
+                      "a resolved value that reports like a literal is one nobody checks the age of")
+
+    def test_every_resolver_names_a_key_the_entry_points_accept(self):
+        """(62) as a completeness claim: a directive on a key no worker reads
+        would resolve beautifully and be dropped."""
+        accepted = la.known_args(la.LANE_JS) | la.known_args(la.DISPATCH_JS)
+        for key in la.RESOLVERS:
+            with self.subTest(key=key):
+                self.assertIn(key, accepted)
 
 
 if __name__ == "__main__":
