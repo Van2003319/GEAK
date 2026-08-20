@@ -1493,3 +1493,44 @@ it independently **replicates the cold/warm finding on a second box** (n=2), whi
 tell whether the 10-of-11 result was a property of tw040 or of restores in general. `PWD` is the scratch
 verdict dir, not the seed task -- `gpu_lock` derives `TORCH_EXTENSIONS_DIR` from `$PWD` and the seed
 directory must not be written to.
+
+### epoch B measured, and a finding of mine FAILED TO REPLICATE
+
+Both sweeps clean: 8/8 repeats each, `problems=[]`, identical `source_hash`. Warm installed, frame now
+**exit 0** (no stale-prose false positive this time), install verified route-by-route against the verdict
+-- 11 routes, zero mismatches, B out of `PROVISIONAL_MACHINES`, S correctly still in it.
+
+**Epoch B (installed, warm): floors 0.20%-1.09%, only TWO clamped** (decode_m64_square,
+prefill_m2048_square). Widest is decode_m2_square at 1.09%. `prefill_m256_down` sits at **0.32% and is
+NOT clamped**, so the specific false-refusal hazard I flagged for epoch A does not exist on this box.
+That is a healthier ruler than epoch A's (0.20%-0.80%, four clamped).
+
+**The correction.** On tw040 I ran a paired cold/warm sweep, found warm quieter on **10 of 11** routes
+(sign test p~0.012, median floor ratio 0.60x, three routes >2x louder cold, none louder warm), and
+generalised it to "every post-restore first sweep is systematically wide, so the whole historical floor
+table may be wide." I ran the identical design here to get n=2. It does not replicate:
+
+| | tw040 / epoch A | tw035 / epoch B |
+|---|---|---|
+| warm quieter | 10 of 11 | **3 of 11** |
+| median floor ratio | 0.60x | **1.05x** |
+| >2x louder cold | 3 | **0** |
+| >2x louder warm | 0 | **2** |
+
+Both boxes agree the LEVEL is untouched (median warm/cold `median_speedup` = 0.9998), so the measurement
+was sound; the generalisation was not. The most economical reading is that tw040's 10-of-11 was itself a
+**session mode posing as a property** -- which is the same error this lane already catalogued twice, in
+Y's clamped floor and in my own 7.02% `prefill_m256_down` claim. I made it a third time, and this time I
+had published it as a lane-wide implication.
+
+I still installed warm, but the reason had to be rebuilt: not the ramp story, just that candidates are
+always timed on a GPU already warmed by builds and correctness runs, so warm is the representative ruler
+-- and here it happens to clamp fewer routes (2 vs 3). Both the corrected BOX facts and the
+non-replication are now in STATE insights, so the next wave inherits the correction rather than the
+claim.
+
+### wave 4, attempt 2: `wf_8324bc67-c04`, monitor `bfmbe505m`
+
+`lane_args --check` exit 0, rendered with `--print`, invoked verbatim. Same rule stands for the next
+boundary: if this wave banks nothing **with the closed list in hand**, that is terminal for the lane and
+I will not launch a fifth.
