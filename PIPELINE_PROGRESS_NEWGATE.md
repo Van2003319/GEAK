@@ -1837,3 +1837,57 @@ same box read 1.2522 and 1.2503 — a **~2.3% spread within one box, one epoch**
 handled: the lane scores against a **same-session control arm**, never against the stored
 cumulative. But it means no candidate number may ever be compared to `STATE.cumulative` directly,
 and the three-point 0.51% error bar from wave 4b describes one card, not this box.
+
+### wave 5 round 1 — r1_d1's return was LOST; recovered from disk. It is the round's main product.
+
+Round 1 ran three directions. `r1_d1` (algorithm, target `prefill_m128_square`) **never appeared in
+`journal.jsonl` at all** — the verifier ran its documented lost-return recovery path against an
+on-disk patch that did not exist and logged `apply_failed`, `verified_geomean: 0`,
+`"no timing was taken this session; no GPU lock acquired"`. But the engineer had in fact done a full
+round of work: `round_1/engineer_1/{worker_result.json,report.md}` are on disk, `status: failed`,
+94 lines of measured findings.
+
+**Recovered verdict: REFUTED, correctly, and it priced its own refutation before building.** The arm
+repurposed ladder id 21 (never selected by `macro_select` on any of the 11 routes, verified by
+replaying the selector) into a 32×64 tile with a 256-deep K tile, dispatched unsplit and fix-up-free
+on `m==128 && n%64==0 && k%256==0 && k>=1024`; instantiation-count neutral, 24 specializations before
+and after, byte-checked from the compiled object. It stated the refutation line **in advance** — "a
+19–23 us body is reachable; above 25.7 us the direction is refuted outright" — and landed at
+**31.27 us**, 22% above its own line. 3 interleaved BASE/CAND pairs: BASE 1.2499 median (0.10%
+spread), CAND 1.2441 (0.46%); target route +2.4%, which clears its 1.24% epoch-C floor, so the
+regression is real. Suite delta −0.26% is fully accounted for by m128 alone (−2.4%/11 = −0.22%).
+
+**The finding that matters, and it is the answer to insight 13.** With the oracle's geometry
+*matched* — 32×64 tile, K tile 256, 51200 B LDS, 256 CTAs, one dispatch, no fix-up — we run
+**31.27 us against the oracle's 18.75 us, 1.67×**. So the 79.3% `SQ_WAIT_ANY` is **not** explained by
+BK=32, split-K, CTA count, prefetch depth, or the second dispatch: every one of those is now measured
+and excluded. **The gap is the body — the 16×16×16 fragment schedule itself.** rocprofv3 split the
+halves rather than hiding them: the fix-up deletion is worth exactly its priced 4.97 us, and the GEMM
+half gives back *more than all of it* (+5.6 us, +21.8%); the fused number alone would have read as a
+tie. Named untried lever: `mfma_f32_32x32x8bf16_1k`, 2× flops per 8 B/lane operand fetch, needs a new
+accumulator layout and epilogue. **This converges with `r1_d0` from the opposite direction** — d0's
+ceiling work put the residual ~2× on "the MFMA block in the dependency chain", d1 matched the
+oracle's operating point and still lost 1.67× to the body. Two independent arms, same conclusion.
+
+**Also closed:** deeper K is directionally right and insufficient (BK=256 beats BK=128 by 19–24% at
+every wave grid, still cannot reach the incumbent); deep-K + split-K at 2/4/8 slices reads
+0.0462/0.0477/0.0481 vs unsplit 0.0389, closing "deep K needs more parallelism"; two-stage prefetch
+(49→98 KB in flight) reads 0.0393 vs one-stage 0.0387, so the arm is not short of MLP; BK not a power
+of two is catastrophic (0.122–0.279 ms — the fragment-major LDS map degenerates, do not re-derive);
+nothing spills on either arm.
+
+**Numerics — the one thing this arm strictly improves.** `max_rel_err` on `prefill_m128_square` goes
+**0.34 → 0.00765**, 44×, because an unsplit route never writes a bf16 partial plane; it would join
+`decode_m2_square` and `prefill_m2048_square` as the only bit-clean routes while the other eight sit
+at 0.286–0.416. **This is the costed retirement path for the 45× elementwise accuracy debt on m=128:
+it costs 2.4% of that route, not 20%.** Worth keeping on the shelf against a future tolerance
+tightening, even though it is not worth paying today.
+
+**RELAY DEFECT (new, distinct from the closed-list one).** A lost engineer return is not merely a
+lost patch: the verifier's `apply_failed` path is indistinguishable from "this direction produced
+nothing", so **the tech_lead sees an empty direction and none of the findings above** — including the
+advance-priced refutation line and the two closed sub-axes. Nothing stops deep-K-on-m128 being
+re-issued next round or next wave. The wave-3 closed-list fix does not cover this case. Mitigation
+for the next quiet boundary (STATE is rewritten by the lane on bank, so not while this wave is live):
+promote the recovered r1_d1 findings into `insights`, and treat `round_*/engineer_*/worker_result.json`
+as the authoritative engineer record rather than the journal.
