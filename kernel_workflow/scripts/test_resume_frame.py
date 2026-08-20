@@ -83,10 +83,45 @@ class ResumeKeepsTheFramesApart(unittest.TestCase):
                       "Dropping it entirely loses the lane history at the next STATE.json write.")
 
     def test_the_vs_seed_total_is_derived_not_stored(self):
+        """Derived at READ time from the live variables, never kept as a third copy.
+
+        This used to pin the arithmetic itself (`priorCumulativeVsSeed * cumulative`). It stopped
+        being able to: that product is correct only when the harness times a candidate against the
+        wave's own tree, and on a harness anchored to a frozen external oracle it multiplies two
+        absolute scores -- 1.2054 x 1.2707 = 1.5317 went out as CUMULATIVE_VS_SEED on wave 4. The
+        expression now branches on a frame READ OFF the baseline (`resolveVsSeedFrame`), so pinning
+        one branch of it would pin the wrong one half the time.
+
+        What must not change is the property this test was written for: it is a function of the two
+        live variables, evaluated when read. A stored third copy is a third thing to forget to
+        update, which is the failure the (127) family keeps producing.
+        """
         self.assertRegex(
-            SOURCE, r"const\s+cumulativeVsSeed\s*=\s*\(\)\s*=>\s*priorCumulativeVsSeed\s*\*\s*cumulative",
-            "the lane total must be derived from the two frames at read time; a third stored copy "
-            "is a third thing to forget to update")
+            SOURCE, r"const\s+cumulativeVsSeed\s*=\s*\(\)\s*=>",
+            "the lane total must be a function evaluated at read time, not a stored value")
+        self.assertRegex(
+            SOURCE, r"cumulativeVsSeed = \(\) => \(vsSeedFrame === 'absolute'"
+                    r"[\s\S]{0,400}priorCumulativeVsSeed \* cumulative\)",
+            "both branches must read the live variables; a branch that returned a captured constant "
+            "would be the stored copy this test exists to forbid")
+        self.assertNotRegex(
+            SOURCE, r"^\s*let\s+cumulativeVsSeedValue\b",
+            "no materialised copy of the lane total may exist alongside the function")
+
+    def test_the_frame_is_measured_rather_than_assumed(self):
+        """The root cause of (127)'s third firing was an ASSUMPTION stated as a comment: that
+        `cumulative` is wave-local because the harness re-anchors every wave. Nothing checked it,
+        and on this task it was false. The frame is now read off the baseline the benchmark engineer
+        just measured on the incumbent -- the same tree the prior wave's total describes -- so the
+        two hypotheses are distinguishable from data alone."""
+        self.assertIn("const resolveVsSeedFrame = (perCase, prior) =>", SOURCE)
+        self.assertIn("vs-seed frame:", SOURCE,
+                      "which frame was chosen, and why, must be logged; a silent choice here is how "
+                      "this survived two waves and two different repairs")
+        self.assertIn("VS_SEED_FRAME:", SOURCE,
+                      "the frame must travel with the number to update_memory: STATE.cumulative is "
+                      "written from it and read back as PRIOR next wave, so a further multiplication "
+                      "compounds once per wave")
 
     def test_stale_per_case_rows_are_not_imported(self):
         body = resume_block()

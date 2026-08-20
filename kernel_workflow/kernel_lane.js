@@ -1533,7 +1533,16 @@ let cumulative = 1.0;        // best verified geomean speedup vs the TRUE baseli
 // resumed wave compare 1.01 (vs-incumbent) against 4.35 (vs-seed) and conclude IMPROVED=false
 // on every round of a wave that in fact improved every round -- see the resume block below.
 let priorCumulativeVsSeed = 1.0;
-const cumulativeVsSeed = () => priorCumulativeVsSeed * cumulative;
+// Which frame `cumulative` is actually in -- DECIDED FROM DATA after the baseline is measured, not
+// assumed. See `resolveVsSeedFrame` below the resume block for why the assumption above is not safe
+// to make: on a task whose harness times against a frozen external oracle, `verified_geomean` is an
+// ABSOLUTE number and chaining it onto the prior wave's absolute number multiplies two of the same
+// thing. 'chained' is the historical behaviour and stays the default for the case where the two
+// hypotheses agree anyway (a fresh wave, where prior is 1.0).
+let vsSeedFrame = 'chained';
+const cumulativeVsSeed = () => (vsSeedFrame === 'absolute'
+  ? cumulative                       // `cumulative` already IS the vs-seed total
+  : priorCumulativeVsSeed * cumulative);
 let bestSeen = 0;            // best verified geomean of any candidate, committed or not
 let noImprove = 0;
 // The ISA archive of the tree that is currently canonical, i.e. the parent every
@@ -1837,6 +1846,55 @@ if (setup.resumed && setup.prior_state) {
   log(`RESUMED from STATE_DIR: prior cumulative vs seed=${priorCumulativeVsSeed.toFixed(3)}x, ` +
       `this wave restarts at 1.000x vs the incumbent it was seeded from (same tree, different frame), ` +
       `${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
+}
+
+// --- which frame is `cumulative` actually in? -------------------------------
+// The comment on `cumulative` above says "vs BASELINE_PER_CASE, so it starts at 1.0 every wave".
+// That is true only when the harness times a candidate against THE WAVE'S OWN TREE. When the harness
+// times against a FROZEN EXTERNAL ORACLE -- as dense_bf16_gemm_fused does, against direct
+// rocblas_gemm_ex -- the verifier's `verified_geomean` is an ABSOLUTE score, `cumulative` inherits it
+// on commit, and `priorCumulativeVsSeed * cumulative` multiplies two absolutes.
+//
+// Measured, not assumed: 1.2054 x 1.2707 = 1.5317 was emitted as CUMULATIVE_VS_SEED on wave 4, and
+// 1.31581464 on the wave-2/3 boundary. The first was caught by the TechLead, the second by a human
+// two waves later. A number whose correctness depends on who happens to be reading is a defect.
+//
+// The test is free and direct, because the wave's own baseline was just measured on the incumbent
+// tree -- the SAME tree the prior wave's `cumulative` describes. So:
+//   * self-anchored harness -> the baseline scores ~1.0 against its own denominator
+//   * oracle-anchored harness -> it scores what the incumbent scores vs the oracle, i.e. ~prior
+// Whichever it is closer to, in log space, is the frame. No task-specific knowledge, no flag.
+const resolveVsSeedFrame = (perCase, prior) => {
+  const sp = (Array.isArray(perCase) ? perCase : [])
+    .map(r => r && Number(r.speedup)).filter(v => Number.isFinite(v) && v > 0);
+  if (!sp.length) {
+    return { frame: 'chained', baselineSuite: null,
+      why: 'the baseline rows carry no speedup, so the frame cannot be read off the data; keeping '
+        + 'the chained form, which is correct on a self-anchored harness and DOUBLE-COUNTS on an '
+        + 'oracle-anchored one -- treat any vs-seed number from this run as unverified' };
+  }
+  const baselineSuite = Math.exp(sp.reduce((a, v) => a + Math.log(v), 0) / sp.length);
+  if (!(prior > 0) || Math.abs(Math.log(prior)) < 1e-9) {
+    return { frame: 'chained', baselineSuite,
+      why: 'no prior wave to chain onto (prior is 1.0), so both readings give the same number' };
+  }
+  const toSelf = Math.abs(Math.log(baselineSuite));
+  const toPrior = Math.abs(Math.log(baselineSuite / prior));
+  if (toPrior < toSelf) {
+    return { frame: 'absolute', baselineSuite,
+      why: `this wave's baseline scores ${baselineSuite.toFixed(4)} against the harness denominator, `
+        + `which is the prior wave's ${prior.toFixed(4)} and not 1.0 -- the harness times against a `
+        + 'fixed external reference, so verified_geomean is already a vs-seed total and multiplying '
+        + 'it by the prior total would count the same speedup twice' };
+  }
+  return { frame: 'chained', baselineSuite,
+    why: `this wave's baseline scores ${baselineSuite.toFixed(4)} against its own denominator, i.e. `
+      + 'the harness re-anchors on the incumbent each wave, so each wave contributes a factor' };
+};
+{
+  const r = resolveVsSeedFrame(BASELINE_PER_CASE, priorCumulativeVsSeed);
+  vsSeedFrame = r.frame;
+  log(`vs-seed frame: ${vsSeedFrame.toUpperCase()} -- ${r.why}`);
 }
 
 while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
@@ -2699,6 +2757,17 @@ matter how the rest of the run looked.`,
       // would overwrite a 4.35x lane history with a 1.01x round number on the next resume.
       ...(STATE_DIR ? { STATE_DIR, CANONICAL, CUMULATIVE_SPEEDUP: cumulative,
         CUMULATIVE_VS_SEED: cumulativeVsSeed(), PRIOR_CUMULATIVE_VS_SEED: priorCumulativeVsSeed,
+        // The frame, handed over WITH the number. `update_memory` writes STATE.cumulative from
+        // CUMULATIVE_VS_SEED and the next wave reads it back as PRIOR -- so if the agent multiplies
+        // once more the error compounds per wave. On an oracle-anchored harness CUMULATIVE_SPEEDUP
+        // and CUMULATIVE_VS_SEED are the SAME number, which is exactly the shape that invites one
+        // more multiplication; saying so is cheaper than catching it a third time.
+        VS_SEED_FRAME: vsSeedFrame === 'absolute'
+          ? 'ABSOLUTE: the harness times against a fixed external reference, so CUMULATIVE_VS_SEED '
+            + 'and CUMULATIVE_SPEEDUP are the same number and neither may be multiplied by '
+            + 'PRIOR_CUMULATIVE_VS_SEED. Write CUMULATIVE_VS_SEED into STATE.cumulative verbatim.'
+          : 'CHAINED: each wave re-anchors on its incumbent, so CUMULATIVE_VS_SEED is already '
+            + 'PRIOR_CUMULATIVE_VS_SEED x CUMULATIVE_SPEEDUP. Do not multiply it again.',
         BEST_PER_CASE: bestPerCase } : {}),
       ...(SHARED_KB ? { SHARED_KB, TARGET_LANGUAGE } : {}),
     }),

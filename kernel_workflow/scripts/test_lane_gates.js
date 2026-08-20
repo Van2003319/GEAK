@@ -941,6 +941,68 @@ console.log('\n# SELECTION is the best candidate that PASSES, not the best candi
     'selecting a candidate whose suite number is below the incumbent is allowed but never silent');
 }
 
+console.log('\n# the vs-seed frame is READ OFF THE BASELINE, not assumed, executed');
+{
+  // (127), third firing, and this time root-caused to the script rather than to an agent's
+  // arithmetic. `cumulative` is documented as "vs BASELINE_PER_CASE, so it starts at 1.0 every
+  // wave", and `cumulativeVsSeed()` multiplied it by the prior wave's total on that basis. The
+  // assumption holds only when the harness times a candidate against THE WAVE'S OWN TREE. When it
+  // times against a frozen external oracle -- dense_bf16_gemm_fused against direct rocblas_gemm_ex
+  // -- `verified_geomean` is absolute, `cumulative` inherits it on commit, and the product counts
+  // the same speedup twice: 1.2054 x 1.2707 = 1.5317 went out as CUMULATIVE_VS_SEED on wave 4, and
+  // 1.31581464 on the wave-2/3 boundary. One was caught by the TechLead, one by a human two waves
+  // later. Correctness that depends on who is reading is not correctness.
+  const resolve = new Function(
+    `${grab(/const resolveVsSeedFrame = \(perCase, prior\) => \{[\s\S]*?\n\};\n/, 'resolveVsSeedFrame')}
+     return resolveVsSeedFrame;`)();
+  const rows = (...sp) => sp.map((s, i) => ({ name: `r${i}`, speedup: s }));
+
+  // The real numbers from wave 4: the incumbent scores 1.2142 against the harness denominator, and
+  // the prior wave banked 1.2054. Not 1.0 -- so the harness is anchored on something outside the wave.
+  {
+    const r = resolve(rows(1.2142, 1.2142, 1.2142), 1.2054);
+    ok(r.frame === 'absolute', 'a baseline that already scores the PRIOR total against the harness ' +
+      'denominator means the harness is oracle-anchored and the product would double-count', r.why);
+  }
+  // The other harness shape, which is what the chained form was written for.
+  {
+    const r = resolve(rows(1.0, 1.001, 0.999), 1.2054);
+    ok(r.frame === 'chained', 'a baseline that scores ~1.0 against its own denominator means each ' +
+      'wave re-anchors, so each wave really does contribute a factor', r.why);
+  }
+  // A fresh wave: both readings coincide, so there is nothing to get wrong and nothing to warn about.
+  {
+    const r = resolve(rows(1.21, 1.21), 1.0);
+    ok(r.frame === 'chained' && /prior is 1\.0/.test(r.why),
+      'with no prior wave the two readings give the same number, so the detector stays out of it');
+  }
+  // No evidence must not read as evidence. `speedup` is not a required field on a baseline row.
+  {
+    const r = resolve([{ name: 'a', latency_ms: 0.1 }], 1.2054);
+    ok(r.frame === 'chained' && /unverified/.test(r.why),
+      'with no speedup on the baseline rows the frame cannot be read, so it keeps the old behaviour ' +
+      'and says the vs-seed number is unverified rather than presenting a guess as a measurement');
+  }
+  // The arithmetic the whole thing is about, end to end.
+  {
+    const vsSeed = (frame, prior, cum) => (frame === 'absolute' ? cum : prior * cum);
+    ok(vsSeed('absolute', 1.2054, 1.2707) === 1.2707,
+      'on an oracle-anchored harness the vs-seed total IS the cumulative, not the product');
+    ok(Math.abs(vsSeed('chained', 1.2054, 1.2707) - 1.5317) < 1e-3,
+      'and the product is exactly the 1.5317 that went out on wave 4 -- pinned so the wrong branch ' +
+      'is recognisable if it is ever taken again');
+  }
+
+  ok(/const cumulativeVsSeed = \(\) => \(vsSeedFrame === 'absolute'/.test(src),
+    'the reporting function branches on the detected frame rather than always multiplying');
+  ok(/log\(`vs-seed frame: \$\{vsSeedFrame\.toUpperCase\(\)\}/.test(src),
+    'which frame was detected, and why, is logged once per wave -- a silent choice here is how this ' +
+    'defect survived two waves');
+  ok(/VS_SEED_FRAME: vsSeedFrame === 'absolute'/.test(src),
+    'the frame travels WITH the number to update_memory, because STATE.cumulative is written from ' +
+    'it and read back as PRIOR next wave, so one more multiplication compounds per wave');
+}
+
 console.log('\n# the ISA parent archive follows the TREE, not the commit event, executed');
 {
   // `isaCanonicalArchive` was assigned in exactly one place: inside the committed-winner branch. On a
