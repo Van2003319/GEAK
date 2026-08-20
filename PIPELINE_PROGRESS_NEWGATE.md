@@ -1742,3 +1742,53 @@ valuable unexplained quantity in the lane.
 **Relay note, and it worked:** insights went 28 -> 20, but the closed list was not dropped -- the
 tech_lead **re-carried it in full** (insight 14) citing the same reason I did when I promoted it. The
 promotion propagated as a practice rather than as a string, which is the durable outcome.
+
+## 2026-08-20 — fourth restore → tw042, epoch C, wave 5 launched
+
+**Restore.** Snapshot restore onto **tw042** (previous host tw035/epoch B). Both prior tasks dead, no
+`workflow`/`kernel_lane`/`task_runner`/`hipcc` alive. STATE intact: `cumulative` 1.2707,
+`wave_local_cumulative` 1.2707, `last_round` 1, 20 insights, 26 ledger. The dead wave had reached
+`round_2` and banked nothing, so the wave-4b result stands. `best/` verified **byte-identical by md5**
+to the `4dd8f63` winner (`custom_gemm.hip` 3bfeb29f…, `dense_bf16_gemm.h` 061eb4a6…), not the
+`c7a5100` baseline — relay carries 1.2707, no hand-seeding.
+
+**Epoch C.** Frame check exit 4 ("resolves to W, CURRENT_MACHINE is B"). tw042 already carried **W**,
+but a snapshot restore is a different container, so per `machine_for_host`'s own docstring it gets a
+**new** letter — `register_epoch.py --letter C` (C never allocated; finding 126 respected, no retired
+letter reused). Paired cold+warm `measure_noise_floor.py --repeats 8 --machine C`, both sweeps inside
+**one** `gpu_lock.sh` single-card call, both `ok: true`, 8/8 repeats. **Warm installed** via
+`deprovisionalize_epoch.py --apply`; frame now **exit 0**.
+
+| | cold | warm (INSTALLED) |
+|---|---|---|
+| floor range | 0.20%–1.12% | 0.20%–1.24% |
+| clamped at MIN_FLOOR | 2 | 4 |
+| median raw floor | 0.00343 | 0.00329 |
+| geomean median_speedup | 0.3312 | 0.3313 |
+
+**Widest route is `prefill_m128_square` at 1.24%** — precisely this lane's only sub-parity route
+(0.9190). A gain there must now clear 1.24% to be admissible; epoch B read that route narrower and
+its number must not be reused.
+
+**Cold/warm is now n=3 and is not a property.** Cold-wider counts: tw040/A **10 of 11**, tw035/B
+3 of 11, tw042/C **5 of 11** (median raw-floor ratio 0.96 — a coin flip). This is the third box and
+the retraction of the tw040 "clock/power ramp" finding holds. Warm is installed for ruler consistency
+with A and B and because candidates are always timed on an already-warmed GPU — explicitly **not**
+because it is quieter: here warm clamps *more* routes (4 vs 2), the opposite of the epoch B tiebreak.
+Level is identical across arms (1.0002), so the two arms differ in spread only.
+
+**Frame defect: already fixed on disk, hazard cleared.** The `CUMULATIVE_VS_SEED = prior × wave_local`
+bug root-caused last session is repaired in `kernel_lane.js` by `resolveVsSeedFrame`, which reads the
+frame off the wave's own freshly-measured baseline instead of assuming it: an oracle-anchored harness
+makes the baseline score ~prior rather than ~1.0, and `cumulativeVsSeed()` then returns `cumulative`
+verbatim instead of the product. With `wave_local == cumulative == 1.2707` this is exactly the live
+hazard flagged for this boundary — the old code path would have emitted **1.6147**. No hand-repair
+needed this wave; the check is now in the script rather than in whoever reads it.
+
+**Launch.** `lane_args.py --check` initially **refused** (exit 2) while C was provisional —
+`route_bands: @current_epoch` cannot resolve a DEFAULT-0.072 table, which would have silently turned
+the commit gate off for the whole wave. Correct refusal; it cleared to exit 0 after the verdict was
+installed, resolving 10 arguments with 11 route bands. Rendered with `--print` and invoked verbatim.
+Fresh launch, **not** `resumeFromRunId` — that is same-session only and its cached agents hold
+tw035/epoch B timings. Insight 18 refreshed from epoch B to epoch C facts before launch (it had gone
+stale at three consecutive boundaries). Run ID `wf_07bd05ac-bf6`.
