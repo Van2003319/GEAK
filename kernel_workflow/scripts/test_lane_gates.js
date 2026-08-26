@@ -1145,6 +1145,30 @@ console.log('\n# the deep round closes a cycle: one rewrite, then restart or sto
     'as a reason to stop');
 }
 
+console.log('\n# memory: the ledger reaches engineers, and a new cycle re-checks what reopened');
+{
+  ok(/LEDGER: history\.ledger,/.test(src),
+    'engineers receive the LEDGER, not just INSIGHTS. The dead-end verdicts live in the ledger, ' +
+    'so deep_engineer.md\'s standing instruction "do not re-walk confirmed dead-ends" was aimed at ' +
+    'a role that could not see them');
+  ok(/INSIGHTS: history\.insights,[\s\S]{0,900}LEDGER: history\.ledger,/.test(src),
+    'both travel together on the same engineer input block, so a specialist, a deep engineer and ' +
+    'an assembly engineer all get the same memory');
+
+  // The cycle boundary. What must NOT happen is an expiry on the insight blackboard.
+  ok(/RECHECK_CLOSED_MECHANISMS/.test(src),
+    'a new cycle prompts the planner to re-test each closed row\'s reopens_when against the new ' +
+    'tree -- a ground-up rewrite is the event most likely to satisfy them, and nothing else in the ' +
+    'run would ever ask');
+  ok(/cycle > 1 && roundPhase === PHASE_SOURCE && phaseStall === 0/.test(src),
+    'and only on the FIRST round of a new cycle: repeating it every round would turn a re-check ' +
+    'into background noise the planner learns to skip');
+  ok(!/history\.insights = \[\]/.test(src) && !/insights.*expire|expire.*insights/i.test(src),
+    'the insight blackboard is NOT expired at a cycle boundary. Its contract is durable, ' +
+    'transferable findings -- rewriting the kernel does not falsify "L2 is already 99%" -- and the ' +
+    'tree-specific memory is the ledger, which handles staleness per row via reopens_when');
+}
+
 console.log('\n# SELECTION is the best candidate that PASSES, not the best candidate, executed');
 {
   // Ranking is by suite geomean; acceptance is per-route; and only `candidates[0]` was ever offered

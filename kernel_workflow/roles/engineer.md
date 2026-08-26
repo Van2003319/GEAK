@@ -11,6 +11,11 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds).
+- `LEDGER` — one row per direction anyone has tried, with its verdict and lesson. `INSIGHTS` holds
+  transferable findings; the closed directions are here. Check your direction against it before you
+  start: a `dead-end` row adjacent to what you were assigned usually means the lesson applies to you
+  too. `not-realized` is NOT a dead end — that mechanism never reached the machine code, so the idea
+  is untested rather than refuted.
 - **DEEP-MODE (optional — act only if present in your inputs; a normal run omits all three):**
   `SHARED_KB` (cross-backend blackboard — Read it and BORROW any technique that plausibly transfers to
   your kernel; skip its disproved dead-ends), `E2E_FEEDBACK` (latest end-to-end result+problems — if a

@@ -2447,10 +2447,24 @@ while (dispatched < BUDGET && !stopReason) {
     // fact the planner can act on, a "75% exhausted" is a number it would have to interpret.
     SEARCH_PHASE: roundPhase,
     SEARCH_PHASE_STALL: `${phaseStall} of ${MAX_NO_IMPROVE} non-improving round(s) in this phase`,
-    // Which pass around the ladder this is. Cycle 2+ runs on a tree a deep round rewrote, so the
-    // prior cycle's insights describe an implementation that no longer exists -- a planner that did
-    // not know would keep ruling out directions on evidence about a different program.
     CYCLE: cycle,
+    // Fires on the FIRST round of a new cycle only. The insight blackboard needs no expiry -- its
+    // contract is "durable, transferable findings", and a rewrite does not falsify "L2 is already
+    // 99%". The LEDGER is the tree-specific memory, and it already handles this correctly per row:
+    // every closure carries a `reopens_when` condition, so a closure holds only while that condition
+    // does. What was missing is the prompt to CHECK them, and a ground-up rewrite is the single most
+    // likely event to satisfy several at once -- those conditions name tiles, LDS, residency and
+    // CTA/CU, which is exactly what a deep round changes. Without this the run keeps avoiding
+    // dead-ends that its own last move reopened.
+    ...(cycle > 1 && roundPhase === PHASE_SOURCE && phaseStall === 0 && history.ledger.length ? {
+      RECHECK_CLOSED_MECHANISMS:
+        'A deep round rewrote the kernel, so this is a NEW implementation. Before planning, re-read '
+        + 'the LEDGER\'s closed rows and check each `reopens_when` against THIS tree: a ground-up '
+        + 'rewrite changes tiles, LDS footprint, residency and CTA/CU, which is what most of those '
+        + 'conditions are written about. Name any you find newly satisfied in `reasoning` — a '
+        + 'closure that the rewrite reopened is the cheapest direction available, because it is '
+        + 'already measured and already understood.',
+    } : {}),
     ...(roundPhase === PHASE_ASM
       ? { KEYPOINTS: (profileSummary && profileSummary.keypoints) || [] } : {}),
   };
@@ -2619,6 +2633,14 @@ ${cfg({
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
+        // The ledger, which engineers never used to receive. `deep_engineer.md` has always been
+        // told "do not re-walk confirmed dead-ends" -- and the dead-end verdicts live HERE, not in
+        // the insight blackboard, which holds transferable findings rather than closed directions.
+        // So the one role most able to re-walk a dead end was the one asked to avoid dead ends it
+        // could not see. Every engineer gets it: a specialist can be handed a direction adjacent to
+        // a closed one, and an assembly engineer can pick a keypoint whose mechanism was already
+        // measured shut at source level.
+        LEDGER: history.ledger,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
         ...KB_INPUTS,

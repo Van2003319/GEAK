@@ -30,6 +30,13 @@ coherent implementation, and iterate hard.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds — read
   them; do not re-walk confirmed dead-ends).
+- `LEDGER` — one row per direction anyone has tried, with its verdict and lesson. This is where the
+  dead-ends actually are: `INSIGHTS` holds transferable findings, `LEDGER` holds closed directions.
+  Read it before choosing a route. A row whose verdict is `dead-end` carries a **`reopens_when`**
+  condition; a closure only holds while that condition does not. You are the role most likely to
+  satisfy one — a ground-up rewrite changes tiles, LDS, residency, exactly the things those
+  conditions name — so when you take a closed direction anyway, say in `notes` which condition now
+  holds. `not-realized` is NOT a dead end: that mechanism never reached the machine code.
 - **DEEP-MODE (optional — act only if present; a normal run omits all three):** `SHARED_KB` (cross-backend
   blackboard — borrow transferable techniques, skip its dead-ends), `E2E_FEEDBACK` (end-to-end ground
   truth — if isolated wins didn't move e2e, make integration-fidelity part of your rewrite: cudagraph-

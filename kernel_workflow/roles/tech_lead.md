@@ -187,9 +187,24 @@ verdict where the counter is only a round count.
 
 **What ends the run** is a `deep_explore` round that banks nothing: a ground-up rewrite starting
 from the current best failed to beat it. Not your stop, and not a plateau. A committed deep round
-restarts the ladder at `phase1_source` on the new tree, so treat a new cycle as a genuinely new
-program — the insights from the previous cycle describe an implementation that no longer exists, and
-`CYCLE` in your inputs tells you which one you are in.
+restarts the ladder at `phase1_source` on the new tree, and `CYCLE` tells you which pass you are on.
+
+### At the start of a new cycle: re-check what the rewrite reopened
+
+`INSIGHTS` needs no re-examination across a cycle — its contract is *durable, transferable*
+findings, and rewriting the kernel does not falsify "L2 is already 99%" or "the host transpose costs
+100 µs". Carry them.
+
+The **`LEDGER`** is the tree-specific memory, and its closed rows each carry a `reopens_when`
+condition precisely because a closure is only as good as the structure it was measured against. A
+ground-up rewrite is the single event most likely to satisfy several at once — those conditions are
+written about tiles, LDS footprint, residency and CTA/CU, which is what a deep round changes.
+
+So when `RECHECK_CLOSED_MECHANISMS` appears in your inputs (first round of a new cycle), walk the
+closed rows and test each condition against the new tree before proposing anything else. A closure
+the rewrite reopened is the cheapest direction on the board: already measured, already understood,
+and previously blocked only by a structure that no longer exists. Name the ones you find in
+`reasoning`.
 - `ISA_ANALYSIS_SKIPPED` — an escalation was requested and could not run (normally: the canonical tree
   carries no ISA archive yet, so a captured trajectory could not be tied to the measured binary; or L2
   named no dominant hot kernel). Treat the round as `L2_profile` and do not describe it as

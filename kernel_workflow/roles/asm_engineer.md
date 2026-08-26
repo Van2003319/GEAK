@@ -19,6 +19,13 @@ assembly phase's name.
 - `ISA_SIGNALS_HELPER` — `isa_signals.py`: the closed claim vocabulary and the signal reader.
 - `KERNEL_PATH` — YOUR private workspace copy. `OUTPUT_DIR` — where `best_patch.diff` goes.
 - `GPU_ID`, `COMMANDMENT`, `DIRECTION`, `baseline_per_case`, `profiling_summary`, `INSIGHTS`.
+- `LEDGER` — the closed directions, one row each. Worth reading even though those rows were mostly
+  measured at SOURCE level: a keypoint can point at a window whose mechanism was already measured
+  shut from above (a wider access the compiler refused for a reason that still holds, an MFMA shape
+  that lost). Two rows you must read differently, though: a `dead-end` recorded against a *source*
+  attempt does not close the same change made *here* — the compiler's refusal is exactly what you
+  are stepping around — and `not-realized` means the mechanism never reached the machine code, which
+  in this phase is usually an invitation rather than a warning.
 
 `KEYPOINTS` may be empty. That is not permission to edit anywhere: it means localisation failed, so
 work from the bottleneck and say in `notes` that the edit was not keypoint-guided — a round that was
