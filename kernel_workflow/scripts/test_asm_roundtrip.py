@@ -133,6 +133,23 @@ class RefusalTest(unittest.TestCase):
         self.assertIsNone(build)
         self.assertTrue(any("no_offload_arch" in h for h in holes), holes)
 
+    def test_the_default_output_resolves_against_the_build_directory(self):
+        """A ninja target is relative to the directory holding build.ninja, not to the caller's cwd.
+
+        Resolving it against cwd wrote the patched object somewhere the build never looks; the link
+        then picked up the ORIGINAL object and the round read as "the edit did not help" rather than
+        as "the edit was never built". That failure is silent in every log, which is why it is
+        pinned here rather than left to the integration.
+        """
+        src = make_tree(self.tmp)
+        build, holes = RT.resolve_build(src, "demo_hip.hip", None)
+        self.assertIsNotNone(build, holes)
+        out = Path(build["output"])
+        self.assertTrue(out.is_absolute(), out)
+        self.assertEqual(Path(build["build_dir"]), out.parent,
+                         "the object must land beside build.ninja, which is where ninja links from")
+        self.assertEqual("demo_hip.cuda.o", out.name)
+
     def test_a_recorded_build_yields_the_compiler_flags_and_arch_verbatim(self):
         src = make_tree(self.tmp, arch="gfx942")
         build, holes = RT.resolve_build(src, "demo_hip.hip", None)

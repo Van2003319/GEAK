@@ -41,6 +41,19 @@ writes a `build.ninja` carrying the exact device compiler and the exact `cuda_cf
 a slightly different program, and a slightly different program is the one failure this whole layer
 exists to avoid. Those parsers are imported rather than copied.
 
+HOW THE REBUILT OBJECT REACHES THE HARNESS, and why no task needs changing. `rebuild` writes to the
+path the build edge names, inside the torch extension directory. ninja decides to recompile from
+mtime plus the command string, and neither moves: the object is newer than its source and the
+command in `build.ninja` is untouched. So the next `load()` finds the object up to date, skips the
+compile, and links what we wrote -- measured, not assumed:
+
+    [1/1] c++ k.cuda.o -shared -L/opt/rocm/lib -lamdhip64 -o probe.so
+
+which means phase2 needs no build shim and no per-task loader hook. The corollary is a real hazard
+and the reason `rebuild` resolves its default output against the build directory rather than the
+caller's cwd: an object written anywhere else leaves the ORIGINAL one in place, the link succeeds,
+and the round reads as "the edit did not help" when the edit was never built.
+
 Usage:
   asm_roundtrip.py emit    --source-root <dir> [--source-file X.hip] --out X.s
   asm_roundtrip.py rebuild --source-root <dir> [--source-file X.hip] --asm X.s [--out X.cuda.o]
@@ -132,13 +145,20 @@ def resolve_build(source_root: Path, source_file: str | None,
     if not arch:
         return None, holes + ["ninja:no_offload_arch(cuda_cflags names no --offload-arch, so the "
                               "gfx target to reassemble for is unknown; it is not guessed)"]
+    # A ninja target is relative to the directory holding build.ninja, not to the caller's cwd.
+    # Resolving it against cwd wrote the patched object somewhere the build never looks, and the
+    # link then picked up the ORIGINAL object -- a silent no-op that reads as "the edit did not
+    # help" rather than as "the edit was not built".
+    build_dir = Path(ninja).resolve().parent
+    output = Path(edge["output"])
     return {
         "ninja": str(ninja),
+        "build_dir": str(build_dir),
         "compiler": parsed["compiler"],
         "cuda_cflags": flags,
         "cuda_post_cflags": list(parsed.get("cuda_post_cflags") or []),
         "source": edge["source"],
-        "output": edge["output"],
+        "output": str(output if output.is_absolute() else build_dir / output),
         "arch": arch,
         "variables": parsed.get("variables") or {},
     }, holes
