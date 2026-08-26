@@ -80,13 +80,21 @@ class RowReadingTest(unittest.TestCase):
 
 
 class BandTest(unittest.TestCase):
-    def test_a_route_with_no_band_is_refused_not_defaulted(self):
+    def test_a_route_with_no_band_falls_back_to_the_default_bar(self):
+        """This used to RAISE, on the argument that a default would be wrong by up to 7x against
+        the 1.56%-11.55% spread the lane once measured. The sweep that produced those bands is
+        deleted, so raising now refuses every candidate on every route. `MIN_ROUTE_WIN` is a floor
+        under the floor and a measured band can only raise it -- and this is what the live gate in
+        kernel_lane.js has always done, which is one of the four rules the two twins disagreed on
+        until `test_route_gate_parity.py` started comparing them."""
         inc = rows(flat())
         cand = rows(flat(0.09))
         partial = {r: BANDS[r] for r in ROUTES[:-1]}
-        with self.assertRaises(rg.RouteGateError) as ctx:
-            rg.decide(candidate_per_case=cand, incumbent_per_case=inc, bands=partial)
-        self.assertIn(ROUTES[-1], str(ctx.exception))
+        d = rg.decide(candidate_per_case=cand, incumbent_per_case=inc, bands=partial)
+        unbanded = next(v for v in d.routes if v.route == ROUTES[-1])
+        self.assertEqual(0.0, unbanded.band, "no band was supplied for this route")
+        self.assertEqual(rg.MIN_ROUTE_WIN, unbanded.need,
+                         "so it is held to the default bar rather than refusing the candidate")
 
     def test_bands_come_from_repeats_of_one_unchanged_tree(self):
         reps = [{"test_cases": [{"name": "a", "optimized_ms": ms}]}
@@ -191,7 +199,9 @@ class DecisionTest(unittest.TestCase):
         d = rg.decide(candidate_per_case=rows(flat()), incumbent_per_case=rows(flat()),
                       bands=BANDS)
         self.assertFalse(d.accepted)
-        self.assertIn("all flat", d.reason)
+        # The suite condition now fires first on an all-flat candidate: with both arms identical the
+        # paired ratio is exactly 1.0, which is not an improvement. Same refusal, earlier reason.
+        self.assertIn("suite geomean did not improve", d.reason)
 
     def test_a_win_inside_the_band_is_not_a_win(self):
         t = flat()
@@ -228,13 +238,19 @@ class DecisionTest(unittest.TestCase):
         self.assertFalse(d.accepted)
         self.assertIn("decode_m2_square", d.reason)
 
-    def test_a_win_off_the_declared_target_is_not_the_claimed_mechanism(self):
+    def test_a_win_off_the_declared_target_is_banked_and_noted(self):
+        """This used to be a VETO. `target_routes` came back on 1 of 26 engineer results, so in
+        practice the rule refused real work over a missing label far more often than it caught an
+        artefact -- and the live gate in kernel_lane.js had already been changed to note it. The
+        two twins therefore returned opposite verdicts on this exact input until now."""
         t = flat()
         t["decode_m32_down"] = 0.100 * (1 - 0.10)
         d = rg.decide(candidate_per_case=rows(t), incumbent_per_case=rows(flat()),
                       bands=BANDS, target_routes=["prefill_m1024_down"])
-        self.assertFalse(d.accepted)
-        self.assertIn("not the claimed mechanism", d.reason)
+        self.assertTrue(d.accepted, d.reason)
+        self.assertEqual(["decode_m32_down"], d.improved)
+        self.assertIn("not a declared target route", d.reason,
+                      "banked, but the mismatch must still be visible in the receipt")
 
     def test_a_win_on_the_declared_target_is_accepted(self):
         t = flat()

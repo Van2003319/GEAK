@@ -57,6 +57,15 @@ SCHEMA = "geak.route-gate/v1"
 MIN_REPEATS = 3
 MIN_BAND = 0.002
 
+# THE LIVE GATE IS `routeGate` IN kernel_lane.js. This module is its twin, and the twin is the copy
+# that follows. Both numbers below are read out of the JS by `test_route_gate.py`'s parity test, so a
+# change there fails here rather than drifting silently -- which is what happened before: the two
+# disagreed on four rules at once (missing band, the suite condition, the catastrophic fence, and
+# whether target_routes vetoes) and no test on either side could see it, because each guarded only
+# its own implementation.
+MIN_ROUTE_WIN = 0.02
+CATASTROPHIC_REGRESSION = 0.10
+
 
 class RouteGateError(ValueError):
     """The gate was asked to decide something it has no evidence for."""
@@ -68,8 +77,9 @@ class RouteVerdict:
     incumbent_ms: float
     candidate_ms: float
     delta_frac: float          # >0 means the candidate is FASTER
-    band: float
-    status: str                # improved | regressed | flat
+    band: float                # the route's measured floor, 0 when none was supplied
+    need: float                # max(MIN_ROUTE_WIN, band) -- the bar it actually had to clear
+    status: str                # won | regressed | catastrophic | flat
 
 
 @dataclass
@@ -79,6 +89,11 @@ class Decision:
     routes: list[RouteVerdict] = field(default_factory=list)
     improved: list[str] = field(default_factory=list)
     regressed: list[str] = field(default_factory=list)
+    catastrophic: list[str] = field(default_factory=list)
+    # Geomean of incumbent_ms/candidate_ms over the PAIRED rows, i.e. both arms from one session.
+    # Distinct from `suite_geomean_speedup`, which is the harness's own speedup column against the
+    # frozen baseline and is carried for the receipt only.
+    suite_ratio: float | None = None
     suite_geomean_speedup: float | None = None
 
 
@@ -234,69 +249,80 @@ def decide(
                     f"{', '.join(missing)}. Non-regression cannot be claimed for a route "
                     "that was not measured"))
 
-    no_band = sorted(r for r in inc if r not in bands)
-    if no_band:
-        raise RouteGateError(
-            f"no noise band for route(s) {', '.join(no_band)}. Measured bands on this lane "
-            "range from 1.56% to 11.55% (24 repeats of one unchanged tree, absolute-us "
-            "spread -- the basis this module argues for, not the speedup column), so a "
-            "default would be wrong by up to 7x; derive them with bands_from_repeats() on "
-            "repeats of the unchanged tree, and use enough repeats: at n=5 a full min-max "
-            "spread is largely a draw on whether a flyer landed in the sample, and the same "
-            "route measured 1.31% at n=5 against 11.55% at n=24")
-
+    # A route with no measured band is NOT a refusal. This module used to raise here, on the
+    # argument that a default would be wrong by up to 7x against the 1.56%-11.55% spread the lane
+    # once measured. The producer of those bands is deleted, so raising now means refusing every
+    # candidate; `MIN_ROUTE_WIN` is a floor under the floor, and a measured band can only RAISE it.
     verdicts: list[RouteVerdict] = []
+    log_sum = 0.0
     for route in sorted(inc):
-        band = float(bands[route])
+        band = float(bands.get(route) or 0.0)
         if not (band >= 0):
             raise RouteGateError(f"band for {route!r} must be >= 0, got {band!r}")
+        need = max(MIN_ROUTE_WIN, band)
         i_ms, c_ms = inc[route], cand[route]
         delta = (i_ms - c_ms) / i_ms
-        if delta > band:
-            status = "improved"
+        log_sum += math.log(i_ms / c_ms)
+        if delta > need:
+            status = "won"
+        elif -delta > CATASTROPHIC_REGRESSION:
+            status = "catastrophic"
         elif -delta > band:
             status = "regressed"
         else:
             status = "flat"
         verdicts.append(RouteVerdict(route=route, incumbent_ms=i_ms, candidate_ms=c_ms,
-                                     delta_frac=delta, band=band, status=status))
+                                     delta_frac=delta, band=band, need=need, status=status))
 
-    improved = [v.route for v in verdicts if v.status == "improved"]
-    regressed = [v.route for v in verdicts if v.status == "regressed"]
+    improved = [v.route for v in verdicts if v.status == "won"]
+    catastrophic = [v.route for v in verdicts if v.status == "catastrophic"]
+    regressed = [v.route for v in verdicts if v.status == "regressed"] + catastrophic
+    suite_ratio = math.exp(log_sum / len(verdicts)) if verdicts else None
     geo = suite_geomean(candidate_per_case)
 
     def out(accepted: bool, reason: str) -> Decision:
         return Decision(accepted=accepted, reason=reason, routes=verdicts,
-                        improved=improved, regressed=regressed,
-                        suite_geomean_speedup=geo)
+                        improved=improved, regressed=regressed, catastrophic=catastrophic,
+                        suite_ratio=suite_ratio, suite_geomean_speedup=geo)
 
-    if regressed:
-        return out(False, "regressed past its own band on: " + ", ".join(
-            f"{v.route} ({-v.delta_frac:+.2%} vs band {v.band:.2%})"
-            for v in verdicts if v.status == "regressed"))
+    # The "we would never ship this" fence, and the only refusal that survives a positive suite
+    # number. An order of magnitude outside every floor ever measured here, so it is not a noise
+    # judgement: it exists so "the average improved" cannot ship one shape a third slower.
+    if catastrophic:
+        return out(False, "a route regressed catastrophically (past "
+                   f"{CATASTROPHIC_REGRESSION:.2%}, an order of magnitude outside any measured "
+                   "floor): " + ", ".join(f"{v.route} {-v.delta_frac:.2%}"
+                                          for v in verdicts if v.status == "catastrophic"))
 
-    wanted = improved
-    # Truthiness, not `is not None`: an EMPTY list means "this direction declared no target
-    # route", which must not narrow anything. Under `is not None` an empty list narrowed to
-    # nothing and refused every candidate, and the JS twin in kernel_lane.js -- which is the
-    # gate that actually decides a commit -- reads the same input as "no narrowing" and
-    # ACCEPTS. Two opposite verdicts on one piece of evidence, and it is a reachable shape:
-    # engineer.md only says "omit when the direction names none", and an agent filling a
-    # declared array field it has nothing to say about returns [] as readily as it omits it.
-    if target_routes:
-        wanted = [r for r in improved if r in set(target_routes)]
-        if not wanted:
-            return out(False, (
-                "no declared target route improved past its own band"
-                + (f"; incidental gains on {', '.join(improved)} are not the claimed mechanism"
-                   if improved else "")))
+    # Condition 1: the suite average did not get worse. Computed over the PAIRED per-route times so
+    # both arms come from one invocation, and the 1.5-3% an unchanged tree wanders between
+    # invocations cancels instead of deciding the round.
+    if not (suite_ratio and suite_ratio > 1):
+        return out(False, f"the suite geomean did not improve ({suite_ratio:.5f} vs the incumbent "
+                          "arm measured in the same session)")
 
-    if not wanted:
-        return out(False, "no route improved past its own band (all flat)")
+    # Condition 2: something concrete moved. A suite average that improves while no single route
+    # clears its own noise is what a round of pure measurement luck looks like.
+    if not improved:
+        nearest = max(verdicts, key=lambda v: v.delta_frac)
+        return out(False, f"the suite improved ({suite_ratio:.5f}) but no single route cleared its "
+                          f"own bar; the best was {nearest.route} {nearest.delta_frac:.2%} against "
+                          f"a required {nearest.need:.2%}"
+                          + (" (its measured floor, wider than the "
+                             f"{MIN_ROUTE_WIN:.2%} default)" if nearest.need > MIN_ROUTE_WIN else ""))
 
-    return out(True, "improved past band on: " + ", ".join(
-        f"{v.route} ({v.delta_frac:+.2%} vs band {v.band:.2%})"
-        for v in verdicts if v.route in set(wanted)))
+    # Targeting is a NOTE, not a veto. It used to refuse a win that landed off the declared route;
+    # `target_routes` came back on 1 of 26 engineer results, so in practice that rule refused work
+    # over a missing label far more often than it caught an artefact. The caller logs the mismatch.
+    off_target = (sorted(set(improved) - set(target_routes))
+                  if target_routes else [])
+    return out(True, f"suite {suite_ratio:.5f} and cleared its own bar on: " + ", ".join(
+        f"{v.route} {v.delta_frac:.2%} (needed {v.need:.2%}"
+        + (", its measured floor" if v.need > MIN_ROUTE_WIN else "") + ")"
+        for v in verdicts if v.status == "won")
+        + (f"; gave ground within noise on {', '.join(regressed)}" if regressed else "")
+        + (f"; NOTE: {', '.join(off_target)} improved but was not a declared target route"
+           if off_target else ""))
 
 
 def receipt(d: Decision) -> dict:
@@ -306,11 +332,14 @@ def receipt(d: Decision) -> dict:
         "reason": d.reason,
         "improved": d.improved,
         "regressed": d.regressed,
+        "catastrophic": d.catastrophic,
+        # The number the decision was actually made on: both arms from one session.
+        "suite_ratio": d.suite_ratio,
         # Reported, never gated on. See suite_geomean().
         "suite_geomean_speedup_reported_only": d.suite_geomean_speedup,
         "routes": [{"route": v.route, "incumbent_ms": v.incumbent_ms,
                     "candidate_ms": v.candidate_ms, "delta_frac": v.delta_frac,
-                    "band": v.band, "status": v.status} for v in d.routes],
+                    "band": v.band, "need": v.need, "status": v.status} for v in d.routes],
     }
 
 
