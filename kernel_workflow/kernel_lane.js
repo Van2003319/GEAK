@@ -497,7 +497,8 @@ const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skil
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
-const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer',
+                                    'asm_engineer']);
 
 // --- Deep Research Agent (DRA) -------------------------------------------------------------------
 // OPT-IN: a v4-native research phase that runs AFTER Profile and BEFORE the optimize loop (so the
@@ -592,11 +593,12 @@ const PHASE_ASM = 'phase2_asm';
 const PHASE_DEEP = 'phase3_deep';
 const PHASE_ORDER = [PHASE_SOURCE, PHASE_ASM, PHASE_DEEP];
 
-// phase2 has no implementation yet: the assembly round-trip and the keypoint localiser are not in
-// the tree. An escalation into a phase that cannot act would burn `MAX_NO_IMPROVE` rounds running
-// phase1's behaviour under phase2's name, which reads in the log as "the assembly phase found
-// nothing" when nothing was tried. Until that lands, the ladder SKIPS it and says so.
-const PHASE_IMPLEMENTED = { [PHASE_SOURCE]: true, [PHASE_ASM]: false, [PHASE_DEEP]: true };
+// A phase with no implementation is SKIPPED rather than entered: burning `MAX_NO_IMPROVE` rounds
+// running phase1's behaviour under phase2's name reads in the log as "the assembly phase found
+// nothing" when nothing was tried. phase2 became live with `asm_roundtrip.py` (emit -> edit ->
+// reassemble -> rebuild) and `isa_signals.py keypoint` (where to edit); the flag stays because the
+// question "can this phase actually act" is one the ladder should keep asking.
+const PHASE_IMPLEMENTED = { [PHASE_SOURCE]: true, [PHASE_ASM]: true, [PHASE_DEEP]: true };
 
 // The next phase that can actually act, or '' when the ladder is exhausted.
 const nextLivePhase = (from) => {
@@ -855,6 +857,11 @@ const PROFILE_SCHEMA = obj({
   // that read the counters is the one that knows, so it asks.
   request_l3: { type: 'boolean' },
   request_l3_reason: { type: 'string' },
+  // phase2 only. WHERE in the compiled assembly an edit is most likely to pay, localised by
+  // `isa_signals.py keypoint` and ranked against the bottleneck this role just classified. This is
+  // the one place the profiler hands the engineer a location rather than a direction, and it is why
+  // phase2 is a local search instead of "here is the whole kernel, good luck".
+  keypoints: { type: 'array', items: { type: 'object', additionalProperties: true } },
 }, ['bottleneck', 'top_opportunities']);
 
 // Finding (89). The baseline/reprofile profile branch has no SOL contract: no
@@ -2313,6 +2320,42 @@ while (dispatched < BUDGET && !stopReason) {
       + 'so no later planner reads an unbacked escalation as evidence already spent.');
   }
 
+  // --- (a0b) phase2 needs a LOCATION, and the profiler is what produces one ---
+  // The reprofile that would normally refresh this only runs after an IMPROVING round, so on the
+  // first phase-2 round -- and on every phase-2 round that banks nothing, which is most of them --
+  // the lane would otherwise hand the engineer a whole kernel of assembly and no reason to prefer
+  // any part of it. Localisation is therefore its own step, run at the top of the round against the
+  // canonical that is actually about to be edited.
+  if (roundPhase === PHASE_ASM && ISA_ENABLED) {
+    const located = await agentT(
+      roleAgent('profile_engineer', 'keypoint',
+        'Localise the instruction windows where an assembly edit is most likely to pay.', {
+          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+          COMMANDMENT,
+          ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
+          ASM_ROUNDTRIP_HELPER: `${WORKFLOW_DIR}/scripts/asm_roundtrip.py`,
+          // The archive of the tree about to be edited. Empty is not fatal: the role re-emits the
+          // assembly with asm_roundtrip and localises on that instead, which is the same text.
+          ISA_ARCHIVE: isaCanonicalArchive || '',
+          BOTTLENECK: (profileSummary && profileSummary.bottleneck) || '',
+          TOP_KERNELS: (profileSummary && profileSummary.top_kernels) || [],
+        }),
+      { phase: 'Optimize', label: `profile_engineer:keypoint r${round}`, schema: PROFILE_SCHEMA });
+    const found = located && Array.isArray(located.keypoints) ? located.keypoints : [];
+    profileSummary = { ...(profileSummary || {}), keypoints: found };
+    if (found.length) {
+      log(`  [phase2] ${found.length} keypoint(s) localised: `
+        + found.map(k => `${k.kernel || '?'}@${k.block || '?'}+${k.ordinal_in_block}`
+          + ` (score ${k.score})`).join(', '));
+    } else {
+      // Not a refusal. An engineer with no keypoint still has the assembly and the bottleneck; what
+      // it loses is the reason to edit one window rather than another, and saying so is better than
+      // letting the round look localised when it was not.
+      log('  [phase2] no keypoint localised this round -- the engineer works from the bottleneck '
+        + 'alone, so this round is NOT a local search and should not be read as one.');
+    }
+  }
+
   // --- (a) Plan the round ------------------------------------------------
   const planningInputs = {
     // The escalation ladder's output, spread only when it produced something. An
@@ -2414,9 +2457,18 @@ while (dispatched < BUDGET && !stopReason) {
   const results = await pipeline(
     directions,
     (d) => {
-      const isDeep = d.specialty === 'deep_explore';
-      // deep reads broad-authority contracts; specialists read engineer.md.
-      const readLine = isDeep
+      // The PHASE decides which contract an engineer reads, and it outranks the specialty: in
+      // phase2 there is no source direction to implement, so a specialty label would send the
+      // engineer to a role that edits the wrong artifact.
+      const isAsm = roundPhase === PHASE_ASM;
+      const isDeep = !isAsm && d.specialty === 'deep_explore';
+      const readLine = isAsm
+        ? `Then Read ${WORKFLOW_DIR}/roles/asm_engineer.md and follow it. You are editing the device ` +
+          `ASSEMBLY, not the source: emit it with asm_roundtrip.py, change ONLY the window a KEYPOINT ` +
+          `names, rebuild with asm_roundtrip.py, and measure. The source files are read-only to you ` +
+          `this round — an edit to them would be a phase-1 direction wearing a phase-2 label, and the ` +
+          `round would attribute a source result to the assembly phase.`
+        : isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and ALL knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
           `(you have broad authority — combine algorithm + memory + compute + host_runtime levers in one ` +
           `coherent rewrite), and follow them. You MAY edit ANY modifiable source (kernel + Python wrapper ` +
@@ -2459,6 +2511,14 @@ ${cfg({
           ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
           ISA_MODE,
         } : {}),
+        // Absent outside phase2, so the phase-1 prompt is byte-identical to the build before the
+        // ladder existed. KEYPOINTS is what makes this phase local: without it the engineer has a
+        // whole kernel of assembly and no reason to prefer one part of it.
+        ...(isAsm ? {
+          ASM_ROUNDTRIP_HELPER: `${WORKFLOW_DIR}/scripts/asm_roundtrip.py`,
+          KEYPOINTS: (profileSummary && profileSummary.keypoints) || [],
+          SEARCH_PHASE: roundPhase,
+        } : {}),
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
         baseline_per_case: BASELINE_PER_CASE,
@@ -2470,8 +2530,10 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
-      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
+      expertSkillsBlock(isAsm ? 'asm_engineer' : isDeep ? 'deep_engineer' : 'engineer'),
+      { phase: 'Optimize',
+        label: `${isAsm ? 'asm' : isDeep ? 'deep' : 'eng'} ${d.id}:${isAsm ? 'assembly' : d.specialty}`,
+        schema: ENG_SCHEMA }
     ).then((eng) => ({ d, eng }));
     },
 

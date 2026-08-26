@@ -1063,6 +1063,39 @@ console.log('\n# the search-phase ladder is a ONE-WAY ratchet that skips phases 
     'it -- otherwise the round that exhausted a phase is filed under the phase that replaced it');
 }
 
+console.log('\n# phase2 dispatches an ASSEMBLY engineer against a located keypoint');
+{
+  // What must hold for phase2 to be a different phase rather than phase1 with a new label.
+  ok(/const isAsm = roundPhase === PHASE_ASM;/.test(src),
+    'the engineer contract is chosen by PHASE, not by specialty');
+  ok(/const isDeep = !isAsm && d\.specialty === 'deep_explore';/.test(src),
+    'and the phase OUTRANKS the specialty: a deep_explore label in phase2 would send the engineer ' +
+    'to a role that edits the source, which is the artifact phase2 exists to stop editing');
+  ok(/roles\/asm_engineer\.md/.test(src),
+    'phase2 reads its own role contract rather than engineer.md with extra instructions');
+  ok(/source files are read-only to you/i.test(src),
+    'the prompt states the source is read-only this round -- a source edit in phase2 reports a ' +
+    'phase-1 result under the assembly phase\'s name');
+
+  // The location, and the fact that phase1 is untouched by any of it.
+  ok(/\.\.\.\(isAsm \? \{[\s\S]{0,400}KEYPOINTS:/.test(src),
+    'KEYPOINTS reaches the engineer only in phase2, so a phase-1 prompt is byte-identical to the ' +
+    'build before this existed');
+  ok(/ASM_ROUNDTRIP_HELPER: `\$\{WORKFLOW_DIR\}\/scripts\/asm_roundtrip\.py`/.test(src),
+    'and the round-trip helper travels with it -- an engineer told to edit assembly with no way to ' +
+    'rebuild it would edit the source instead');
+  ok(/roleAgent\('profile_engineer', 'keypoint'/.test(src),
+    'the PROFILER localises, not the engineer: the role that read the counters is the one that can ' +
+    'weight the ranking against them');
+  ok(/if \(roundPhase === PHASE_ASM && ISA_ENABLED\) \{/.test(src),
+    'localisation runs at the TOP of a phase2 round. The reprofile that would otherwise refresh it ' +
+    'only runs after an IMPROVING round, so most phase2 rounds would have no keypoint at all');
+  ok(/no keypoint localised this round/.test(src),
+    'and a round that localised nothing SAYS so rather than looking local when it was not');
+  // The role contracts themselves are pinned in `test_phase2_roles.py`: this runner deliberately
+  // serves only the two entry points, so a JS guard cannot read the markdown.
+}
+
 console.log('\n# SELECTION is the best candidate that PASSES, not the best candidate, executed');
 {
   // Ranking is by suite geomean; acceptance is per-route; and only `candidates[0]` was ever offered

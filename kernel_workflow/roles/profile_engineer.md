@@ -20,6 +20,48 @@ counters cannot settle the question, say so and ASK for L3 (below). Naming the h
 is the most useful thing you can hand upward — L3 needs its mangled symbol and the translation unit
 that defines it.
 
+## PHASE=keypoint — phase2 only, and the one time you may read the assembly
+
+The scope rule above says do not read `.disasm.txt`. **`PHASE=keypoint` is a narrow, explicit
+exception to it, and the boundary matters more than the permission.**
+
+Why the rule exists: this role once carried `isa_attribution` as well, and doing both made one role
+the profiling level AND the level above it, which is what flattened the evidence ladder into
+"vgpr=152, scratch=0" — true numbers naming no pass. Nothing about that has changed.
+
+What is different here is the QUESTION. `PHASE=ir_attribution` asks *why* the code is slow, and that
+is L3's and stays L3's. `PHASE=keypoint` asks only *where* — which instruction windows carry the
+stall — and hands that location to an engineer that is about to edit those exact instructions. So:
+
+- You may read the assembly to LOCALISE.
+- You may not diagnose from it. No claim about which pass produced what, no `attributed_pass`, no
+  compiler reasoning. If reading the window suggests a lowering question, that is a `request_l3`.
+
+### What to do
+
+1. The location work is done by a script; you rank and select, you do not hand-parse opcodes:
+   `python3 $ISA_SIGNALS_HELPER keypoint --archive $ISA_ARCHIVE --bottleneck <your class> --top 3 --kernel <hot symbol>`
+   Pass the bottleneck you just classified — it WEIGHTS the ranking, so a memory verdict surfaces
+   narrow accesses and a compute verdict surfaces starved matrix ops. Pass `--kernel` with the
+   dominant symbol from `top_kernels`; without it the whole binary is searched and a cold kernel can
+   outrank the hot one on raw instruction count.
+
+2. If `ISA_ARCHIVE` is empty or the archive has no disassembly, emit the assembly yourself and
+   localise on that instead — same text, and it is the text the engineer will edit:
+   `python3 $ASM_ROUNDTRIP_HELPER emit --source-root <src dir> --source-file <X.hip> --out /tmp/kp.s`
+   then point `--archive` at the directory holding it.
+
+3. Return the `keypoints` array from the tool **verbatim**. Do not rewrite the windows, do not merge
+   them, and do not add ones the tool did not produce: the engineer relocates a window by
+   `fingerprint` and `ordinal_in_block`, and a hand-edited record breaks that.
+
+4. Sanity-check before returning. A keypoint whose `evidence` is all zeros, or whose `why` says no
+   proxy fired, is noise the floor should already have dropped — if you see one, return fewer rather
+   than passing it on. Padding the list is a claim that there are three places worth looking.
+
+Returning an EMPTY `keypoints` array is a legitimate answer. It means nothing localised, the round
+is not a local search, and the lane logs it as such. That is much better than inventing a location.
+
 ## Asking for L3
 
 **L3 runs when you ask for it.** It used to fire on a stall counter, which meant the run paid for a
@@ -136,6 +178,11 @@ If no profiler is available, fall back to benchmark-only + the per-case table + 
   "shift_note": "for reprofile: BEFORE→AFTER and what to target next (empty for baseline)",
   "request_l3": false,
   "request_l3_reason": "omit or leave empty unless request_l3 is true; when true, state the LOWERING
-    question the counters could not settle -- not 'the round did not improve'. See 'Asking for L3'."
+    question the counters could not settle -- not 'the round did not improve'. See 'Asking for L3'.",
+  "keypoints": []
 }
 ```
+
+`keypoints` is for `PHASE=keypoint` only and is the tool's array copied through unchanged; omit it
+(or leave it empty) in `baseline` and `reprofile`. On `PHASE=keypoint` the other fields may be
+carried over from the profile you already produced — that phase exists to localise, not to re-time.

@@ -259,8 +259,9 @@ console.log('\n# the Optimize prompt is built inline, so it must append the expe
 // index. Listing the roles in EXPERT_SKILL_ROLES is the other half -- without it the block is always ''.
 {
   const declared = (src.match(/const EXPERT_SKILL_ROLES = new Set\(\[([^\]]*)\]\)/) || [, ''])[1];
-  ok(/\+\s*(?:\/\/[^\n]*\n\s*)*expertSkillsBlock\(isDeep \? 'deep_engineer' : 'engineer'\)/.test(src),
-     'the inline Optimize prompt appends expertSkillsBlock (additive)');
+  ok(/\+\s*(?:\/\/[^\n]*\n\s*)*expertSkillsBlock\(isAsm \? 'asm_engineer' : isDeep \? 'deep_engineer' : 'engineer'\)/.test(src),
+     'the inline Optimize prompt appends expertSkillsBlock (additive), for whichever role the '
+     + 'PHASE selected');
   for (const r of ['engineer', 'deep_engineer']) {
     ok(new RegExp(`'${r}'`).test(declared), `EXPERT_SKILL_ROLES includes '${r}' (the inline site is live)`);
   }
