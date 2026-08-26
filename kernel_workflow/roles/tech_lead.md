@@ -153,7 +153,9 @@ whenever the lane runs `isa_evidence=observe|gate`, and `observe` is the default
   `legacy_machine_code` = a round banked before this ladder existed, whose evidence was a disassembly
   reading. It is NOT an L3 or L4 result: it names no pass, so it cannot discharge a
   `source_change_required` and it cannot be cited as a trajectory.
-- `ISA_ESCALATION_REASON` — why the ladder spent the run's most expensive evidence.
+- `ISA_ESCALATION_REASON` — why the ladder spent the run's most expensive evidence, prefixed by who
+  asked for it (`profile_engineer:`, `tech_lead:` or `verifier:`). L3 is REQUESTED, not triggered by
+  a stall counter, so this names a role and its open question rather than a round count.
 - `ISA_ANALYSIS_SKIPPED` — an escalation was requested and could not run (normally: the canonical tree
   carries no ISA archive yet, so a captured trajectory could not be tied to the measured binary; or L2
   named no dominant hot kernel). Treat the round as `L2_profile` and do not describe it as
@@ -378,9 +380,27 @@ Return JSON:
       "prompt": "full, self-contained task description for the engineer",
       "kk_refs": ["<optional perf_knowledge card paths grounding THIS direction; omit/[] if none>"]
     }
-  ]
+  ],
+  "request_l3": false,
+  "request_l3_reason": "omit unless request_l3 is true; see 'Asking for L3' below"
 }
 ```
+
+### Asking for L3
+
+You may request the lowering trajectory by returning `request_l3: true`. **It lands one round later,
+and that is structural, not a bug**: the ladder runs before planning so an attribution can inform the
+plan, so a request made while planning round N is answered at the top of round N+1.
+
+Ask when you cannot choose the next direction without knowing which pass consumed the last one —
+typically after a direction whose mechanism looked right, was implemented as specified, and moved
+nothing. That is a lowering question, and `ISA_EVIDENCE_DEPTH: L2_profile` means nobody has answered
+it.
+
+Do not ask because a round was flat. The stall counter that used to buy L3 on exactly that basis was
+removed for being a fact about the search rather than about the evidence, and re-creating it here
+puts it back. Also do not ask when `IR_ATTRIBUTION` is already present in your inputs — that round
+has its trajectory; asking again re-derives what you were just handed.
 
 ---
 

@@ -849,6 +849,12 @@ const PROFILE_SCHEMA = obj({
   top_kernels: { type: 'array', items: { type: 'object', additionalProperties: true } },
   top_opportunities: { type: 'array', items: { type: 'string' } },
   summary_path: { type: 'string' }, shift_note: { type: 'string' },
+  // L3 IS NOW REQUESTED, NOT TRIGGERED. It used to fire on a stall counter, which meant the lane
+  // paid for a lowering trajectory on the strength of "the last round did not help" -- a fact that
+  // says nothing about whether the counters left a question a trajectory could answer. The role
+  // that read the counters is the one that knows, so it asks.
+  request_l3: { type: 'boolean' },
+  request_l3_reason: { type: 'string' },
 }, ['bottleneck', 'top_opportunities']);
 
 // Finding (89). The baseline/reprofile profile branch has no SOL contract: no
@@ -958,6 +964,12 @@ const PLAN_SCHEMA = obj({
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
     }, ['id', 'title', 'specialty', 'prompt']),
   },
+  // The planner's L3 request, which necessarily applies to the NEXT round: the ladder runs before
+  // planning so an attribution can inform the plan, and a request made during planning is therefore
+  // one round late by construction. That is the honest shape of it -- "I cannot choose the next
+  // direction until I know which pass ate the last one" is a statement about the round after this.
+  request_l3: { type: 'boolean' },
+  request_l3_reason: { type: 'string' },
 }, ['stop', 'directions']);
 
 // Finding (69). `policy_pass` is the single most consequential boolean in this
@@ -1871,42 +1883,68 @@ const hasDominantHotKernel = (profile) => {
 // describes: escalation to compiler source is a continuation of the attribution,
 // not a separate round's decision.
 //
-// The trigger stays deliberately EARLY -- one non-improving round. A three-round
-// stagnation window of the kind `local_optimum.py` uses would never fire before the
-// lane was already over.
-const evidenceLadder = (rounds, noImproveCount, enabled, profile) => {
-  if (!enabled) return { requested: null, from: '', reason: '', skip_reason: '' };
+// WHO MAY ASK, and why it is asking rather than a counter.
+//
+// L3 used to fire on the stall counter: one non-improving round bought a lowering trajectory. That
+// conflates two different things. "The last round did not help" is a fact about the SEARCH; "the
+// counters have left a question only the lowering trajectory can answer" is a fact about the
+// EVIDENCE, and only the second is a reason to pay for L3. The roles that read the evidence are the
+// ones that can tell, so the default path through a phase-1 round is L1 -> L2, and L3 runs when
+// somebody asks for it by name.
+//
+// Three requesters, and the third is the one to argue about:
+//   profile_engineer  asks in the same round -- it has just read the counters.
+//   tech_lead         asks during planning, which lands one round later by construction: the ladder
+//                     runs BEFORE planning so an attribution can inform the plan.
+//   the verifier      does not "ask" in words, but a REFUTED mechanism is the machine code already
+//                     answering "did my edit land" with no, and the open question -- which pass
+//                     undid it -- is exactly an L3 question. Kept as an automatic requester because
+//                     neither role above necessarily sees the refutation.
+const l3Requesters = (prior, profile) => {
+  const out = [];
+  if (profile && profile.request_l3 === true) {
+    out.push({ by: 'profile_engineer', reason: String(profile.request_l3_reason || '').trim() });
+  }
+  if (prior && prior.plan_request_l3 === true) {
+    out.push({ by: 'tech_lead', reason: String(prior.plan_request_l3_reason || '').trim() });
+  }
+  // Routed TO L3, not past it. "My edit did not reach the binary" is first of all a question about
+  // WHICH PASS undid it; only if L3 names the pass and cannot say why does it become a
+  // compiler-source question. The old code jumped straight to the compiler here, forced by L3
+  // having no pass-level capability to jump to.
+  if (prior && Array.isArray(prior.results) && prior.results.some(r => r && r.mechanism === 'refuted')) {
+    out.push({
+      by: 'verifier',
+      reason: 'the previous round\'s machine code refuted the mechanism it declared, so the open '
+        + 'question is which lowering stage undid it -- a pass-level question, not yet a '
+        + 'compiler-source one',
+    });
+  }
+  return out;
+};
+
+const evidenceLadder = (rounds, profile, enabled) => {
+  if (!enabled) return { requested: null, from: '', reason: '', skip_reason: '', requested_by: [] };
   const list = Array.isArray(rounds) ? rounds : [];
   const prior = list.length ? list[list.length - 1] : null;
   const from = reachedStageOf(prior);
-  // A REFUTED mechanism is a stronger trigger than a flat round: the machine code
-  // has already answered "did it land" with no. But it routes to L3, not past it.
-  // "My edit did not reach the binary" is first of all a question about WHICH PASS
-  // undid it, and that is an L3 question; only if L3 names the pass and cannot say
-  // why does it become a compiler-source question. The old code jumped straight to
-  // the compiler here, which was forced by L3 having no pass-level capability to
-  // jump to.
-  const priorRefuted = !!(prior && Array.isArray(prior.results) &&
-    prior.results.some(r => r && r.mechanism === 'refuted'));
-  if (!(noImproveCount >= 1) && !priorRefuted) {
-    return { requested: null, from, reason: '', skip_reason: '' };
-  }
+  const asks = l3Requesters(prior, profile);
+  if (!asks.length) return { requested: null, from, reason: '', skip_reason: '', requested_by: [] };
   if (!hasDominantHotKernel(profile)) {
     return {
-      requested: null, from, reason: '',
-      skip_reason: 'the escalation trigger fired but L2 has not named a dominant hot kernel, and a '
-        + 'trajectory is captured per function -- without one, L3 would trace whichever '
-        + 'translation unit was guessed at and attribute this plateau to it',
+      requested: null, from, reason: '', requested_by: asks.map(a => a.by),
+      skip_reason: `${asks.map(a => a.by).join(' and ')} asked for L3, but L2 has not named a `
+        + 'dominant hot kernel, and a trajectory is captured per function -- without one, L3 would '
+        + 'trace whichever translation unit was guessed at and attribute this plateau to it',
     };
   }
   return {
     requested: STAGE_L3, from,
-    reason: priorRefuted
-      ? 'the previous round\'s machine code refuted the mechanism it declared, so the open question '
-        + 'is which lowering stage undid it -- a pass-level question, not yet a compiler-source one'
-      : `${noImproveCount} non-improving round(s); before proposing another source direction, `
-        + 'establish from the lowering trajectory where the last one stopped surviving -- a '
-        + 'pass-removed edit reads exactly like an idea that did not help',
+    requested_by: asks.map(a => a.by),
+    // Every requester's stated reason travels, not just the first. Two roles asking for different
+    // reasons is the case where L3 is most clearly worth its cost, and an escalation record that
+    // kept one of them would misreport exactly that round.
+    reason: asks.map(a => `${a.by}: ${a.reason || '(no reason given)'}`).join(' | '),
     skip_reason: '',
   };
 };
@@ -2129,12 +2167,10 @@ while (dispatched < BUDGET && !stopReason) {
   // implementations of one verdict is one more than can be trusted. It is pinned by
   // an executable guard instead.
   //
-  // The trigger is deliberately EARLY: one non-improving round is enough to ask for a lowering
-  // trajectory on the next attempt, because the round that just failed to move is exactly the one
-  // whose mechanism is worth checking. It is read against the CURRENT PHASE's stall counter, so a
-  // phase change resets the ladder's trigger along with everything else -- the evidence a new phase
-  // needs is about that phase's own attempts.
-  const ladderState = evidenceLadder(history.rounds, phaseStall, LADDER_ENABLED, profileSummary);
+  // Nothing here counts rounds any more. L3 runs when profile_engineer asked for it in this round's
+  // profile, when the TechLead asked for it while planning the last one, or when the last round's
+  // machine code refuted the mechanism it claimed. Absent all three, a phase-1 round is L1 -> L2.
+  const ladderState = evidenceLadder(history.rounds, profileSummary, LADDER_ENABLED);
   // Read once per round from the same profile the ladder consults, so the ISA
   // receipt and the escalation decision cannot disagree about which kernel is hot.
   const hotKernelNames = (profileSummary && Array.isArray(profileSummary.top_kernels)
@@ -2142,8 +2178,8 @@ while (dispatched < BUDGET && !stopReason) {
     .map(k => k && typeof k.name === 'string' ? k.name.trim() : '')
     .filter(Boolean);
   if (ladderState.requested) {
-    log(`  [ladder] round ${round}: ${ladderState.from} -> ${ladderState.requested}. `
-      + `${ladderState.reason}`);
+    log(`  [ladder] round ${round}: ${ladderState.from} -> ${ladderState.requested}, asked for by `
+      + `${(ladderState.requested_by || []).join(', ') || 'nobody named'}. ${ladderState.reason}`);
   } else if (ladderState.skip_reason) {
     log(`  [ladder] round ${round}: escalation NOT requested -- ${ladderState.skip_reason}`);
   }
@@ -3118,6 +3154,10 @@ matter how the rest of the run looked.`,
       evidence: {
         model: EVIDENCE_MODEL,
         requested_stage: ladderState.requested || null,
+        // WHO asked. With L3 on request rather than on a counter, "was this escalation worth it"
+        // is only answerable against the role that wanted it -- and a requester whose requests
+        // never pay off is a thing to notice.
+        requested_by: ladderState.requested_by || [],
         reached_stage: stageReached,
         status: (isaAttribution && isaAttribution.status) || (ladderState.requested
           ? 'unavailable' : 'not_requested'),
@@ -3144,6 +3184,12 @@ matter how the rest of the run looked.`,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, committed: committedThisRound, cumulative, cumulative_vs_seed: cumulativeVsSeed(),
     search_phase: roundPhase,
+    // Carried so NEXT round's ladder can see it. The planner's request cannot be honoured in the
+    // round it was made -- the ladder had already run by then -- so the record is the only place it
+    // can survive to the round that can act on it.
+    ...(plan && plan.request_l3 === true
+      ? { plan_request_l3: true, plan_request_l3_reason: String(plan.request_l3_reason || '').trim() }
+      : {}),
   });
   log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}` +
       `${improved && !committedThisRound ? ' (WINNER NOT COMMITTED -- canonical unchanged)' : ''}` +

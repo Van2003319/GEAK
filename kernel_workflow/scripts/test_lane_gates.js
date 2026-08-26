@@ -524,47 +524,78 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
     results: (mechanisms || []).map(m => ({ mechanism: m })),
   });
 
-  ok(ladder([], 0, true, hot).requested === null
-     && ladder([rnd(L.STAGE_L2)], 0, true, hot).requested === null,
-    'a round that is still improving does not escalate -- the ladder does not spend a recompile '
-    + 'on a search that is working');
-  ok(ladder([rnd(L.STAGE_L2)], 1, true, hot).requested === L.STAGE_L3,
-    'ONE non-improving round escalates to the IR trajectory: MAX_NO_IMPROVE defaults to 2, so a '
-    + 'three-round stagnation window would never fire before the lane was already dead');
-  ok(ladder([rnd(L.STAGE_L2)], 1, true, hot).from === L.STAGE_L2,
-    'and it records what it escalated FROM');
+  // L3 IS REQUESTED, NOT COUNTED. The default path through a phase-1 round is L1 -> L2; a stall is
+  // no longer a reason on its own, because "the last round did not help" says nothing about whether
+  // the counters left a question a lowering trajectory could answer.
+  const asks = (reason) => ({ ...hot, request_l3: true, request_l3_reason: reason || 'why' });
+  const planAsked = (reason) => ({
+    ...rnd(L.STAGE_L2), plan_request_l3: true, plan_request_l3_reason: reason || 'why',
+  });
 
-  // THE INVERSION FIX. The previous ladder sent a refuted mechanism straight to the
-  // compiler role, skipping IR attribution entirely -- so the deepest rung was
-  // reached exclusively by the route that handed it nothing but disassembly
-  // statistics, which is why it could only ever guess at the whole backend.
-  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], 0, true, hot).requested === L.STAGE_L3,
+  ok(ladder([], hot, true).requested === null
+     && ladder([rnd(L.STAGE_L2)], hot, true).requested === null,
+    'nobody asked, so a phase-1 round is L1 -> L2 -- however many rounds have gone flat, a stall '
+    + 'on its own no longer buys a recompile');
+
+  ok(ladder([rnd(L.STAGE_L2)], asks('counters cannot separate issue from dependency'), true)
+       .requested === L.STAGE_L3,
+    'profile_engineer asking in THIS round escalates -- it has just read the counters, so it is '
+    + 'the role that can tell whether a trajectory would answer anything');
+  ok(ladder([rnd(L.STAGE_L2)], asks(), true).requested_by.join() === 'profile_engineer',
+    'and the record names who asked, because "was that escalation worth it" is only answerable '
+    + 'against the requester');
+  ok(/counters cannot separate/.test(
+       ladder([rnd(L.STAGE_L2)], asks('counters cannot separate issue from dependency'), true).reason),
+    'the requester\'s own stated reason travels, not a reason the ladder invented for it');
+
+  ok(ladder([planAsked('need the pass before I pick a direction')], hot, true).requested === L.STAGE_L3
+     && ladder([planAsked()], hot, true).requested_by.join() === 'tech_lead',
+    'the TechLead\'s request is honoured one round later, which is the only round it CAN be '
+    + 'honoured in: the ladder runs before planning so an attribution can inform the plan');
+
+  // THE INVERSION FIX, unchanged by the move to requests. The previous ladder sent a refuted
+  // mechanism straight to the compiler role, skipping IR attribution entirely -- so the deepest
+  // rung was reached exclusively by the route that handed it nothing but disassembly statistics.
+  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], hot, true).requested === L.STAGE_L3,
     'a REFUTED mechanism escalates to L3, NOT past it: "my edit did not reach the binary" is '
     + 'first of all a question about which pass undid it, and that is an IR question');
-  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], 0, true, hot).requested !== L.STAGE_L4,
+  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], hot, true).requested !== L.STAGE_L4,
     'and it specifically does not jump to the compiler, which is what the old ladder did');
-  ok(ladder([rnd(L.STAGE_L3)], 1, true, hot).requested !== L.STAGE_L4
-     && ladder([rnd(L.STAGE_L3)], 5, true, hot).requested !== L.STAGE_L4,
-    'L4 is NEVER requested at the top of a round, at any stagnation count: it is entered from '
-    + 'inside the round, on a question L3 formed. Requesting it here is what made it unreachable '
-    + 'under the default stop budget');
+  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], hot, true).requested_by.join() === 'verifier',
+    'the refutation is filed as the VERIFIER asking, so an automatic trigger is still attributable '
+    + 'to something that observed a fact rather than to a counter');
+  ok(ladder([rnd(L.STAGE_L3)], hot, true).requested !== L.STAGE_L4
+     && ladder([rnd(L.STAGE_L3)], asks(), true).requested !== L.STAGE_L4,
+    'L4 is NEVER requested at the top of a round, however loudly L3 was asked for: it is entered '
+    + 'from inside the round, on a question L3 formed');
 
-  ok(ladder([rnd(L.STAGE_L2, ['realized'])], 0, true, hot).requested === null
-     && ladder([rnd(L.STAGE_L2, ['indeterminate'])], 0, true, hot).requested === null,
+  // Two requesters at once is the case where L3 is most clearly worth its cost.
+  {
+    const both = ladder([planAsked('planner reason')], asks('profiler reason'), true);
+    ok(both.requested_by.length === 2
+       && both.requested_by.includes('profile_engineer') && both.requested_by.includes('tech_lead'),
+      'both requesters are recorded when both asked', both.requested_by.join(','));
+    ok(/profiler reason/.test(both.reason) && /planner reason/.test(both.reason),
+      'and BOTH reasons travel -- keeping only the first would misreport exactly the round where '
+      + 'two roles independently wanted the same evidence');
+  }
+
+  ok(ladder([rnd(L.STAGE_L2, ['realized'])], hot, true).requested === null
+     && ladder([rnd(L.STAGE_L2, ['indeterminate'])], hot, true).requested === null,
     'neither a realized nor an indeterminate verdict triggers escalation -- only a positive '
     + 'contradiction does, so missing evidence never spends a deep round');
-  ok(ladder([rnd(L.STAGE_L2)], 5, false, hot).requested === null,
-    'with the layer off it never escalates at all, whatever the history looks like');
+  ok(ladder([rnd(L.STAGE_L2, ['refuted'])], asks(), false).requested === null,
+    'with the layer off it never escalates at all, however many roles asked');
 
   // L2 must have localised something. The paper's first test is "has this level
   // found the dominant bottleneck", not "is it still slow".
-  const noHot = { top_kernels: [] };
-  ok(ladder([rnd(L.STAGE_L2)], 1, true, noHot).requested === null
-     && /dominant hot kernel/.test(String(ladder([rnd(L.STAGE_L2)], 1, true, noHot).skip_reason)),
-    'a stalled round whose profile named no dominant hot kernel does not escalate, and says why: '
-    + 'a trajectory is per-function, so L3 would otherwise trace whichever translation unit was '
+  const noHot = { top_kernels: [], request_l3: true, request_l3_reason: 'please' };
+  ok(ladder([rnd(L.STAGE_L2)], noHot, true).requested === null
+     && /dominant hot kernel/.test(String(ladder([rnd(L.STAGE_L2)], noHot, true).skip_reason)),
+    'a request whose profile named no dominant hot kernel does not escalate, and says why: a '
+    + 'trajectory is per-function, so L3 would otherwise trace whichever translation unit was '
     + 'guessed at and attribute this plateau to it');
-  ok(ladder([rnd(L.STAGE_L2)], 1, true, undefined).requested === null,
+  ok(ladder([rnd(L.STAGE_L2)], undefined, true).requested === null,
     'and a missing profile is treated the same way rather than as permission');
 
   // Legacy STATE. A resumed lane must not read a pre-v2 round as if it held the
@@ -573,7 +604,7 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
      && L.reachedStageOf({ evidence_depth: 'compiler' }) === L.STAGE_LEGACY,
     'a round banked before this ladder existed reads as legacy machine-code evidence, never as '
     + 'L3 or L4: it names no pass, so it can discharge nothing');
-  ok(ladder([{ evidence_depth: 'compiler' }], 1, true, hot).requested === L.STAGE_L3,
+  ok(ladder([{ evidence_depth: 'compiler' }], asks(), true).requested === L.STAGE_L3,
     'and a resumed lane whose last round says "compiler" still starts at L3 -- it does not '
     + 'inherit a rung nobody ever reached');
 
@@ -615,43 +646,35 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
     'an `attributed` L3 does NOT escalate even if it filled the fields -- it reached a single '
     + 'rewrite family, and spending L4 on top of that is the per-round tax this ladder avoids');
 
-  // Reachability under the DEFAULT stop budget, which is the defect this change fixes.
-  // MAX_NO_IMPROVE is 2, so noImprove can only ever be 1 when an escalation is
-  // decided; the old chain needed a SECOND round after an L3 round to reach the
-  // compiler, and the loop exits first.
+  // Reachability. L4 used to be unreachable under the default stop budget: `compiler` could only be
+  // requested from a round whose prior depth was already `isa`, which needed the L3 round to survive
+  // into the next one -- and back when the stall counter ended the wave at 2, it did not. The fix
+  // was to enter L4 from INSIDE the round that ran L3. With L3 now on request, reachability no
+  // longer depends on any counter at all: one request is enough, in one round.
   {
-    // Read out of the lane rather than restated, for the reason `grabConst` exists:
-    // a guard that hardcoded 2 would keep passing after someone raised the budget,
-    // and the whole point of this check is that the budget is what made L4
-    // unreachable. `grabConst` cannot be used because this one is computed, so the
-    // default is taken from the expression that supplies it.
-    const maxNoImprove = Number(grab(
-      /const MAX_NO_IMPROVE = Math\.max\(1, parseInt\(A\.max_no_improve != null \? A\.max_no_improve : (\d+), 10\)\);/,
-      'the MAX_NO_IMPROVE default').match(/: (\d+), 10/)[1]);
     let reachedL4 = false;
-    const history = [];
-    for (let noImprove = 0; noImprove < maxNoImprove; noImprove++) {
-      const state = ladder(history, noImprove, true, hot);
-      if (state.requested === L.STAGE_L3) {
-        const l3 = { status: 'needs_compiler', diagnosis: 'd', attributed_pass: 'si-insert-waitcnts',
-          stage_transition: '92 -> 93', suspected_passes: ['si-insert-waitcnts'],
-          compiler_question: 'which dependency forces the wait?' };
-        if (L.admissibleAttribution(l3) === '' && L.wantsCompilerEscalation(l3)) reachedL4 = true;
-      }
-      history.push(rnd(state.requested === L.STAGE_L3 ? L.STAGE_L3 : L.STAGE_L2));
+    const state = ladder([rnd(L.STAGE_L2)], asks('the counters cannot say which pass'), true);
+    if (state.requested === L.STAGE_L3) {
+      const l3 = { status: 'needs_compiler', diagnosis: 'd', attributed_pass: 'si-insert-waitcnts',
+        stage_transition: '92 -> 93', suspected_passes: ['si-insert-waitcnts'],
+        compiler_question: 'which dependency forces the wait?' };
+      if (L.admissibleAttribution(l3) === '' && L.wantsCompilerEscalation(l3)) reachedL4 = true;
     }
     ok(reachedL4,
-      'L4 is reachable within the DEFAULT stop budget. It was not before: `compiler` could only '
-      + 'be requested from a round whose prior depth was already `isa`, which needed the L3 round '
-      + 'to survive into the next -- but a non-improving L3 round takes noImprove to '
-      + `${maxNoImprove} and the loop exits. The only live path to the deepest rung was the one `
-      + 'that skipped L3');
+      'a single request reaches L4 within ONE round: L3 runs, returns needs_compiler with a pass '
+      + 'and a question, and L4 is entered on it without waiting for a round that a stall counter '
+      + 'might never allow');
   }
 
   // Wiring (55): a gate whose result is computed and discarded is a comment.
-  ok(/const ladderState = evidenceLadder\(history\.rounds, phaseStall, LADDER_ENABLED, profileSummary\);/.test(src),
-    'the round loop actually consults the ladder rather than deciding depth inline, and reads the '
-    + 'CURRENT PHASE\'s stall counter so a phase change resets the ladder trigger with everything else');
+  ok(/const ladderState = evidenceLadder\(history\.rounds, profileSummary, LADDER_ENABLED\);/.test(src),
+    'the round loop actually consults the ladder rather than deciding depth inline');
+  ok(!/evidenceLadder\([^)]*phaseStall/.test(src) && !/evidenceLadder\([^)]*noImprove/.test(src),
+    'and it passes no stall counter: a ladder that could still read one would keep the old '
+    + '"a flat round buys a recompile" path alive beside the request path');
+  ok(/\.\.\.\(plan && plan\.request_l3 === true/.test(src),
+    'the planner\'s request is carried into the round record, which is the only way it can survive '
+    + 'to the next round -- the ladder had already run when the plan was made');
   ok(/if \(wantsCompilerEscalation\(irAttribution\)\) \{/.test(src)
      && src.indexOf('roleAgent(\'compiler_engineer\'') > src.indexOf('roleAgent(\'ir_engineer\''),
     'and L4 is dispatched from inside the L3 branch, after L3 returned -- not from the top of a '

@@ -16,9 +16,37 @@ global_load_bytes.max=4` — true numbers that name no pass and support no compi
 
 Attribution now belongs to `ir_engineer.md` (`PHASE=ir_attribution`), which reconstructs the lowering
 trajectory and names the pass. **Do not attempt it here**, and do not read `.disasm.txt`: if the
-counters cannot settle the question, the answer is to say so in `top_opportunities` and let the
-orchestrator escalate. Naming the hot kernel precisely is the most useful thing you can hand upward —
-L3 needs its mangled symbol and the translation unit that defines it.
+counters cannot settle the question, say so and ASK for L3 (below). Naming the hot kernel precisely
+is the most useful thing you can hand upward — L3 needs its mangled symbol and the translation unit
+that defines it.
+
+## Asking for L3
+
+**L3 runs when you ask for it.** It used to fire on a stall counter, which meant the run paid for a
+lowering trajectory whenever the previous round failed to help — a fact about the search that says
+nothing about whether the counters left a question a trajectory could answer. You have just read the
+counters, so you are the one who can tell. The default path through a round is L1 → L2; set
+`request_l3: true` to change that, and put the actual open question in `request_l3_reason`.
+
+Ask when the counters have taken you as far as they go and what remains is a *lowering* question:
+
+- the metric that should have moved did not, and the source change that targeted it looks correct —
+  the open question is which pass dropped it, and no counter can name a pass;
+- two bottleneck classes are indistinguishable from the counters alone (e.g. a wait that could be a
+  memory-issue stall or a register dependency), and the distinction decides the next direction;
+- a resource number is inexplicable from the source (spill with no obvious pressure, an MFMA shape
+  you did not write, a widened access that came back narrow).
+
+Do NOT ask when:
+
+- the round simply did not improve. That is a search fact, not an evidence gap;
+- the counters DO answer the question and the answer is a direction — say the direction;
+- no dominant hot kernel is named in `top_kernels`. A trajectory is captured per function, so the
+  request would be refused anyway: L3 would otherwise trace whichever translation unit was guessed
+  at. Fix the localisation first.
+
+A request costs a full device recompile with instrumentation. Asking every round is the same failure
+as the counter it replaced, one level up.
 
 **FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave; PHASE=baseline): the bottleneck was
 already classified in a prior wave. Do NOT re-run the full baseline profile from scratch — read the prior
@@ -105,6 +133,9 @@ If no profiler is available, fall back to benchmark-only + the per-case table + 
   "top_kernels": [{"name": "...", "pct_of_total": 0.0}],
   "top_opportunities": ["ranked, specific, tied to a metric or per-case number"],
   "summary_path": "<path to the md>",
-  "shift_note": "for reprofile: BEFORE→AFTER and what to target next (empty for baseline)"
+  "shift_note": "for reprofile: BEFORE→AFTER and what to target next (empty for baseline)",
+  "request_l3": false,
+  "request_l3_reason": "omit or leave empty unless request_l3 is true; when true, state the LOWERING
+    question the counters could not settle -- not 'the round did not improve'. See 'Asking for L3'."
 }
 ```
