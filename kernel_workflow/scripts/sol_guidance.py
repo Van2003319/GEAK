@@ -475,22 +475,91 @@ def report(routes: Sequence[RouteSol],
     }
 
 
+# Keys that name a ceiling. Under `--arch` the ceiling comes from the gated card and these are
+# REFUSED rather than ignored: a spec that carries both is a caller that thinks it is overriding
+# something, and silently winning that argument is how the wrong number ends up being planned
+# against. Refusing is also the difference between this entry point and the free-form one -- see
+# `_ceilings_from_card`.
+_CEILING_KEYS = ("peak_flops", "bandwidth_table", "bandwidth_scalar", "bandwidth_witness_bytes_s",
+                 "bandwidth_witness_by", "compute_witness_by", "source")
+
+
+def _ceilings_from_card(arch: str, dtype: str) -> dict:
+    """The ceiling inputs for `arch`, taken from `sol_card`'s gated table and nothing else.
+
+    THIS IS THE FINDING (89) ENTRY POINT. The free-form spec accepts `peak_flops` from the caller
+    with no provenance requirement, which is exactly the hole that finding is about: the profiler
+    hand-rolled a roofline from the vendor nameplate, published 12x of headroom for a route whose
+    gated card says 6.2x, and the inflated number was the one the Director and every Engineer then
+    planned against -- because the gated card is only consulted at admission, so the wrong figure
+    never met the check that would have refused it.
+
+    Here the numbers cannot come from the caller at all. On gfx942 the card is MEASURED and carries
+    an attainment witness naming what actually reached the rate, which is the distinction that
+    matters: `rocminfo` reports 1307 TFLOP/s on the same box with impeccable provenance and nothing
+    has ever got near it.
+    """
+    # The module already imports from `sol_card` at top level, so this needs no path setup; it is
+    # imported here rather than there only to keep the table out of the free-form entry point.
+    import sol_card
+
+    card = sol_card.ARCH_CARDS.get(arch)
+    if card is None:
+        raise SOLCardError(f"unsupported arch {arch!r}: modeled arches are "
+                           f"{tuple(sol_card.ARCH_CARDS)}")
+    peaks = card.get("peak_flops") or {}
+    if dtype not in peaks:
+        raise SOLCardError(f"{arch} card has no peak for dtype {dtype!r}; it models "
+                           f"{tuple(peaks)}")
+    basis = "measured" if card.get("measured") else "reference peak, UNMEASURED"
+    out: dict = {
+        "peak_flops": float(peaks[dtype]),
+        "source": f"{arch} card ({basis}): {card.get('source', '')}",
+    }
+    table = card.get("peak_bandwidth_bytes_s_by_footprint")
+    if table:
+        out["bandwidth_table"] = {int(k): float(v) for k, v in table.items()}
+    elif card.get("peak_bandwidth_bytes_s"):
+        out["bandwidth_scalar"] = float(card["peak_bandwidth_bytes_s"])
+    else:
+        raise SOLCardError(f"{arch} card supplies no bandwidth ceiling")
+    witness = ((card.get("attainment") or {}).get(dtype) or {}).get("by")
+    if witness:
+        out["compute_witness_by"] = str(witness)
+    return out
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("spec", help="JSON: {peak_flops, bandwidth_table|bandwidth_scalar, "
                                  "compute_witness_by, bandwidth_witness_bytes_s, "
-                                 "bandwidth_witness_by, dtype, routes:[{route,m,n,k,measured_s}]}")
+                                 "bandwidth_witness_by, dtype, routes:[{route,m,n,k,measured_s}]}. "
+                                 "With --arch the ceiling keys are supplied by the card and "
+                                 "REFUSED here; the spec then needs only dtype + routes.")
+    ap.add_argument("--arch", default=None,
+                    help="take the ceiling from sol_card's gated table for this arch (e.g. gfx942) "
+                         "instead of from the spec. Use this from anything that plans: it is the "
+                         "only mode in which the ceiling has provenance by construction")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable receipt")
     args = ap.parse_args(argv)
 
     with open(args.spec) as fh:
         spec = json.load(fh)
 
+    dtype = spec.get("dtype", "bf16")
+    if args.arch:
+        supplied = sorted(k for k in _CEILING_KEYS if k in spec)
+        if supplied:
+            print(f"REFUSED: --arch {args.arch} takes the ceiling from the gated card, but the "
+                  f"spec also supplies {', '.join(supplied)}. Remove them: a run carrying two "
+                  f"ceilings for one route is worse than carrying none.", file=sys.stderr)
+            return 2
+        spec = {**spec, **_ceilings_from_card(args.arch, dtype)}
+
     table = spec.get("bandwidth_table")
     if isinstance(table, Mapping):
         table = {int(k): float(v) for k, v in table.items()}
-    dtype = spec.get("dtype", "bf16")
 
     routes: list[RouteSol] = []
     for entry in spec["routes"]:

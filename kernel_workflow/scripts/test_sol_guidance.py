@@ -321,5 +321,95 @@ class ReportTest(unittest.TestCase):
                          proc.stdout.strip())
 
 
+class ArchModeTest(unittest.TestCase):
+    """`--arch`: the only mode in which the ceiling has provenance by construction.
+
+    The free-form spec takes `peak_flops` from the caller and asks nothing about where it came from.
+    That is the finding (89) hole exactly: a hand-rolled nameplate roofline published 12x of
+    headroom for a route whose gated card says 6.2x, and the inflated figure was the one the
+    Director and every Engineer planned against, because the gated card is consulted only at
+    admission and the wrong number never met it.
+    """
+
+    SHAPES = [
+        {"route": "decode_m2_square", "m": 2, "n": 4096, "k": 4096, "measured_s": 22.0e-6},
+        {"route": "prefill_m1024_down", "m": 1024, "n": 4096, "k": 11008, "measured_s": 306.0e-6},
+    ]
+
+    def spec(self, **extra):
+        return {"dtype": "bf16", "routes": self.SHAPES, **extra}
+
+    def run_cli(self, spec, *args):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(spec, fh)
+            path = fh.name
+        try:
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sol_guidance.py")
+            return subprocess.run([sys.executable, script, *args, path],
+                                  capture_output=True, text=True)
+        finally:
+            os.unlink(path)
+
+    def test_the_ceiling_comes_from_the_card_not_the_caller(self):
+        got = sg._ceilings_from_card("gfx942", "bf16")
+        self.assertEqual(668e12, got["peak_flops"],
+                         "the MEASURED bf16 peak, not the 1307e12 nameplate")
+        self.assertIn("bandwidth_table", got,
+                      "gfx942 is footprint-dependent; a scalar mis-ranks the suite by 2.8x")
+        self.assertIn("compute_witness_by", got,
+                      "the witness names what actually reached the rate -- provenance is not "
+                      "attainability, and rocminfo's 1307e12 has impeccable provenance and no "
+                      "achiever")
+        self.assertIn("measured", got["source"])
+
+    def test_an_unmodelled_arch_is_refused_rather_than_defaulted(self):
+        with self.assertRaises(sg.SOLCardError):
+            sg._ceilings_from_card("gfx1100", "bf16")
+
+    def test_a_dtype_the_card_does_not_model_is_refused(self):
+        with self.assertRaises(sg.SOLCardError):
+            sg._ceilings_from_card("gfx942", "fp64")
+
+    def test_arch_mode_runs_and_reports_a_measured_ceiling(self):
+        proc = self.run_cli(self.spec(), "--arch", "gfx942", "--json")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        doc = json.loads(proc.stdout)
+        self.assertEqual(doc["schema"], sg.SCHEMA)
+        self.assertEqual(2, len(doc["routes"]))
+        self.assertGreater(doc["weighted_achievement"], 0)
+
+    def test_a_spec_that_also_supplies_a_ceiling_is_REFUSED(self):
+        """Not ignored. A caller passing both thinks it is overriding something, and silently
+        winning that argument is how the wrong number ends up being planned against."""
+        proc = self.run_cli(self.spec(peak_flops=1307e12), "--arch", "gfx942")
+        self.assertEqual(2, proc.returncode)
+        self.assertIn("REFUSED", proc.stderr)
+        self.assertIn("peak_flops", proc.stderr)
+
+    def test_every_ceiling_key_is_covered_by_the_refusal(self):
+        for key, value in (("bandwidth_scalar", 5.3e12), ("bandwidth_table", {"33554432": 1.4e12}),
+                           ("compute_witness_by", "me"), ("source", "somewhere")):
+            with self.subTest(key=key):
+                proc = self.run_cli(self.spec(**{key: value}), "--arch", "gfx942")
+                self.assertEqual(2, proc.returncode, f"{key} slipped through")
+                self.assertIn(key, proc.stderr)
+
+    def test_the_measured_ceiling_and_the_nameplate_disagree_enough_to_matter(self):
+        """The reason this mode exists, as a number rather than an argument.
+
+        Same measurements, two ceilings. The nameplate says every route has 2-6x left; the measured
+        footprint-matched card says the suite is already most of the way to what the box can do.
+        A planner told the first will keep spending slots on routes that are finished.
+        """
+        card = json.loads(self.run_cli(self.spec(), "--arch", "gfx942", "--json").stdout)
+        paper = json.loads(self.run_cli(
+            self.spec(peak_flops=1307e12, bandwidth_scalar=5.3e12), "--json").stdout)
+        self.assertGreater(card["weighted_achievement"], 2 * paper["weighted_achievement"],
+                           f"card {card['weighted_achievement']:.3f} vs nameplate "
+                           f"{paper['weighted_achievement']:.3f} -- if these ever converge, one of "
+                           "the two tables has been edited and the contrast this mode exists for "
+                           "is gone")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
