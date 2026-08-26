@@ -63,7 +63,11 @@ console.log('\n# the default is the historical behavior');
 const o = knobs({});
 ok(o.CANDIDATE_FLOOR === 1.0, 'CANDIDATE_FLOOR defaults to 1.0', o.CANDIDATE_FLOOR);
 ok(o.BUDGET === 6, 'BUDGET default 6 is untouched', o.BUDGET);
-ok(o.MAX_NO_IMPROVE === 2, 'MAX_NO_IMPROVE default 2 is untouched', o.MAX_NO_IMPROVE);
+// 2 -> 4 WITH the phase ladder, not independently of it. The old default was sized for a counter
+// whose only outcome was ending the wave; it now ends a PHASE, and two flat rounds is not evidence
+// that source-level search is finished.
+ok(o.MAX_NO_IMPROVE === 4, 'MAX_NO_IMPROVE defaults to 4, one phase\'s stall allowance',
+   o.MAX_NO_IMPROVE);
 ok(o.MIN_IMPROVE === 0.02, 'MIN_IMPROVE default 0.02 is untouched', o.MIN_IMPROVE);
 ok(o.DEEP_COST === 2, 'DEEP_COST default 2 is untouched', o.DEEP_COST);
 ok(o.PROGRESS_DELTA === o.MIN_IMPROVE,
@@ -145,7 +149,7 @@ ok(/const madeProgress = suiteProgress \|\| routeProgress;/.test(src),
 // never LANDED clear the counter every round while `cumulative` stood still -- and the next
 // round's winner then cleared the same unchanged threshold, so MAX_NO_IMPROVE could not fire
 // and the whole budget went into re-deriving one unbankable patch.
-ok(/if \(madeProgress \|\| committedThisRound\) \{ noImprove = 0; \} else \{ noImprove\+\+; \}/.test(src),
+ok(/if \(madeProgress \|\| committedThisRound\) \{ phaseStall = 0; \} else \{ phaseStall\+\+; \}/.test(src),
    'the stall counter resets on a COMMIT, not on an `improved` that may never have landed');
 ok(!/cumulative \* \(1 \+ CANDIDATE_FLOOR\)|CANDIDATE_FLOOR\)\s*;?\s*\/\/ commit/.test(src),
    'and the floor is nowhere near the commit decision');

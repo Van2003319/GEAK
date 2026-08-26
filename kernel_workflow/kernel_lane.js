@@ -539,7 +539,9 @@ const DRA_MAX_BLINDSPOTS = (() => {
 //   HARNESS_ADDENDUM path to an e2e-refined harness addendum (timing-weight / cudagraph-capture / hard
 //                    constraint gates). The IMMUTABLE oracle is NEVER touched; this only refines what the
 //                    perf bench emphasizes so the isolated target aligns with e2e.
-//   MAX_NO_IMPROVE   consecutive non-improving rounds before stopping (default 2 = current behavior).
+//   MAX_NO_IMPROVE   consecutive non-improving rounds a search PHASE gets before the ladder
+//                    escalates to the next one (default 4). Spending them in the last phase is what
+//                    ends the run.
 const STATE_DIR = String(A.state_dir || '').replace(/\/+$/, '');
 const SHARED_KB = String(A.shared_kb || '').trim();
 const GLOBAL_KB = String(A.global_kb || '').trim();   // run-global cross-KERNEL technique blackboard (deep)
@@ -553,7 +555,56 @@ const HARNESS_ADDENDUM = String(A.harness_addendum || '').trim();
 // Unset (default/fast / first deep burst) => spreading {} adds nothing => byte-identical prompts.
 const INCREMENTAL = !!STATE_DIR && String(A.incremental_analyze || '') === 'true';
 const RESUME_INPUT = INCREMENTAL ? { INCREMENTAL_RESUME: '1' } : {};
-const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 2, 10));
+// `max_no_improve` KEEPS ITS NAME AND CHANGES WHAT IT ENDS. It has always meant "consecutive
+// non-improving rounds before something happens"; what happens is now an ESCALATION rather than a
+// stop, and only the last phase's exhaustion ends the run. The default moves 2 -> 4 with it, because
+// 2 was chosen when the counter's only outcome was death: a lane that gets two flat rounds has not
+// established that source-level search is finished, and under the phase ladder that verdict now
+// costs the whole source phase rather than the whole wave.
+//
+// One knob, not two, on purpose. A separate `phase_escalate_after` alongside a surviving
+// `max_no_improve` would be two names for one quantity, and the failure mode of that is a caller
+// setting the one that no longer decides anything.
+const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 4, 10));
+
+// ---------------------------------------------------------------------------------------------
+// SEARCH PHASES
+//
+// The search runs as a one-way ratchet over three phases. Each phase gets `MAX_NO_IMPROVE`
+// consecutive non-improving rounds; spending them escalates to the next phase and resets the
+// counter. Spending them in the LAST phase ends the run.
+//
+//   phase1_source  L1 pattern triage + L2 profiling every round, L3 only when L2 or the TechLead
+//                  asks for it. Rewrites are proposed against SOURCE.
+//   phase2_asm     source analysis stops. L2 profiles, localises a KEYPOINT in the compiled
+//                  assembly, and the engineer edits that window of the `.s`.
+//   phase3_deep    every round dispatches `deep_explore`: broad authority, its own long
+//                  measure -> self-profile -> rewrite loop.
+//
+// One-way on purpose. A phase that could be re-entered on a single good round would oscillate
+// exactly where the search is weakest -- at a plateau, which is when a lucky round is most likely to
+// be noise and least likely to mean the earlier phase has more to give.
+//
+// The counter is scored by the SAME rule that used to end the wave (`madeProgress ||
+// committedThisRound`), so what counts as a stalled round is unchanged; only its consequence is new.
+const PHASE_SOURCE = 'phase1_source';
+const PHASE_ASM = 'phase2_asm';
+const PHASE_DEEP = 'phase3_deep';
+const PHASE_ORDER = [PHASE_SOURCE, PHASE_ASM, PHASE_DEEP];
+
+// phase2 has no implementation yet: the assembly round-trip and the keypoint localiser are not in
+// the tree. An escalation into a phase that cannot act would burn `MAX_NO_IMPROVE` rounds running
+// phase1's behaviour under phase2's name, which reads in the log as "the assembly phase found
+// nothing" when nothing was tried. Until that lands, the ladder SKIPS it and says so.
+const PHASE_IMPLEMENTED = { [PHASE_SOURCE]: true, [PHASE_ASM]: false, [PHASE_DEEP]: true };
+
+// The next phase that can actually act, or '' when the ladder is exhausted.
+const nextLivePhase = (from) => {
+  for (let i = PHASE_ORDER.indexOf(from) + 1; i < PHASE_ORDER.length; i++) {
+    if (PHASE_IMPLEMENTED[PHASE_ORDER[i]]) return PHASE_ORDER[i];
+  }
+  return '';
+};
 
 // Finding (87), one question further along. `hip_twin_sync.py` proves the file
 // that was EDITED is the file that was COMPILED. It cannot prove the MECHANISM
@@ -1227,7 +1278,13 @@ phase('Setup');
     `${key}=${value}${A[key] == null ? ' (default)' : ''}${extra ? ` ${extra}` : ''}`;
   log('Effective run configuration (the knobs that decide what this run ADMITS):');
   log(`  ${shown('budget', BUDGET)}  ${shown('deep_cost', DEEP_COST)}  ` +
-      `${shown('max_no_improve', MAX_NO_IMPROVE)}`);
+      `${shown('max_no_improve', MAX_NO_IMPROVE, '(per PHASE, then escalate; last phase ends the run)')}`);
+  // The ladder is the run's shape, so it is stated before the run rather than inferred from the
+  // escalation lines afterwards. Phases with no implementation are named as skipped HERE, so nobody
+  // waits for an assembly phase this build cannot enter.
+  log(`  search_phases=${PHASE_ORDER.map(p =>
+        `${p}${PHASE_IMPLEMENTED[p] ? '' : ' (SKIPPED: not implemented)'}`).join(' -> ')}` +
+      `  one-way, ${MAX_NO_IMPROVE} stalled round(s) each`);
   log(`  ${shown('min_improve', MIN_IMPROVE)}  ${shown('candidate_floor', CANDIDATE_FLOOR)}  ` +
       `${shown('progress_delta', PROGRESS_DELTA)}` +
       `${A.progress_delta == null ? ' (= min_improve)' : ''}`);
@@ -1592,7 +1649,17 @@ const cumulativeVsSeed = () => (vsSeedFrame === 'absolute'
   ? cumulative                       // `cumulative` already IS the vs-seed total
   : priorCumulativeVsSeed * cumulative);
 let bestSeen = 0;            // best verified geomean of any candidate, committed or not
-let noImprove = 0;
+// Consecutive non-improving rounds IN THE CURRENT PHASE. Reset on progress and on every phase
+// change, so each phase is judged on its own rounds rather than inheriting the stall that promoted
+// it -- a phase that started life already one round from its own exhaustion would get less search
+// than the one it replaced, which is backwards.
+let phaseStall = 0;
+let searchPhase = PHASE_SOURCE;
+// Why the run ended, set once. '' while running. Distinguishing these downstream matters: a ladder
+// that ran out of phases and a lane that ran out of budget look identical in a report that only
+// says "stopped".
+let stopReason = '';
+const phaseLog = [{ phase: PHASE_SOURCE, entered_round: 1, reason: 'start' }];
 // The ISA archive of the tree that is currently canonical, i.e. the parent every
 // candidate in the next round is a mutation of. Null until a committed winner
 // supplies one, and reset to null -- never left stale -- whenever the new canonical
@@ -1792,10 +1859,10 @@ const hasDominantHotKernel = (profile) => {
 //
 // L4 IS NOT REQUESTABLE HERE, and that is the fix rather than an omission. The
 // previous ladder could only reach `compiler` from a round whose prior depth was
-// already `isa`, which needed `noImprove >= 1` on the L3 round and then survival
-// into the next -- but a non-improving L3 round takes `noImprove` to 2 and
-// `MAX_NO_IMPROVE` defaults to 2, so the loop exits first. The L3 -> L4 chain was
-// unreachable under the default stop budget, and the only live path to L4 was
+// already `isa`, which needed one stalled round on the L3 round and then survival
+// into the next -- but back when the stall counter ended the WAVE at 2, a
+// non-improving L3 round took it to 2 and the loop exited first. The L3 -> L4 chain
+// was unreachable under the default stop budget, and the only live path to L4 was
 // `priorRefuted`, which SKIPPED L3 entirely. So the ladder's deepest rung was
 // reached exclusively by the route that gave it nothing to work with.
 //
@@ -2035,8 +2102,13 @@ const resolveVsSeedFrame = (perCase, prior) => {
   log(`vs-seed frame: ${vsSeedFrame.toUpperCase()} -- ${r.why}`);
 }
 
-while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+while (dispatched < BUDGET && !stopReason) {
   round++;
+  // Pinned at the TOP of the round. The ladder can escalate at the bottom of this same iteration,
+  // and a record written from the live variable afterwards would file the round that exhausted a
+  // phase under the phase that replaced it -- which is the one reading that would make the new
+  // phase look responsible for the stall that promoted it.
+  const roundPhase = searchPhase;
   // (127). Distinct from `improved` on purpose: `improved` is "the search found something better",
   // `committedThisRound` is "the canonical tree actually moved". They came apart twice in wave 2 and
   // the history said only the first.
@@ -2057,12 +2129,12 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // implementations of one verdict is one more than can be trusted. It is pinned by
   // an executable guard instead.
   //
-  // The trigger is deliberately EARLY. `MAX_NO_IMPROVE` defaults to 2, so a lane
-  // dies after two non-improving rounds; a three-round stagnation window would
-  // never fire before the lane was already over. So one non-improving round is
-  // enough to ask for a lowering trajectory on the next attempt -- the round that
-  // just failed to move is exactly the one whose mechanism is worth checking.
-  const ladderState = evidenceLadder(history.rounds, noImprove, LADDER_ENABLED, profileSummary);
+  // The trigger is deliberately EARLY: one non-improving round is enough to ask for a lowering
+  // trajectory on the next attempt, because the round that just failed to move is exactly the one
+  // whose mechanism is worth checking. It is read against the CURRENT PHASE's stall counter, so a
+  // phase change resets the ladder's trigger along with everything else -- the evidence a new phase
+  // needs is about that phase's own attempts.
+  const ladderState = evidenceLadder(history.rounds, phaseStall, LADDER_ENABLED, profileSummary);
   // Read once per round from the same profile the ladder consults, so the ISA
   // receipt and the escalation decision cannot disagree about which kernel is hot.
   const hotKernelNames = (profileSummary && Array.isArray(profileSummary.top_kernels)
@@ -2244,7 +2316,11 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
+    // This ends the RUN, not just the phase -- unchanged from before the ladder existed. Worth
+    // knowing it is a live question: a TechLead that stops in phase1 is saying source-level search
+    // is finished, which is the premise for entering phase2 rather than for going home.
+    stopReason = 'tech_lead_stop';
+    log(`Round ${round}: TechLead chose to stop in ${roundPhase}. ${plan ? plan.reasoning || '' : ''}`);
     break;
   }
 
@@ -2285,6 +2361,7 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   }
   directions = affordable;
   if (!directions.length) {
+    stopReason = 'budget_exhausted';
     log(`Round ${round}: no planned direction fits remaining budget ${remaining}.`);
     break;
   }
@@ -2937,12 +3014,39 @@ matter how the rest of the run looked.`,
   // so a winner that repeatedly fails to LAND (patch will not apply, hand-merge conflict, commit
   // agent dead or honestly reporting committed:false) reset this counter every round while
   // `cumulative` never moved -- and because the next round's winner then clears that same
-  // unchanged threshold, MAX_NO_IMPROVE could never fire and the lane spent its ENTIRE budget
+  // unchanged threshold, the stall counter could never fire and the lane spent its ENTIRE budget
   // re-deriving one patch it could not bank. That is (127)'s rule applied to the stall counter:
   // bookkeeping may only advance when the canonical tree demonstrably moved. It also restores
   // what the pre-knob loop did (`legacy()` in test_candidate_floor.js: "reset ONLY on a commit")
   // while keeping `madeProgress`, the knob that lets a sub-baseline climb keep its budget.
-  if (madeProgress || committedThisRound) { noImprove = 0; } else { noImprove++; }
+  if (madeProgress || committedThisRound) { phaseStall = 0; } else { phaseStall++; }
+
+  // --- the phase ladder: escalate, or end the run ---------------------------
+  // Spending a phase's stall allowance no longer ends the wave; it hands the search to a phase that
+  // works differently. Only the last phase's exhaustion is terminal, which is what makes "the source
+  // phase found nothing" a statement about source-level search rather than about the whole run.
+  if (phaseStall >= MAX_NO_IMPROVE) {
+    const next = nextLivePhase(searchPhase);
+    const upTo = next ? PHASE_ORDER.indexOf(next) : PHASE_ORDER.length;
+    const skipped = PHASE_ORDER.slice(PHASE_ORDER.indexOf(searchPhase) + 1, upTo);
+    if (next) {
+      log(`PHASE ${searchPhase} -> ${next}: ${phaseStall} consecutive non-improving round(s)` +
+          (skipped.length ? `; SKIPPED ${skipped.join(', ')} (no implementation in this build, so ` +
+            'entering it would spend the allowance running the previous phase under a new name)' : '') +
+          `. The stall counter resets; ${next} is judged on its own rounds.`);
+      phaseLog.push({
+        phase: next, entered_round: round + 1,
+        reason: `${phaseStall} non-improving round(s) in ${searchPhase}`,
+        ...(skipped.length ? { skipped } : {}),
+      });
+      searchPhase = next;
+      phaseStall = 0;
+    } else {
+      stopReason = 'phase_ladder_exhausted';
+      log(`STOP: ${phaseStall} consecutive non-improving round(s) in ${searchPhase}, which is the ` +
+          `last phase of the ladder. Budget used ${dispatched}/${BUDGET}.`);
+    }
+  }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
@@ -3039,13 +3143,21 @@ matter how the rest of the run looked.`,
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, committed: committedThisRound, cumulative, cumulative_vs_seed: cumulativeVsSeed(),
+    search_phase: roundPhase,
   });
   log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}` +
       `${improved && !committedThisRound ? ' (WINNER NOT COMMITTED -- canonical unchanged)' : ''}` +
       `, cumulative=${cumulative.toFixed(2)}x vs this wave's baseline` +
       `${priorCumulativeVsSeed !== 1.0 ? ` (${cumulativeVsSeed().toFixed(2)}x vs seed)` : ''}` +
-      `, noImprove=${noImprove}`);
+      `, phase=${roundPhase}, stall=${phaseStall}/${MAX_NO_IMPROVE}`);
 }
+// Falling out of the `while` with nothing set means the budget condition failed. Named here rather
+// than inferred by the reader: "the ladder ran out of phases" and "the caller's budget ran out" are
+// different verdicts about the search, and a report that says only "stopped" invites the wrong one.
+if (!stopReason) stopReason = 'budget_exhausted';
+log(`Search ended: ${stopReason}. Final phase ${searchPhase}; phases entered: ` +
+    phaseLog.map(p => `${p.phase}@r${p.entered_round}`).join(' -> ') +
+    `. Budget used ${dispatched}/${BUDGET} over ${round} round(s).`);
 
 // ===========================================================================
 // PHASE: Final report (TechLead)
@@ -3222,6 +3334,12 @@ return {
   rounds: report ? report.rounds : round,
   budget_used: dispatched,
   budget_total: BUDGET,
+  // How the search ended, and how far up the ladder it got. Without these a caller sees only that a
+  // run finished, and "source search was exhausted and assembly found nothing either" is a very
+  // different result from "the budget ran out in phase1" even when both report the same speedup.
+  stopped_by: stopReason,
+  final_phase: searchPhase,
+  phases_entered: phaseLog,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
 };

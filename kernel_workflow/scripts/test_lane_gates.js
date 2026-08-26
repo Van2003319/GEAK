@@ -649,8 +649,9 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
   }
 
   // Wiring (55): a gate whose result is computed and discarded is a comment.
-  ok(/const ladderState = evidenceLadder\(history\.rounds, noImprove, LADDER_ENABLED, profileSummary\);/.test(src),
-    'the round loop actually consults the ladder rather than deciding depth inline');
+  ok(/const ladderState = evidenceLadder\(history\.rounds, phaseStall, LADDER_ENABLED, profileSummary\);/.test(src),
+    'the round loop actually consults the ladder rather than deciding depth inline, and reads the '
+    + 'CURRENT PHASE\'s stall counter so a phase change resets the ladder trigger with everything else');
   ok(/if \(wantsCompilerEscalation\(irAttribution\)\) \{/.test(src)
      && src.indexOf('roleAgent(\'compiler_engineer\'') > src.indexOf('roleAgent(\'ir_engineer\''),
     'and L4 is dispatched from inside the L3 branch, after L3 returned -- not from the top of a '
@@ -968,7 +969,7 @@ console.log('\n# the commit rule is a CONJUNCTION with a catastrophic fence, exe
     'a round in which any route cleared its bar counts as progress, and only the fence can veto that');
   ok(/const madeProgress = suiteProgress \|\| routeProgress;/.test(src),
     'progress is the union of the two, so a route win cannot be scored as a stall');
-  ok(/if \(madeProgress \|\| committedThisRound\) \{ noImprove = 0; \} else \{ noImprove\+\+; \}/.test(src),
+  ok(/if \(madeProgress \|\| committedThisRound\) \{ phaseStall = 0; \} else \{ phaseStall\+\+; \}/.test(src),
     'the stall counter still also resets on a landed commit -- (127) unchanged');
   ok(/the search ADVANCED on route evidence/.test(src),
     'a round rescued from being scored a stall says which routes rescued it');
@@ -978,6 +979,65 @@ console.log('\n# the commit rule is a CONJUNCTION with a catastrophic fence, exe
   ok(!/routeProgress = .*suiteRatio/.test(src),
     'progress does not require the suite to have followed -- a route that moved is evidence the ' +
     'search found something, and a stopping rule errs toward continuing');
+}
+
+console.log('\n# the search-phase ladder is a ONE-WAY ratchet that skips phases it cannot run, executed');
+{
+  // Spending a phase's stall allowance escalates instead of ending the wave, and only the last
+  // phase's exhaustion is terminal. The risk this section exists for is the intermediate state: a
+  // phase declared but not implemented would silently spend `MAX_NO_IMPROVE` rounds running the
+  // PREVIOUS phase's behaviour under the new phase's name, and the log would read as "the assembly
+  // phase found nothing" when no assembly was ever edited.
+  const ladderBlock = grab(
+    /const PHASE_SOURCE = [\s\S]*?const nextLivePhase = \(from\) => \{[\s\S]*?\n\};\n/, 'the phase ladder');
+  const L = new Function(`${ladderBlock}
+    return { PHASE_SOURCE, PHASE_ASM, PHASE_DEEP, PHASE_ORDER, PHASE_IMPLEMENTED, nextLivePhase };`)();
+
+  ok(L.PHASE_ORDER.length === 3 && L.PHASE_ORDER[0] === L.PHASE_SOURCE
+     && L.PHASE_ORDER[1] === L.PHASE_ASM && L.PHASE_ORDER[2] === L.PHASE_DEEP,
+    'the ladder is source -> asm -> deep, in that order', L.PHASE_ORDER.join(' -> '));
+
+  // One-way: every step goes strictly forward, and the last one goes nowhere.
+  {
+    const seen = [];
+    let p = L.PHASE_SOURCE;
+    while (p) { seen.push(p); p = L.nextLivePhase(p); }
+    const idx = seen.map(x => L.PHASE_ORDER.indexOf(x));
+    ok(idx.every((v, i) => i === 0 || v > idx[i - 1]),
+      'walking the ladder only ever moves forward -- a phase that could be re-entered would ' +
+      'oscillate exactly at a plateau, where a lucky round is most likely to be noise',
+      seen.join(' -> '));
+    ok(L.nextLivePhase(seen[seen.length - 1]) === '',
+      'and the last live phase returns no successor, which is what makes its exhaustion terminal');
+  }
+
+  // An unimplemented phase is SKIPPED rather than entered. This is asserted against whatever the
+  // lane currently declares, so it keeps holding as stage 3 flips phase2 on.
+  for (const p of L.PHASE_ORDER) {
+    if (L.PHASE_IMPLEMENTED[p]) continue;
+    const reachable = L.PHASE_ORDER.some(from => L.nextLivePhase(from) === p);
+    ok(!reachable, `${p} is declared but not implemented, so nothing escalates INTO it -- entering ` +
+      'it would spend the allowance running the previous phase under a new name');
+  }
+  ok(L.PHASE_IMPLEMENTED[L.PHASE_SOURCE] === true,
+    'the source phase is always live: it is where every run starts');
+
+  // Wiring, lexically. The executed part above proves the transition table; these prove the loop
+  // actually turns on it rather than computing it and carrying on.
+  ok(/while \(dispatched < BUDGET && !stopReason\) \{/.test(src),
+    'the loop is bounded by budget and an explicit stop reason, not by the stall counter -- a ' +
+    'counter that still ended the wave would make every phase after the first unreachable');
+  ok(/if \(phaseStall >= MAX_NO_IMPROVE\) \{/.test(src)
+     && /searchPhase = next;\s*\n\s*phaseStall = 0;/.test(src),
+    'exhausting the allowance escalates and RESETS the counter, so a new phase is judged on its ' +
+    'own rounds instead of inheriting the stall that promoted it');
+  ok(/stopReason = 'phase_ladder_exhausted';/.test(src),
+    'and running out of phases is what ends the run, under a name a report can distinguish from ' +
+    'a budget that ran out');
+  ok(/const roundPhase = searchPhase;/.test(src)
+     && /search_phase: roundPhase,/.test(src),
+    'the round records the phase it RAN in, pinned before the bottom-of-loop escalation can move ' +
+    'it -- otherwise the round that exhausted a phase is filed under the phase that replaced it');
 }
 
 console.log('\n# SELECTION is the best candidate that PASSES, not the best candidate, executed');
