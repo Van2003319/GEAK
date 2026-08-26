@@ -236,3 +236,25 @@ exp/
 *_hip.hip.orig_*
 # bench_e2e.sh default output dir (OUT_DIR=$(pwd)/e2e_bench_out) — runtime measurements
 e2e_bench_out/
+
+# Hand-made backups taken before a risky edit. These keep getting committed: the tree has carried
+# kernel_lane.js.bak_before_epochU/V/W/X, .bak_before_hostguard, .bak_before_route_gate_20260818,
+# two closed_mechanisms.py.bak_before_roundNN, tech_lead.md.bak_before_round15, gpu_lock.sh
+# .bak_before_frameguard and harness_lib.py.prepin_bak at one time or another.
+#
+# Committing one is worse than losing it. git already holds every prior version, so the backup adds
+# nothing recoverable -- what it adds is a SECOND copy of a live file for an edit to land in, which
+# is the same failure the hipify-twin rule above exists for, and a stale duplicate that greps and
+# `roles/*.md` script scans both pick up.
+#
+# The `.orig_*` rule above was written as `*_hip.hip.orig_*` and therefore missed
+# `custom_gemm.hip.orig_gfx90a_bug`, which sat in the tree tracked. These patterns are deliberately
+# not anchored to a file type.
+*.bak
+*.bak_*
+*_bak
+*_bak_*
+*.orig
+*.orig_*
+*.prepin_bak
+*.rej
