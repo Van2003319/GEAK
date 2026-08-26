@@ -186,22 +186,6 @@ class BandsFromSamplesTest(unittest.TestCase):
         self.assertEqual(d.improved, [ROUTES[0]])
 
 
-class ConstantsTest(unittest.TestCase):
-    def test_the_floor_constants_match_measure_noise_floor(self):
-        """route_gate mirrors these instead of importing them (measure_noise_floor
-        drags in the machine/epoch tables). Mirroring is only safe while something
-        asserts the copies agree."""
-        import importlib.util
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "measure_noise_floor.py")
-        spec = importlib.util.spec_from_file_location("_mnf", path)
-        mnf = importlib.util.module_from_spec(spec)
-        sys.modules["_mnf"] = mnf
-        spec.loader.exec_module(mnf)
-        self.assertEqual(rg.MIN_BAND, mnf.MIN_FLOOR)
-        self.assertEqual(rg.MIN_REPEATS, mnf.MIN_REPEATS)
-
-
 class DecisionTest(unittest.TestCase):
     def test_all_flat_is_refused(self):
         d = rg.decide(candidate_per_case=rows(flat()), incumbent_per_case=rows(flat()),

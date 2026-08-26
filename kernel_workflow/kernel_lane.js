@@ -187,16 +187,16 @@ const PROGRESS_DELTA = (() => {
 // and 2.9x too LOOSE on prefill_m256_down. Wrong in both directions at once is exactly what a floor
 // must not be.
 //
-// The stale-table problem that ruled out the measured tables is also gone: `register_epoch.py` +
-// `measure_noise_floor.py` + `deprovisionalize_epoch.py` now run on every machine change, so
-// `noise_floor_stats.MEASURED_NOISE_FLOOR` describes the box the candidates are being judged on, 8
-// same-variant primed repeats, 2*MAD/median. That is the table to pass here. This script cannot
-// read files, so the caller passes it inline -- see `scripts/route_floors.py`.
+// There is no producer for this table in the tree any more. The per-machine sweep that used to fill
+// it is deleted: it keyed floors to hand-registered machine letters and hardcoded its route
+// vocabulary to a single task, so for every other operator it could only refuse -- and it refused at
+// launch, before the wave started. What is left is the ARGUMENT: a caller that has measured floors
+// for its own routes may still pass them inline (this script cannot read files), and absent one,
+// every route is held to MIN_ROUTE_WIN.
 //
-// The spread is why a single number is not enough on its own: on epoch Z (tw035) three of eleven
-// routes measured WIDER than MIN_ROUTE_WIN -- decode_m8_up 7.64%, prefill_m256_down 7.02%,
-// prefill_m1024_down 2.10% -- so a flat 2% bar would have read noise as a mechanism on three
-// routes. On epochs Y and A every floor is under 1.3%, and the table changes nothing.
+// A table, when supplied, can only TIGHTEN the gate. That matters because route noise is not
+// uniform: on a suite where some routes measure wider than MIN_ROUTE_WIN, a flat bar reads their
+// movement as a mechanism when it is noise. On a quiet suite the table changes nothing.
 const ROUTE_BANDS_ARG = (() => {
   const raw = A.route_bands;
   if (raw == null) return null;
@@ -209,8 +209,8 @@ const ROUTE_BANDS_ARG = (() => {
       obj = JSON.parse(raw);
     } catch (e) {
       throw new Error(`args.route_bands was a string that is not JSON ("${raw.slice(0, 80)}"). ` +
-        'This script cannot read files; pass the table inline as an object, or paste the contents ' +
-        `of scripts/route_bands_<arch>_<epoch>.json. (${e.message})`);
+        'This script cannot read files; pass the table inline as an object of {route: floor}. ' +
+        `(${e.message})`);
     }
   }
   if (obj && typeof obj === 'object' && obj.bands && typeof obj.bands === 'object') obj = obj.bands;
@@ -351,10 +351,10 @@ const routeGate = (candPerCase, incPerCase, bands, opts) => {
 // landed in the sample, so it was not measuring the route, it was measuring the draw. It cost this
 // lane a real refusal: wave 1 round 2 vetoed on decode_m2_square's 1.31% band.
 //
-// What replaced it is not a better estimator here but a table measured properly somewhere else:
-// `measure_noise_floor.py` takes 8 same-variant primed repeats and reports 2*MAD/median per route,
-// and since epoch registration was automated it is re-measured on every machine change. Passed in
-// via `args.route_bands`; absent, every route is held to MIN_ROUTE_WIN.
+// Nothing replaced it in-lane, and that is deliberate: a floor is a property of the box and the
+// route, and this script has no honest way to measure one from a handful of baseline samples. A
+// caller that has measured floors properly may pass them via `args.route_bands`; absent one, every
+// route is held to MIN_ROUTE_WIN.
 
 // Budget cost of ONE `deep_explore` direction. The deep-explore engineer does far more than a single
 // specialist — broad rewrite authority, its own multi-iteration measure→profile→rewrite loop — so it
@@ -1244,7 +1244,7 @@ phase('Setup');
       + `max(${(MIN_ROUTE_WIN * 100).toFixed(2)}%, its own floor)`
     : `not supplied -- every route is held to the ${(MIN_ROUTE_WIN * 100).toFixed(2)}% default. `
       + 'On a box where a route measures noisier than that, its movement will read as a mechanism '
-      + 'when it is noise; pass scripts/route_floors.py output to fix that'}`);
+      + 'when it is noise; pass a measured {route: floor} table inline to fix that'}`);
   log(`  state_dir=${STATE_DIR || '(none -- this is a COLD start, not a continuation)'}`);
   log(`  workload_aligned=${HAS_WORKLOAD ? 'yes (PRIMARY metric is the time-weighted ratio-of-sums)'
     : 'no (PRIMARY metric is the unweighted geomean)'}`);
@@ -1458,9 +1458,9 @@ const ROUTE_BANDS = ROUTE_BANDS_ARG;
           (raised.length
             ? `${raised.length}: ${raised.map(r => `${r} ${(bar(r) * 100).toFixed(2)}%`).join(', ')}.`
             : 'none of this suite\'s routes (every measured floor is below the default).')
-        : 'No floor table supplied, so every route is held to the default. Pass one from ' +
-          'scripts/route_floors.py -- on a box where a route measures noisier than the default, ' +
-          'that route\'s movement is being read as a mechanism when it is noise.'));
+        : 'No floor table supplied, so every route is held to the default. On a box where a route ' +
+          'measures noisier than the default, that route\'s movement is being read as a mechanism ' +
+          'when it is noise; pass a measured {route: floor} table inline via args.route_bands.'));
 }
 
 // ===========================================================================

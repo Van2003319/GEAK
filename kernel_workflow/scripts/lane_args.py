@@ -77,19 +77,19 @@ def known_args(source: Path) -> set[str]:
     return set(re.findall(r"'([a-z_][a-z0-9_]*)'", m.group(1)))
 
 
-# A value that must be RESOLVED at launch rather than written down, because what it names changes
-# faster than the file does.
+# Values a lane file may name with an `@token` for this module to fill in at launch, instead of
+# writing the value down where it would go stale.
 #
-# `route_bands` is the only one so far and it is the reason this exists: the per-route floors are a
-# property of the box, this container changes box every few hours, and the one floor table ever
-# committed to disk went six epochs stale while still looking like a current measurement. Writing
-# today's numbers into a lane file would reproduce that exactly -- correct on the day, silently
-# describing another machine by the next restore.
+# EMPTY. The only resolver that ever existed was `route_bands: "@current_epoch"`, which fetched a
+# per-machine measured noise-floor table. That apparatus keyed its floors to hand-registered machine
+# letters and hardcoded the route vocabulary to a single task, so for every other operator it could
+# only raise -- and because resolution also ran in `--check`, the refusal landed before the wave
+# started. A launch precondition that only one operator can satisfy is an outage, not a safety gate.
+# The per-route bar is now `MIN_ROUTE_WIN` for every route, judged in `kernel_lane.js` against an
+# incumbent re-run in the candidate's own session.
 #
-# Resolution happens in `--check` too, so an epoch whose floors were never measured is a refusal
-# BEFORE the wave starts rather than a table of fail-closed defaults that quietly holds every route
-# to ~7% for the whole run.
-RESOLVERS: dict[str, str] = {"route_bands": "@current_epoch"}
+# The dict stays so a future resolver has somewhere to go and `--check` keeps its shape for callers.
+RESOLVERS: dict[str, str] = {}
 
 
 def _resolve_directives(args: dict) -> dict:
@@ -97,17 +97,17 @@ def _resolve_directives(args: dict) -> dict:
     for key, token in RESOLVERS.items():
         if out.get(key) != token:
             continue
-        if key != "route_bands":
-            raise LaneArgsError(f"no resolver implemented for {key!r}")
-        try:
-            import route_floors
-        except ImportError as exc:                       # pragma: no cover - import guard
-            raise LaneArgsError(f"cannot import route_floors to resolve {token}: {exc}") from exc
-        try:
-            out[key] = route_floors.resolve()
-        except route_floors.FloorsUnavailable as exc:
-            raise LaneArgsError(
-                f"{key!r} is {token!r} but this epoch cannot supply a measured table: {exc}") from exc
+        raise LaneArgsError(f"no resolver implemented for {key!r}")
+    # An `@token` no resolver claims is DROPPED rather than passed through. Lane files and the code
+    # that reads them are versioned separately, so a lane file naming a directive this build no
+    # longer implements is reachable. Passed through, the literal string reaches the argument's
+    # consumer -- `route_bands` lands in a `JSON.parse` that throws -- and a stale key becomes a dead
+    # lane instead of an ignored one.
+    for key, value in list(out.items()):
+        if isinstance(value, str) and value.startswith("@"):
+            print(f"note: dropping unresolved directive {key}={value!r} "
+                  f"(no resolver claims it; see RESOLVERS)", file=sys.stderr)
+            del out[key]
     return out
 
 

@@ -49,7 +49,7 @@ cannot kill, and the sweep's own numbers do not say so (54).
 
 Usage:
   python3 kernel_workflow/scripts/mutate_python.py                # every module
-  python3 kernel_workflow/scripts/mutate_python.py noise_floor_stats
+  python3 kernel_workflow/scripts/mutate_python.py sol_card
   python3 kernel_workflow/scripts/mutate_python.py --limit 40     # cap per module
 """
 from __future__ import annotations
@@ -70,7 +70,6 @@ MIRROR = SCRATCH / "kernel_workflow"
 # propagate into a measurement. Excluded on purpose: `run_js_tests.py` and
 # `audit_pin_coverage.py`, tooling that reports rather than decides.
 MODULES = [
-    "noise_floor_stats",
     "sol_card",
     "source_hash",
     "hip_twin_sync",
@@ -363,7 +362,7 @@ USAGE = """mutate_python.py -- mutation sweep over the Python helpers.
   mutate_python.py                     every module in MODULES (a LONG sweep:
                                        it runs each module's test file once per
                                        mutant, hundreds of pytest invocations)
-  mutate_python.py noise_floor_stats     one module
+  mutate_python.py sol_card            one module
   mutate_python.py --limit 40          cap mutants per module
 
 This is not a test and its score is not gated; see the module docstring.

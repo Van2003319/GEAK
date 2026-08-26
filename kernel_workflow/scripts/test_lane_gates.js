@@ -768,17 +768,16 @@ console.log('\n# the commit gate needs no band file, and a measured table only T
       'deliberate cost of a fixed 2%, and it is the reason a measured table may only RAISE it',
       v.reason);
   }
-  // A measured floor WIDER than the default raises that route's bar. This is the epoch Z case:
-  // decode_m8_up measured 7.64%, so a 3% move there is noise being read as a mechanism.
+  // A measured floor WIDER than the default raises that route's bar: a route that really does swing
+  // 7.64% run-to-run makes a 3% move noise being read as a mechanism.
   {
     const v = routeGate(cand(0.097), inc, { a: 0.0764 });
     ok(v.applicable && !v.accepted && /its measured floor/.test(v.reason),
       'a measured floor wider than the default raises that route\'s bar, so a 3% move on a route ' +
       'measured at 7.64% is not a mechanism', v.reason);
   }
-  // A measured floor NARROWER than the default changes nothing. Every floor on epochs Y, A and B is
-  // in this range, so on a quiet box the table is inert and 2% governs -- which is what makes the
-  // operator's number the rule and the table the exception.
+  // A measured floor NARROWER than the default changes nothing: on a quiet box the table is inert
+  // and 2% governs, which is what makes the operator's number the rule and the table the exception.
   {
     const v = routeGate(cand(0.097), inc, { a: 0.002, b: 0.002 });
     ok(v.applicable && v.accepted,
@@ -802,8 +801,11 @@ console.log('\n# the commit gate needs no band file, and a measured table only T
     'the effective table is the supplied one, with no in-lane derivation behind it');
   ok(!/bandsFromSamples/.test(src),
     'the n=5 derivation is deleted, not left dormant -- a dormant estimator is one someone re-enables');
-  ok(/scripts\/route_floors\.py/.test(src),
-    'the log names where a real table comes from; the previous supply failure was nobody knowing');
+  ok(/pass a measured \{route: floor\} table inline/.test(src),
+    'the log says how a real table gets supplied; the original supply failure was nobody knowing');
+  ok(!/route_floors|noise_floor_stats|measure_noise_floor|register_epoch/.test(src),
+    'no reference survives to the deleted per-machine floor producers -- a log naming a script that ' +
+    'is not in the tree sends the next reader looking for it');
   ok(/Commit gate: suite geomean must improve at all AND/.test(src),
     'the rule in force is stated in the log at Setup, so the run says what it will accept');
   // The effective-config echo is the OTHER place the rule is described, and it was missed when the

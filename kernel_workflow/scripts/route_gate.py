@@ -44,10 +44,9 @@ from typing import Mapping, Sequence
 
 SCHEMA = "geak.route-gate/v1"
 
-# Both mirrored from measure_noise_floor.py rather than imported, because that
-# module pulls in the machine/epoch tables and this one must stay usable with
-# nothing but a per_case list. `test_route_gate.py` asserts the two agree, so the
-# duplication cannot drift silently.
+# Owned here. These used to be mirrored from a per-machine noise-floor sweep, with a test asserting
+# the two copies agreed; that sweep and its machine/epoch tables are gone, so this module is now the
+# single definition and there is no copy left to drift from.
 #
 # MIN_REPEATS: two samples cannot distinguish a spread from a pair.
 # MIN_BAND: "the tightest floor ever measured anywhere in this ledger is 0.005;

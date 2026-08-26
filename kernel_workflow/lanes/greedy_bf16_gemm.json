@@ -12,7 +12,7 @@
   "_note_state_dir": "Its presence is what makes a wave a CONTINUATION. Launching without it is a cold reseed from the original kernel, which is the failure the user's standing 'do not start over' instruction guards against and which the lane's own resume guard caught once (see the .discarded_seeded_from_orig_ directory under exp/).",
   "_note_gpu_ids": "Lanes 0 and 1 are excluded on purpose: this box shares GPUs with other tenants and gpu_lock.sh resolves a comma spec by flocking whichever listed lane is free AND idle.",
   "_not_passed_on_purpose": {
-    "route_bands": "Omitted so the lane DERIVES per-route bands from this wave's own baseline repeats, on the box that will judge the candidates. Passing a table here would pin the gate to another epoch's noise -- which is how the one file on disk (route_bands_gfx942_epochQ.json) went six epochs stale.",
+    "route_bands": "Omitted. Every route is held to MIN_ROUTE_WIN (2%), judged against an incumbent re-run in the candidate's own session. There is no per-machine floor table to pass any more, and no in-lane derivation behind it either.",
     "isa_evidence": "Omitted = 'observe', the default. Do not set 'gate' until the new-symbol pairing artefact is fixed: a patch that ADDS a kernel symbol reads as mechanism_verdict=refuted by construction, and adding a specialised instantiation is this lane's most common winning shape.",
     "search_strategy": "REMOVED. It matched nothing after the QD search was deleted and now throws. Greedy is the only strategy."
   },

@@ -7,18 +7,18 @@ has no such home, so it goes unchecked in all eight at once -- which is a
 different and worse failure than an untested function, because the eight look
 individually well covered.
 
-The one checked here came out of the mutation sweep. `noise_floor_stats.py`
-survived `sort_keys=True -> False`: its CLI test re-ran one input twice and
-compared, which passes whether or not the output is canonical, since CPython
+The one checked here came out of the mutation sweep, where a module survived
+`sort_keys=True -> False` because its CLI test re-ran one input twice and
+compared -- which passes whether or not the output is canonical, since CPython
 dicts are deterministic in insertion order too. Fixing that module alone would
 have been (57) again -- pinning the instance that bit rather than the invariant.
-These receipts are meant to be diffed against each other and digested, and four
-of the six emitters had nothing checking they still were.
+These receipts are meant to be diffed against each other and digested, and most
+of the emitters had nothing checking they still were.
 
 This is a source-level check, and weaker than driving each CLI: it catches a
-`sort_keys` that was dropped, not a writer that bypasses `json` entirely. Two of
-the six (`noise_floor_stats`, `candidate_policy_scan`) also have behavioural
-coverage in their own files.
+`sort_keys` that was dropped, not a writer that bypasses `json` entirely. Some
+emitters (`candidate_policy_scan` among them) also have behavioural coverage in
+their own files.
 """
 from __future__ import annotations
 
