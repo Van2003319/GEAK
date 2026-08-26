@@ -22,6 +22,7 @@ Two things are pinned deliberately rather than incidentally:
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -785,6 +786,176 @@ class CliTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertIs(payload["mechanism_realized"], True)
         self.assertEqual(payload["schema"], S.SCHEMA_DIFF)
+
+
+# ---------------------------------------------------------------------------
+# keypoint
+# ---------------------------------------------------------------------------
+
+# Two sites in one kernel, on purpose, and they are the two the ranking has to be able to tell
+# apart: a matrix op issued straight out of a full drain (a COMPUTE shape) and a run of accesses
+# narrower than the widest this kernel already performs (a MEMORY shape). If the profiler's class
+# does not change which comes back first, it is not being used.
+KEYPOINT_ASM = """\
+\t.text
+\t.globl\tmixed_kernel
+\t.type\tmixed_kernel,@function
+mixed_kernel:
+\tglobal_load_dwordx4 v[0:3], v[20:21], off
+\ts_waitcnt vmcnt(0)
+\tv_mfma_f32_16x16x16_bf16 a[0:3], v[0:1], v[2:3], a[0:3]
+\tv_mfma_f32_16x16x16_bf16 a[4:7], v[0:1], v[2:3], a[4:7]
+\tv_add_f32_e32 v10, v0, v1
+\tv_add_f32_e32 v11, v2, v3
+\tv_add_f32_e32 v12, v10, v11
+\tv_add_f32_e32 v13, v12, v12
+\tglobal_load_dword v4, v[20:21], off
+\tglobal_load_dword v5, v[22:23], off
+\tglobal_load_dword v6, v[24:25], off
+\tds_read_b32 v7, v26
+\tds_read_b32 v8, v27
+\tglobal_store_dword v[20:21], v13, off
+\tv_add_f32_e32 v14, v4, v5
+\tv_add_f32_e32 v15, v6, v7
+\ts_cbranch_execz .LBB0_2
+.LBB0_1:
+\tv_add_f32_e32 v16, v14, v15
+.LBB0_2:
+\ts_endpgm
+"""
+
+
+def keypoint_archive(root: Path, text: str = KEYPOINT_ASM) -> Path:
+    """A `.s` on disk, which `read_archive` accepts alongside a `.disasm.txt`."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "kernel.s").write_text(text, encoding="utf-8")
+    return root
+
+
+class RegisterParsingTest(unittest.TestCase):
+    def test_ranges_are_expanded(self):
+        self.assertEqual({"v0", "v1", "v2", "v3"}, S.registers("\tv_mov_b64 v[0:3], 0"))
+
+    def test_scalars_accumulators_and_specials_are_all_named(self):
+        regs = S.registers("\tv_cmp_gt_i32_e32 vcc, s4, v0")
+        self.assertEqual({"vcc", "s4", "v0"}, regs)
+        self.assertIn("a3", S.registers("\tv_accvgpr_read_b32 v6, a3"))
+
+    def test_the_first_operand_is_the_def_for_an_arithmetic_op(self):
+        defs, uses = S.def_use("\tv_add_f32_e32 v14, v4, v5")
+        self.assertEqual({"v14"}, defs)
+        self.assertEqual({"v4", "v5"}, uses)
+
+    def test_a_store_defines_nothing(self):
+        defs, uses = S.def_use("\tglobal_store_dword v[20:21], v13, off")
+        self.assertEqual(set(), defs, "a store writes memory, not a register; calling its first "
+                                      "operand a def would make the address look freshly written")
+        self.assertIn("v13", uses)
+
+    def test_a_wait_defines_nothing(self):
+        defs, _ = S.def_use("\ts_waitcnt vmcnt(0)")
+        self.assertEqual(set(), defs)
+
+
+class BasicBlockTest(unittest.TestCase):
+    def test_a_branch_ends_a_block_and_a_label_starts_one(self):
+        lines = KEYPOINT_ASM.splitlines()
+        span = S.kernel_spans(lines)
+        self.assertTrue(span, "the fixture must contain one kernel body")
+        _name, start, end = span[0]
+        blocks = S.basic_blocks(lines, start, end)
+        self.assertGreaterEqual(len(blocks), 2,
+                                "a kernel with a conditional branch is more than one block")
+        for _label, lo, hi in blocks:
+            self.assertLess(lo, hi, "an empty block would produce an empty window")
+
+
+class KeypointTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="kp_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.archive = keypoint_archive(self.tmp / "isa")
+
+    def kp(self, bottleneck, top=3, window=6):
+        return S.build_keypoints(self.archive, bottleneck, top, window, [])
+
+    def test_the_profilers_class_changes_which_site_ranks_first(self):
+        """The whole reason the profiler's verdict is an input.
+
+        Same kernel, same windows, same evidence -- only the weighting differs. If both classes
+        returned the same order, the bottleneck would be decoration and the engineer would be sent
+        to the same place regardless of what was measured.
+        """
+        compute = self.kp("compute")["keypoints"]
+        memory = self.kp("memory")["keypoints"]
+        self.assertTrue(compute and memory)
+        self.assertGreater(compute[0]["evidence"]["mfma_starved"], 0,
+                           "a compute bottleneck must rank the starved matrix op first")
+        self.assertGreater(memory[0]["evidence"]["narrow"], 0,
+                           "a memory bottleneck must rank the narrow accesses first")
+        self.assertNotEqual(compute[0]["window_lines"], memory[0]["window_lines"])
+
+    def test_an_unknown_class_falls_back_to_flat_weights_rather_than_guessing(self):
+        payload = self.kp("something_nobody_defined")
+        self.assertEqual("default", payload["weights_used"])
+        self.assertTrue(payload["keypoints"])
+
+    def test_a_keypoint_carries_the_context_needed_to_read_it(self):
+        k = self.kp("compute")["keypoints"][0]
+        lo, hi = k["window_lines"]
+        clo, chi = k["context_lines"]
+        self.assertLessEqual(clo, lo, "context must reach back to what the window reads")
+        self.assertGreaterEqual(chi, hi, "and forward to who consumes what it writes")
+        self.assertTrue(k["fingerprint"], "a window with no opcodes cannot be relocated after an edit")
+        self.assertIn("mixed_kernel", k["kernel"])
+
+    def test_it_is_anchored_by_ordinal_and_fingerprint_not_only_by_line(self):
+        """The first edit moves every line below it. A keypoint findable only by line number would
+        be unusable on the second round of the same phase."""
+        k = self.kp("compute")["keypoints"][0]
+        self.assertIn("ordinal_in_block", k)
+        self.assertIsInstance(k["ordinal_in_block"], int)
+        self.assertIn("block", k)
+
+    def test_noise_windows_are_dropped_rather_than_padding_the_answer(self):
+        payload = self.kp("compute", top=50)
+        self.assertGreater(payload["windows_scored"], payload["keypoint_count"])
+        for k in payload["keypoints"]:
+            self.assertGreaterEqual(k["score"], payload["score_floor"])
+
+    def test_returned_windows_do_not_overlap(self):
+        kps = self.kp("compute", top=50)["keypoints"]
+        for i, a in enumerate(kps):
+            for b in kps[i + 1:]:
+                if a["kernel"] != b["kernel"]:
+                    continue
+                self.assertTrue(a["window_lines"][1] < b["window_lines"][0]
+                                or a["window_lines"][0] > b["window_lines"][1],
+                                f"{a['window_lines']} overlaps {b['window_lines']}: one site "
+                                "reported twice spends two of the engineer's slots on it")
+
+    def test_the_kernel_filter_restricts_to_what_l2_named(self):
+        self.assertTrue(S.build_keypoints(self.archive, "compute", 3, 6, ["mixed"])["keypoints"])
+        empty = S.build_keypoints(self.archive, "compute", 3, 6, ["no_such_kernel"])
+        self.assertEqual(EXIT := S.EXIT_HOLE, empty["exit_code"])
+        self.assertEqual([], empty["keypoints"])
+
+    def test_an_unreadable_archive_is_a_hole_not_a_traceback(self):
+        payload = S.build_keypoints(self.tmp / "absent", "compute", 3, 6, [])
+        self.assertEqual(S.EXIT_HOLE, payload["exit_code"])
+        self.assertTrue(any("unreadable" in u for u in payload["unavailable"]))
+
+    def test_an_archive_with_no_assembly_is_a_hole(self):
+        empty = keypoint_archive(self.tmp / "empty", "\n\n")
+        payload = S.build_keypoints(empty, "compute", 3, 6, [])
+        self.assertEqual(S.EXIT_HOLE, payload["exit_code"])
+
+    def test_the_payload_says_what_it_is_and_is_not(self):
+        payload = self.kp("memory")
+        self.assertEqual(S.SCHEMA_KEYPOINT, payload["schema"])
+        self.assertIn("NOT hardware counters", payload["basis"],
+                      "a static proxy presented as a measurement is the one claim this must not "
+                      "make: the round's own A/B is what settles it")
 
 
 if __name__ == "__main__":

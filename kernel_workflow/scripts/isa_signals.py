@@ -1083,6 +1083,296 @@ def build_descriptors(signals: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# keypoint -- WHERE in the assembly an edit is most likely to pay
+# ---------------------------------------------------------------------------
+#
+# phase2 hands an engineer a `.s` and asks it to make the kernel faster. A whole kernel is the wrong
+# unit for that: it is too much context to reason about and too much surface to change, and an agent
+# given all of it edits everywhere and explains nothing. AsmEvo (arXiv 2608.20711) calls the fix a
+# hot window -- "select a hot window together with the surrounding data dependencies", so the search
+# context shrinks and unrelated modifications are discouraged without weakening the whole-kernel
+# acceptance gate. This is that, under the name the operator uses: a KEYPOINT.
+#
+# WHAT IS AND IS NOT CLAIMED. These are STATIC stall proxies read off the instruction stream. They
+# are not hardware counters and not instruction sampling, so a keypoint is a hypothesis about where
+# time goes, not a measurement of it. The profiler's bottleneck class is folded in as a WEIGHT rather
+# than a filter for exactly that reason -- it is the only measured input available here, and letting
+# it veto windows would turn one coarse label into a hard mask over evidence it cannot see.
+#
+# Windows are bounded by BASIC BLOCKS. An edit that spans a branch is not local, and splicing one
+# back is where a reassembly stops being a local change; the window is the unit the engineer is asked
+# to keep its edit inside, so the unit has to be one the assembler agrees is contiguous.
+
+SCHEMA_KEYPOINT = "geak.isa-keypoint/v1"
+
+# Block boundaries. `_LABEL_RE` deliberately skips these when finding KERNEL entries, so they are
+# matched separately here: within a kernel they are exactly the divisions we want.
+_BLOCK_LABEL_RE = re.compile(r"^\s*(\.LBB[\w.$]*|\.Lfunc[\w.$]*|; %bb\.\d+|\.L[\w.$]+):?\s*(?:;.*)?$")
+_BLOCK_END_RE = re.compile(r"^s_(cbranch|branch|setpc|endpgm)")
+
+# Register operands. Covers `v0`, `v[0:3]`, `s[8:11]`, `a[0:15]` and the named specials. An AMDGCN
+# operand list carries no def/use marker, so the FIRST operand is treated as the def for everything
+# that is not a store, a branch or a wait -- which is the convention the ISA follows and is wrong
+# for a handful of opcodes. That approximation is stated rather than hidden: the dependency context
+# below is an aid to reading the window, and it is never used to decide whether an edit is legal.
+_REG_RE = re.compile(r"\b([vsa])\[(\d+):(\d+)\]|\b([vsa])(\d+)\b|\b(vcc|exec|m0|scc)\b")
+_NO_DEF_RE = re.compile(r"^(s_waitcnt|s_wait_|s_barrier|s_nop|s_branch|s_cbranch|s_endpgm|"
+                        r"global_store|buffer_store|flat_store|scratch_store|ds_write|ds_store)")
+
+
+def registers(line: str) -> set[str]:
+    """Every register the instruction names, ranges expanded."""
+    text = re.split(r";|//", line, maxsplit=1)[0]
+    out: set[str] = set()
+    for m in _REG_RE.finditer(text):
+        if m.group(1):
+            kind, lo, hi = m.group(1), int(m.group(2)), int(m.group(3))
+            if hi - lo > 256:          # a nonsense range is a parse failure, not 257 registers
+                continue
+            out.update(f"{kind}{n}" for n in range(lo, hi + 1))
+        elif m.group(4):
+            out.add(f"{m.group(4)}{m.group(5)}")
+        elif m.group(6):
+            out.add(m.group(6))
+    return out
+
+
+def def_use(line: str) -> tuple[set[str], set[str]]:
+    """(defined, used) for one instruction, under the first-operand-is-the-destination convention."""
+    mn = mnemonic(line)
+    if mn is None:
+        return set(), set()
+    body = re.split(r";|//", line, maxsplit=1)[0].strip()
+    operands = body.split(None, 1)
+    if len(operands) < 2 or _NO_DEF_RE.match(mn):
+        return set(), registers(line)
+    first = operands[1].split(",")[0]
+    defs = registers(first)
+    return defs, registers(line) - defs
+
+
+def basic_blocks(lines: list[str], start: int, end: int) -> list[tuple[str, int, int]]:
+    """(label, first_index, end_exclusive) for each straight-line run inside one kernel body."""
+    blocks: list[tuple[str, int, int]] = []
+    label, first = "entry", start
+    for i in range(start, end):
+        line = lines[i]
+        m = _BLOCK_LABEL_RE.match(line)
+        if m and mnemonic(line) is None:
+            if i > first:
+                blocks.append((label, first, i))
+            label, first = m.group(1).strip(": "), i + 1
+            continue
+        mn = mnemonic(line)
+        if mn and _BLOCK_END_RE.match(mn):
+            blocks.append((label, first, i + 1))
+            label, first = f"{label}+", i + 1
+    if end > first:
+        blocks.append((label, first, end))
+    return [b for b in blocks if b[2] > b[1]]
+
+
+# What each signal is worth, per bottleneck class. The default row is what runs when the profiler
+# named nothing recognisable -- deliberately flat, so an unknown bottleneck ranks on raw stall
+# evidence rather than on a guess about which kind it is.
+_KEYPOINT_WEIGHTS = {
+    "default":  {"drain": 3.0, "nop_cycles": 0.5, "mfma_starved": 2.0, "narrow": 1.0, "overhead": 1.0},
+    "memory":   {"drain": 4.0, "nop_cycles": 0.5, "mfma_starved": 1.0, "narrow": 3.0, "overhead": 1.0},
+    "compute":  {"drain": 2.0, "nop_cycles": 1.5, "mfma_starved": 4.0, "narrow": 0.5, "overhead": 2.0},
+    "latency":  {"drain": 4.0, "nop_cycles": 2.0, "mfma_starved": 3.0, "narrow": 1.0, "overhead": 1.0},
+    "lds":      {"drain": 3.0, "nop_cycles": 0.5, "mfma_starved": 2.0, "narrow": 3.0, "overhead": 1.0},
+    "overhead": {"drain": 1.0, "nop_cycles": 1.0, "mfma_starved": 1.0, "narrow": 1.0, "overhead": 4.0},
+}
+
+
+def window_evidence(lines: list[str], lo: int, hi: int, widest: int | None) -> dict:
+    """The stall proxies in one window, as counts a reader can check against the listing."""
+    ev = {"drain": 0, "nop_cycles": 0, "mfma_starved": 0, "narrow": 0, "overhead": 0,
+          "instructions": 0, "mfma": 0}
+    pending_drain = False
+    for i in range(lo, hi):
+        mn = mnemonic(lines[i])
+        if mn is None:
+            continue
+        ev["instructions"] += 1
+        name = classify(mn)
+        if name == "wait":
+            kind, _ = classify_wait(lines[i])
+            if kind in ("drain", "unknown"):     # unknown counts as a drain, as elsewhere here
+                ev["drain"] += 1
+                pending_drain = True
+            continue
+        if name == "nop":
+            m = re.match(r"^s_nop\s+(?:0[xX]([0-9a-fA-F]+)|(\d+))", lines[i].strip())
+            ev["nop_cycles"] += (int(m.group(1), 16) if m and m.group(1)
+                                 else int(m.group(2)) if m and m.group(2) else 1)
+            continue
+        if name == "mfma":
+            ev["mfma"] += 1
+            # A matrix op whose operands arrive through a full drain is the dependency chain the
+            # scheduler failed to hide -- the single most actionable shape at this level.
+            if pending_drain:
+                ev["mfma_starved"] += 1
+        if name in ("global_load", "global_store", "lds_read", "lds_write"):
+            width = access_bytes(mn)
+            if width is not None and widest and width < widest:
+                ev["narrow"] += 1
+        if name in ("accvgpr_move", "conversion"):
+            ev["overhead"] += 1
+        pending_drain = False
+    return ev
+
+
+def dependency_span(lines: list[str], lo: int, hi: int, block_lo: int, block_hi: int) -> tuple[int, int]:
+    """Widen a window to the definitions it reads and the first consumers of what it writes.
+
+    Clipped to the BLOCK, not the kernel: a definition on the other side of a branch is not context
+    an engineer can safely act on, and pulling one in would suggest an edit whose validity depends on
+    a path this window does not control.
+    """
+    reads: set[str] = set()
+    writes: set[str] = set()
+    for i in range(lo, hi):
+        d, u = def_use(lines[i])
+        reads |= (u - writes)
+        writes |= d
+
+    back = lo
+    still = set(reads)
+    for i in range(lo - 1, block_lo - 1, -1):
+        if not still:
+            break
+        d, _ = def_use(lines[i])
+        if d & still:
+            still -= d
+            back = i
+    fwd = hi
+    for i in range(hi, block_hi):
+        _, u = def_use(lines[i])
+        if u & writes:
+            fwd = i + 1
+            break
+    return back, fwd
+
+
+def build_keypoints(archive: Path, bottleneck: str | None, top_n: int,
+                    window: int, kernel_filter: list[str]) -> dict:
+    why = archive_unreadable(archive)
+    if why is not None:
+        return {"schema": SCHEMA_KEYPOINT, "exit_code": EXIT_HOLE, "archive": str(archive),
+                "keypoints": [], "unavailable": [f"archive:unreadable({why})"]}
+    data = read_archive(archive)
+    text = data["disasm"]
+    if not text.strip():
+        return {"schema": SCHEMA_KEYPOINT, "exit_code": EXIT_HOLE, "archive": str(archive),
+                "keypoints": [], "unavailable": ["archive:no_disassembly(nothing to localise in)"]}
+
+    klass = (bottleneck or "").strip().lower()
+    weights = _KEYPOINT_WEIGHTS.get(klass, _KEYPOINT_WEIGHTS["default"])
+    lines = text.splitlines()
+    found: list[dict] = []
+
+    for name, start, end in kernel_spans(lines):
+        if kernel_filter and not any(k in name for k in kernel_filter):
+            continue
+        body = analyze_body(lines, start, end)
+        # "Narrow" means narrower than what this kernel has already been shown to manage, so the
+        # baseline is the widest access of ANY kind it performs -- stores included. Leaving stores
+        # out made a kernel that loads x4 and stores x1 look uniformly wide on the store side, which
+        # is precisely the coalescing gap worth naming.
+        widest = max((b for b in (body["global_load_bytes"]["max"],
+                                  body["global_store_bytes"]["max"],
+                                  body["lds_access_bytes"]["max"]) if b), default=None)
+        for label, blo, bhi in basic_blocks(lines, start, end):
+            step = max(1, window // 2)
+            starts = list(range(blo, max(blo + 1, bhi - window + 1), step))
+            for wlo in starts:
+                whi = min(wlo + window, bhi)
+                ev = window_evidence(lines, wlo, whi, widest)
+                if ev["instructions"] == 0:
+                    continue
+                score = sum(weights[k] * ev[k] for k in weights)
+                if score <= 0:
+                    continue
+                dlo, dhi = dependency_span(lines, wlo, whi, blo, bhi)
+                found.append({
+                    "kernel": name, "block": label,
+                    # Anchored by ORDINAL and a fingerprint, not by line number: the first edit moves
+                    # every line below it, and a keypoint that could only be found by line would be
+                    # unusable on the second round.
+                    "ordinal_in_block": wlo - blo,
+                    "fingerprint": [mnemonic(lines[i]) for i in range(wlo, whi)
+                                    if mnemonic(lines[i])][:4],
+                    "window_lines": [wlo + 1, whi],          # 1-based, inclusive, for a human
+                    "context_lines": [dlo + 1, dhi],         # window widened to its dependencies
+                    "score": round(score, 3),
+                    "evidence": ev,
+                    "why": _keypoint_why(ev, klass),
+                })
+
+    found.sort(key=lambda k: (-k["score"], k["kernel"], k["window_lines"][0]))
+    # Two floors, and both exist to stop `--top N` being filled with noise. Handing an engineer a
+    # window that scored 0.5 beside one that scored 26 does not offer it a choice, it spends one of
+    # N slots on a site with nothing wrong with it -- and a keypoint list is read as "these are the
+    # places worth looking", so padding it is a claim.
+    #   absolute: below this, no proxy fired hard enough to be worth a look at all.
+    #   relative: self-scaling, because "worth looking at" is relative to what else this kernel has.
+    best = found[0]["score"] if found else 0.0
+    floor = max(1.0, best * 0.10)
+    ranked = [k for k in found if k["score"] >= floor]
+
+    # Overlapping windows describe one site. Keeping both would spend two of the engineer's N slots
+    # on the same instructions and read as two independent findings.
+    kept: list[dict] = []
+    for cand in ranked:
+        if any(c["kernel"] == cand["kernel"]
+               and not (cand["window_lines"][1] < c["window_lines"][0]
+                        or cand["window_lines"][0] > c["window_lines"][1])
+               for c in kept):
+            continue
+        kept.append(cand)
+        if len(kept) >= top_n:
+            break
+
+    return {
+        "schema": SCHEMA_KEYPOINT,
+        "exit_code": EXIT_OK if kept else EXIT_HOLE,
+        "archive": str(archive),
+        "bottleneck": klass or None,
+        "weights_used": klass if klass in _KEYPOINT_WEIGHTS else "default",
+        "window_instructions": window,
+        "score_floor": round(floor, 3),
+        "windows_scored": len(found),
+        "windows_below_floor": len(found) - len(ranked),
+        "basis": "static stall proxies over the instruction stream, weighted by the profiler's "
+                 "bottleneck class. NOT hardware counters: a keypoint is a hypothesis about where "
+                 "time goes, and the measurement that settles it is the round's own A/B.",
+        "keypoint_count": len(kept),
+        "keypoints": kept,
+        "unavailable": [] if kept else ["keypoint:none_scored(no window carried any stall proxy)"],
+    }
+
+
+def _keypoint_why(ev: dict, klass: str) -> str:
+    parts = []
+    if ev["drain"]:
+        parts.append(f"{ev['drain']} full-drain wait(s) serialising the pipeline")
+    if ev["mfma_starved"]:
+        parts.append(f"{ev['mfma_starved']} matrix op(s) issued straight out of a drain, so the "
+                     "dependency chain is not hidden")
+    if ev["nop_cycles"]:
+        parts.append(f"{ev['nop_cycles']} explicit stall cycle(s) in s_nop")
+    if ev["narrow"]:
+        parts.append(f"{ev['narrow']} access(es) narrower than the widest this kernel already uses")
+    if ev["overhead"]:
+        parts.append(f"{ev['overhead']} accvgpr-move/conversion instruction(s) doing no arithmetic")
+    if not parts:
+        return "no stall proxy fired"
+    return ("; ".join(parts)
+            + f" (ranked for a {klass or 'unclassified'} bottleneck)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1112,6 +1402,23 @@ def build_parser() -> argparse.ArgumentParser:
              "axes come back null rather than defaulted")
     descriptor.add_argument("--archive", required=True)
 
+    keypoint = sub.add_parser(
+        "keypoint",
+        help="where in the assembly an edit is most likely to pay: the top-scoring instruction "
+             "windows, each with the dependency context needed to read it")
+    keypoint.add_argument("--archive", required=True)
+    keypoint.add_argument("--bottleneck", default=None,
+                          help="the profiler's class (memory|compute|latency|lds|overhead). It "
+                               "WEIGHTS the ranking; it never filters, because one coarse label "
+                               "must not mask evidence it cannot see")
+    keypoint.add_argument("--top", type=int, default=3,
+                          help="how many non-overlapping windows to return (default 3)")
+    keypoint.add_argument("--window", type=int, default=24,
+                          help="instructions per window (default 24); clipped to basic blocks, "
+                               "because an edit that spans a branch is not local")
+    keypoint.add_argument("--kernel", action="append", default=[],
+                          help="repeatable substring; restrict to the hot kernel(s) L2 named")
+
     sub.add_parser("claims", help="print the closed claim vocabulary")
     return parser
 
@@ -1134,6 +1441,11 @@ def main(argv: list[str]) -> int:
         return payload["exit_code"]
     if args.command == "descriptor":
         payload = build_descriptors(build_signals(Path(args.archive)))
+        _emit(payload)
+        return payload["exit_code"]
+    if args.command == "keypoint":
+        payload = build_keypoints(Path(args.archive), args.bottleneck, max(1, args.top),
+                                  max(4, args.window), list(args.kernel))
         _emit(payload)
         return payload["exit_code"]
     before = build_signals(Path(args.from_archive))
