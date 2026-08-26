@@ -484,8 +484,23 @@ _CEILING_KEYS = ("peak_flops", "bandwidth_table", "bandwidth_scalar", "bandwidth
                  "bandwidth_witness_by", "compute_witness_by", "source")
 
 
-def _ceilings_from_card(arch: str, dtype: str) -> dict:
-    """The ceiling inputs for `arch`, taken from `sol_card`'s gated table and nothing else.
+def _ceilings_from_card(arch: str, dtype: str, basis: str = "measured") -> dict:
+    """The ceiling inputs for `arch`, taken from `sol_card`'s gated tables and nothing else.
+
+    `basis` picks WHICH ceiling, and the two answer different questions:
+
+      measured     what this box has been observed to do. Discriminates between routes -- it is the
+                   only basis on which "this route is finished" means anything -- but it is an
+                   achievable ceiling, not a physical one, so a kernel CAN read past it (better
+                   cache behaviour than the cold-stream microbenchmark that set it, for instance).
+      theoretical  the datasheet bound. Cannot be exceeded, which is its whole value: a reading
+                   below it is a defect in the traffic model, the timing or the shape, never a
+                   faster kernel. It discriminates poorly -- on this suite everything including
+                   rocBLAS sits 3.2x-7.4x away -- so it answers "how much is physically left",
+                   not "is this route done".
+
+    Neither is a substitute for the other, which is why this takes an argument instead of a default
+    anyone can drift into.
 
     THIS IS THE FINDING (89) ENTRY POINT. The free-form spec accepts `peak_flops` from the caller
     with no provenance requirement, which is exactly the hole that finding is about: the profiler
@@ -503,18 +518,21 @@ def _ceilings_from_card(arch: str, dtype: str) -> dict:
     # imported here rather than there only to keep the table out of the free-form entry point.
     import sol_card
 
-    card = sol_card.ARCH_CARDS.get(arch)
+    if basis not in ("measured", "theoretical"):
+        raise SOLCardError(f"basis must be 'measured' or 'theoretical', got {basis!r}")
+    table = sol_card.THEORETICAL_CARDS if basis == "theoretical" else sol_card.ARCH_CARDS
+    card = table.get(arch)
     if card is None:
-        raise SOLCardError(f"unsupported arch {arch!r}: modeled arches are "
-                           f"{tuple(sol_card.ARCH_CARDS)}")
+        raise SOLCardError(f"unsupported arch {arch!r} for basis {basis!r}: modeled arches are "
+                           f"{tuple(table)}")
     peaks = card.get("peak_flops") or {}
     if dtype not in peaks:
         raise SOLCardError(f"{arch} card has no peak for dtype {dtype!r}; it models "
                            f"{tuple(peaks)}")
-    basis = "measured" if card.get("measured") else "reference peak, UNMEASURED"
+    label = "measured" if card.get("measured") else "datasheet peak, UNATTAINED"
     out: dict = {
         "peak_flops": float(peaks[dtype]),
-        "source": f"{arch} card ({basis}): {card.get('source', '')}",
+        "source": f"{arch} {basis} card ({label}): {card.get('source', '')}",
     }
     table = card.get("peak_bandwidth_bytes_s_by_footprint")
     if table:
@@ -538,9 +556,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                                  "With --arch the ceiling keys are supplied by the card and "
                                  "REFUSED here; the spec then needs only dtype + routes.")
     ap.add_argument("--arch", default=None,
-                    help="take the ceiling from sol_card's gated table for this arch (e.g. gfx942) "
+                    help="take the ceiling from sol_card's gated tables for this arch (e.g. gfx942) "
                          "instead of from the spec. Use this from anything that plans: it is the "
                          "only mode in which the ceiling has provenance by construction")
+    ap.add_argument("--basis", default="measured", choices=("measured", "theoretical"),
+                    help="WHICH ceiling. `measured` is what this box was observed to do -- it "
+                         "discriminates between routes but can be read past. `theoretical` is the "
+                         "datasheet bound -- it cannot be exceeded, so a reading below it is a "
+                         "defect in the model rather than a faster kernel, but on this suite "
+                         "everything including rocBLAS sits 3.2x-7.4x away, so it ranks little")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable receipt")
     args = ap.parse_args(argv)
 
@@ -555,7 +579,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                   f"spec also supplies {', '.join(supplied)}. Remove them: a run carrying two "
                   f"ceilings for one route is worse than carrying none.", file=sys.stderr)
             return 2
-        spec = {**spec, **_ceilings_from_card(args.arch, dtype)}
+        spec = {**spec, **_ceilings_from_card(args.arch, dtype, args.basis)}
+    elif args.basis != "measured":
+        print("REFUSED: --basis selects between sol_card's tables and means nothing without "
+              "--arch; the spec's own ceiling has whatever basis the caller gave it.",
+              file=sys.stderr)
+        return 2
 
     table = spec.get("bandwidth_table")
     if isinstance(table, Mapping):

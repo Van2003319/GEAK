@@ -394,6 +394,56 @@ class ArchModeTest(unittest.TestCase):
                 self.assertEqual(2, proc.returncode, f"{key} slipped through")
                 self.assertIn(key, proc.stderr)
 
+    def test_the_theoretical_basis_is_a_datasheet_card_with_no_witness(self):
+        """A physical bound has no achiever by construction, and the absence must stay VISIBLE.
+
+        `_verdict` reads it: a route below an UNWITNESSED ceiling returns `ceiling_contradicted`
+        (check the bound) rather than `gaming_suspected` (audit the kernel), which is the correct
+        reading for a datasheet number -- nothing can beat physics, so a sub-bound result means the
+        traffic model, the timing or the shape is wrong.
+        """
+        got = sg._ceilings_from_card("gfx942", "bf16", "theoretical")
+        self.assertEqual(1307e12, got["peak_flops"])
+        self.assertNotIn("compute_witness_by", got,
+                         "a datasheet peak has no achiever; inventing one would make a sub-bound "
+                         "reading blame the kernel instead of the bound")
+        self.assertIn("UNATTAINED", got["source"])
+
+    def test_the_two_bases_are_different_tables_and_neither_is_the_default_of_the_other(self):
+        th = sg._ceilings_from_card("gfx942", "bf16", "theoretical")
+        ms = sg._ceilings_from_card("gfx942", "bf16", "measured")
+        self.assertGreater(th["peak_flops"], ms["peak_flops"],
+                           "the datasheet peak must be the larger one; if these ever match, one "
+                           "table has been edited into the other")
+        self.assertIn("bandwidth_scalar", th, "the datasheet quotes one HBM number")
+        self.assertIn("bandwidth_table", ms,
+                      "the measured ceiling is footprint-dependent by 2.8x; a scalar mis-ranks the "
+                      "suite whichever value is picked")
+
+    def test_an_unknown_basis_is_refused(self):
+        with self.assertRaises(sg.SOLCardError):
+            sg._ceilings_from_card("gfx942", "bf16", "paper")
+
+    def test_basis_without_arch_is_refused_rather_than_silently_ignored(self):
+        """`--basis` selects between sol_card's tables. With a caller-supplied ceiling it selects
+        nothing, and accepting it would report a basis the numbers do not have."""
+        proc = self.run_cli(self.spec(peak_flops=1e12, bandwidth_scalar=1e12),
+                            "--basis", "theoretical")
+        self.assertEqual(2, proc.returncode)
+        self.assertIn("means nothing without", proc.stderr)
+
+    def test_nothing_exceeds_the_theoretical_bound(self):
+        """The property the theoretical basis exists for, and the one the measured basis cannot
+        offer. Every verdict must be `ok`: a physical ceiling is not reachable, so no route may come
+        back near_sol, gaming_suspected or ceiling_contradicted against it."""
+        doc = json.loads(self.run_cli(self.spec(), "--arch", "gfx942",
+                                      "--basis", "theoretical", "--json").stdout)
+        self.assertEqual({"ok"}, {r["verdict"] for r in doc["routes"]},
+                         "a route reading past the datasheet bound means the traffic model, the "
+                         "timing or the shape is wrong -- it is never a faster kernel")
+        for r in doc["routes"]:
+            self.assertGreaterEqual(r["gap"], 1.0)
+
     def test_the_measured_ceiling_and_the_nameplate_disagree_enough_to_matter(self):
         """The reason this mode exists, as a number rather than an argument.
 

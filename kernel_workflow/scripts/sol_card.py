@@ -121,6 +121,42 @@ MEASURED_GFX942_CEILINGS: Mapping[str, object] = {
               "median device ms); no candidate linked",
 }
 
+# The datasheet peaks for the same part, as DATA rather than as the prose above.
+#
+# This is the ceiling a physical Speed-of-Light bound is made of, and its one guarantee is the one
+# the measured card cannot give: nothing can exceed it. A kernel reading faster than this bound has
+# not beaten the hardware -- either the traffic model understated what it moves, or the timing is
+# wrong, or the shape is not what the bound was computed for. That is why `_verdict` sends a
+# sub-bound reading on an unwitnessed ceiling to `ceiling_contradicted` (check the bound) rather
+# than to `gaming_suspected` (audit the kernel).
+#
+# NO `attainment` KEY, deliberately and visibly -- the same honest absence as the gfx90a card above.
+# Nothing has ever been observed to reach either number on this part: BF16 matmul tops out at
+# 668 TFLOP/s (51% of this) and cold streaming read at 3.94 TB/s (74%). Provenance is not
+# attainability, and `rocminfo` reports the 1307 with impeccable provenance.
+#
+# What it is GOOD for: an absolute, never-exceedable denominator, and the ratio against the measured
+# card, which is a property of the box and the toolchain rather than of any kernel.
+# What it is BAD for, and this is measured on this suite: scored against it every route sits
+# 3.2x-6.4x from SOL and so does rocBLAS at 3.5x-7.4x. A ceiling nothing approaches ranks nothing,
+# so it discriminates between routes far less than the measured card does.
+THEORETICAL_GFX942_CARD: Mapping[str, object] = {
+    "arch": "gfx942",
+    "measured": False,
+    "peak_flops": {"bf16": 1307e12, "fp16": 1307e12, "fp8_e4m3": 2614e12, "fp8_e5m2": 2614e12},
+    "peak_bandwidth_bytes_s": 5.3e12,
+    "source": "MI300X datasheet peaks (1307 TFLOP/s BF16 matrix, 5.3 TB/s HBM3). Physical bound, "
+              "unattained on this box: see MEASURED_GFX942_CEILINGS for what was reached",
+}
+
+# The two bases, kept apart so a caller has to say which one it is planning against. They are not
+# interchangeable and the difference is not small: on the eleven-shape BF16 suite the measured card
+# puts the suite at ~0.70 of achievable while the datasheet puts it at ~0.27 of physical.
+THEORETICAL_CARDS: Mapping[str, Mapping[str, object]] = {
+    "gfx90a": REFERENCE_GFX90A_CARD,      # already a datasheet card; there is no measured gfx90a one
+    "gfx942": THEORETICAL_GFX942_CARD,
+}
+
 # gfx942 is a first-class arch as of the v2 schema. Until then this table was
 # DATA that `_resolve_peaks` refused to look at, reachable only by a caller
 # passing it back in as `calibration` -- which meant the arch every measurement
