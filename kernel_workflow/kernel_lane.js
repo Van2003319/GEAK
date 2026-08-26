@@ -556,55 +556,88 @@ const HARNESS_ADDENDUM = String(A.harness_addendum || '').trim();
 // Unset (default/fast / first deep burst) => spreading {} adds nothing => byte-identical prompts.
 const INCREMENTAL = !!STATE_DIR && String(A.incremental_analyze || '') === 'true';
 const RESUME_INPUT = INCREMENTAL ? { INCREMENTAL_RESUME: '1' } : {};
-// `max_no_improve` KEEPS ITS NAME AND CHANGES WHAT IT ENDS. It has always meant "consecutive
-// non-improving rounds before something happens"; what happens is now an ESCALATION rather than a
-// stop, and only the last phase's exhaustion ends the run. The default moves 2 -> 4 with it, because
-// 2 was chosen when the counter's only outcome was death: a lane that gets two flat rounds has not
-// established that source-level search is finished, and under the phase ladder that verdict now
-// costs the whole source phase rather than the whole wave.
+// `max_no_improve` KEEPS ITS NAME AND CHANGES WHAT IT ENDS: a search PHASE, not the wave. The
+// default moves 2 -> 4 with it, because 2 was chosen when the counter's only outcome was death.
 //
-// One knob, not two, on purpose. A separate `phase_escalate_after` alongside a surviving
-// `max_no_improve` would be two names for one quantity, and the failure mode of that is a caller
-// setting the one that no longer decides anything.
+// It is also no longer the PRIMARY escalation signal, only the backstop -- see `escalationReason`
+// below. One knob rather than two on purpose: a separate `phase_escalate_after` beside a surviving
+// `max_no_improve` would be two names for one quantity, and callers would set the one that no
+// longer decides.
 const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 4, 10));
 
 // ---------------------------------------------------------------------------------------------
-// SEARCH PHASES
+// THE SEARCH CYCLE
 //
-// The search runs as a one-way ratchet over three phases. Each phase gets `MAX_NO_IMPROVE`
-// consecutive non-improving rounds; spending them escalates to the next phase and resets the
-// counter. Spending them in the LAST phase ends the run.
+// Three states, and the third one closes a loop rather than ending the run:
 //
 //   phase1_source  L1 pattern triage + L2 profiling every round, L3 only when L2 or the TechLead
 //                  asks for it. Rewrites are proposed against SOURCE.
-//   phase2_asm     source analysis stops. L2 profiles, localises a KEYPOINT in the compiled
-//                  assembly, and the engineer edits that window of the `.s`.
-//   phase3_deep    every round dispatches `deep_explore`: broad authority, its own long
-//                  measure -> self-profile -> rewrite loop.
+//   phase2_asm     source analysis stops. L2 localises a KEYPOINT in the compiled assembly and the
+//                  engineer edits that window of the `.s`.
+//   deep_explore   EXACTLY ONE dedicated round. A ground-up rewrite with broad authority, which is
+//                  a different route rather than a further step down this one.
+//                    committed  -> back to phase1_source, and the cycle runs again ON THE NEW TREE
+//                    not         -> the run ends
 //
-// One-way on purpose. A phase that could be re-entered on a single good round would oscillate
-// exactly where the search is weakest -- at a plateau, which is when a lucky round is most likely to
-// be noise and least likely to mean the earlier phase has more to give.
+// WHY IT LOOPS, and why deep_explore is a round rather than a phase. `deep_engineer.md` rewrites
+// the kernel from the ground up with authority over the kernel, the wrapper and the binding, so a
+// committed deep round leaves a materially DIFFERENT program behind. Everything phase1 learned was
+// about the old implementation and every keypoint phase2 found was in the old machine code; none of
+// it describes the new tree. Treating deep_explore as a terminal phase would spend the search's
+// most expensive move and then throw away the only thing it produced -- a fresh starting point with
+// its own source-level and assembly-level headroom. So it resets the ladder instead.
 //
-// The counter is scored by the SAME rule that used to end the wave (`madeProgress ||
-// committedThisRound`), so what counts as a stalled round is unchanged; only its consequence is new.
+// And it gets ONE round, not a stall allowance: it is a single rewrite whose whole job is to hand
+// the next cycle a different route. Giving it four rounds would be four ground-up rewrites in a row,
+// each discarding the last one's tree before anything had searched it.
+//
+// A deep round that does NOT commit is the terminal case: a ground-up rewrite starting from the
+// current best failed to beat it, which is the strongest evidence available that the search is out
+// of routes. Nothing caps the number of cycles beyond BUDGET, which already prices a deep round at
+// DEEP_COST.
 const PHASE_SOURCE = 'phase1_source';
 const PHASE_ASM = 'phase2_asm';
-const PHASE_DEEP = 'phase3_deep';
+const PHASE_DEEP = 'deep_explore';
+// The order the states are visited within one cycle. `deep_explore` is last and wraps around.
 const PHASE_ORDER = [PHASE_SOURCE, PHASE_ASM, PHASE_DEEP];
 
-// A phase with no implementation is SKIPPED rather than entered: burning `MAX_NO_IMPROVE` rounds
-// running phase1's behaviour under phase2's name reads in the log as "the assembly phase found
-// nothing" when nothing was tried. phase2 became live with `asm_roundtrip.py` (emit -> edit ->
-// reassemble -> rebuild) and `isa_signals.py keypoint` (where to edit); the flag stays because the
-// question "can this phase actually act" is one the ladder should keep asking.
+// A state with no implementation is SKIPPED rather than entered: burning an allowance running
+// phase1's behaviour under phase2's name reads in the log as "the assembly phase found nothing"
+// when nothing was tried. phase2 became live with `asm_roundtrip.py` and `isa_signals.py keypoint`;
+// the flag stays because "can this state actually act" is a question the ladder should keep asking.
 const PHASE_IMPLEMENTED = { [PHASE_SOURCE]: true, [PHASE_ASM]: true, [PHASE_DEEP]: true };
 
-// The next phase that can actually act, or '' when the ladder is exhausted.
+// The next state that can act. Wraps: after `deep_explore` the cycle restarts at the source phase.
+// Never returns '' -- the loop is closed, and what ends a run is a deep round that banked nothing
+// or the budget running out, not falling off the end of a list.
 const nextLivePhase = (from) => {
-  for (let i = PHASE_ORDER.indexOf(from) + 1; i < PHASE_ORDER.length; i++) {
-    if (PHASE_IMPLEMENTED[PHASE_ORDER[i]]) return PHASE_ORDER[i];
+  const n = PHASE_ORDER.length;
+  const at = PHASE_ORDER.indexOf(from);
+  for (let step = 1; step <= n; step++) {
+    const candidate = PHASE_ORDER[(at + step) % n];
+    if (PHASE_IMPLEMENTED[candidate]) return candidate;
   }
+  return PHASE_SOURCE;   // unreachable while the source phase is implemented
+};
+
+// Why this round should hand the search on, or '' to keep going.
+//
+// TWO triggers, and the ORDER matters. The TechLead's `stop` is the reasoned one: its gate is "the
+// launch floor has been attacked, no compute case is still far above it, and the last verified gain
+// was under ~3%", which is a statement that THIS LEVEL is finished -- exactly the premise for
+// moving to the next one. The counter is the backstop for a planner that keeps proposing directions
+// none of which land, and never admits the level is done.
+//
+// It used to be the other way round: `stop` ended the whole run and the counter was the only
+// escalation. That made the reasoned signal the destructive one and the crude signal the useful
+// one, so a lane could reach the verdict "source search is finished" and go home instead of moving
+// to the phase that exists for it.
+const escalationReason = (plannerStopped, stall, max) => {
+  if (plannerStopped) {
+    return 'the TechLead reported this level finished (its stop gate: floor attacked, no compute '
+      + 'case far above it, last verified gain under ~3%)';
+  }
+  if (stall >= max) return `${stall} consecutive non-improving round(s)`;
   return '';
 };
 
@@ -1674,11 +1707,29 @@ let bestSeen = 0;            // best verified geomean of any candidate, committe
 // than the one it replaced, which is backwards.
 let phaseStall = 0;
 let searchPhase = PHASE_SOURCE;
+// How many times the ladder has come back around to the source phase. Each cycle after the first
+// runs on a tree a deep round rewrote, so "round 12" alone does not say what was being searched.
+let cycle = 1;
 // Why the run ended, set once. '' while running. Distinguishing these downstream matters: a ladder
 // that ran out of phases and a lane that ran out of budget look identical in a report that only
 // says "stopped".
 let stopReason = '';
-const phaseLog = [{ phase: PHASE_SOURCE, entered_round: 1, reason: 'start' }];
+const phaseLog = [{ phase: PHASE_SOURCE, entered_round: 1, cycle: 1, reason: 'start' }];
+
+// Hand the search to the next state. Used from BOTH triggers -- the planner reporting the level
+// finished, and the stall backstop -- so the two cannot drift into doing different things.
+const advancePhase = (why, atRound) => {
+  const next = nextLivePhase(searchPhase);
+  if (next === PHASE_SOURCE) cycle++;
+  log(`PHASE ${searchPhase} -> ${next}${next === PHASE_SOURCE ? ` (cycle ${cycle})` : ''}: ${why}. `
+    + (next === PHASE_SOURCE
+      ? 'The deep round left a different program behind, so the ladder restarts on it: the source '
+        + 'findings and keypoints from the last cycle describe a tree that no longer exists.'
+      : 'The stall counter resets; the new state is judged on its own rounds.'));
+  phaseLog.push({ phase: next, entered_round: atRound + 1, cycle, reason: why });
+  searchPhase = next;
+  phaseStall = 0;
+};
 // The ISA archive of the tree that is currently canonical, i.e. the parent every
 // candidate in the next round is a mutation of. Null until a committed winner
 // supplies one, and reset to null -- never left stale -- whenever the new canonical
@@ -2396,6 +2447,10 @@ while (dispatched < BUDGET && !stopReason) {
     // fact the planner can act on, a "75% exhausted" is a number it would have to interpret.
     SEARCH_PHASE: roundPhase,
     SEARCH_PHASE_STALL: `${phaseStall} of ${MAX_NO_IMPROVE} non-improving round(s) in this phase`,
+    // Which pass around the ladder this is. Cycle 2+ runs on a tree a deep round rewrote, so the
+    // prior cycle's insights describe an implementation that no longer exists -- a planner that did
+    // not know would keep ruling out directions on evidence about a different program.
+    CYCLE: cycle,
     ...(roundPhase === PHASE_ASM
       ? { KEYPOINTS: (profileSummary && profileSummary.keypoints) || [] } : {}),
   };
@@ -2403,34 +2458,44 @@ while (dispatched < BUDGET && !stopReason) {
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).', planningInputs),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
-  if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    // This ends the RUN, not just the phase -- unchanged from before the ladder existed. Worth
-    // knowing it is a live question: a TechLead that stops in phase1 is saying source-level search
-    // is finished, which is the premise for entering phase2 rather than for going home.
-    stopReason = 'tech_lead_stop';
-    log(`Round ${round}: TechLead chose to stop in ${roundPhase}. ${plan ? plan.reasoning || '' : ''}`);
-    break;
+  // The planner reporting this level finished ESCALATES; it does not end the run. Its stop gate is
+  // a statement about the current level -- floor attacked, no compute case far above it, last gain
+  // under ~3% -- and that is the premise for moving to the next level, not for going home. It used
+  // to `break`, which made the reasoned signal destructive and left the crude counter as the only
+  // way to reach a phase that exists precisely for "source search is finished".
+  const plannerStopped = !plan || plan.stop || !plan.directions || plan.directions.length === 0;
+  if (plannerStopped && roundPhase !== PHASE_DEEP) {
+    log(`Round ${round}: TechLead reports ${roundPhase} finished. `
+      + `${plan ? plan.reasoning || '' : '(no plan returned)'}`);
+    advancePhase(escalationReason(true, phaseStall, MAX_NO_IMPROVE), round);
+    // No directions were dispatched, so nothing is scored: the round is spent moving the ladder.
+    // It cannot loop -- the next state differs, and a deep round always produces a direction.
+    continue;
   }
 
-  let planned = plan.directions;
-  // In the last phase `deep_explore` stops being the planner's option and becomes the phase itself.
-  // Leaving it discretionary would make phase3 indistinguishable from phase1: the ladder would have
-  // spent two escalations to arrive somewhere that runs specialist directions again. The planner's
-  // own direction is kept as the BRIEF -- its title and prompt are what the deep engineer is aimed
-  // at -- so this redirects the round rather than discarding the thinking behind it.
+  let planned = (plan && plan.directions) || [];
+  // A deep round IS the deep engineer. Leaving it discretionary would make the round that closes a
+  // cycle indistinguishable from a phase-1 round, and the ladder would have spent two escalations to
+  // arrive somewhere that runs specialist directions again. The planner's own direction becomes the
+  // BRIEF, so a promoted round redirects the thinking rather than discarding it -- and a planner
+  // that returned `stop` here is overridden outright, because this round's whole purpose is to
+  // produce one rewrite before the cycle restarts.
   if (roundPhase === PHASE_DEEP && !planned.some(d => d.specialty === 'deep_explore')) {
     const seed = planned[0] || {};
-    log(`Round ${round}: phase3 -- the planner returned no deep_explore direction, so the round is `
-      + `promoted to one. ${planned.length} specialist direction(s) fold into its brief.`);
+    log(`Round ${round}: deep round -- ${plannerStopped
+      ? 'the planner returned no plan, so the round proceeds on its own mandate'
+      : `the planner returned no deep_explore direction, so ${planned.length} specialist `
+        + 'direction(s) fold into its brief'}.`);
     planned = [{
       ...seed,
       id: seed.id || `r${round}_d0`,
       title: seed.title ? `deep: ${seed.title}` : 'deep: open-ended rewrite',
       specialty: 'deep_explore',
       prompt: (seed.prompt ? `${seed.prompt}\n\n` : '')
-        + 'This round is the search\'s LAST phase: source-level directions and assembly edits have '
-        + 'both been exhausted. You have broad authority and a high target; treat the text above as '
-        + 'a starting hypothesis rather than as the assignment.',
+        + 'Source-level directions and assembly edits are both exhausted on the CURRENT tree. Your '
+        + 'job is a DIFFERENT ROUTE, not a further step down this one: a ground-up rewrite that the '
+        + 'next cycle will then search at source and assembly level in turn. Treat any text above '
+        + 'as a starting hypothesis rather than as the assignment.',
     }];
   }
 
@@ -3150,31 +3215,24 @@ matter how the rest of the run looked.`,
   // while keeping `madeProgress`, the knob that lets a sub-baseline climb keep its budget.
   if (madeProgress || committedThisRound) { phaseStall = 0; } else { phaseStall++; }
 
-  // --- the phase ladder: escalate, or end the run ---------------------------
-  // Spending a phase's stall allowance no longer ends the wave; it hands the search to a phase that
-  // works differently. Only the last phase's exhaustion is terminal, which is what makes "the source
-  // phase found nothing" a statement about source-level search rather than about the whole run.
-  if (phaseStall >= MAX_NO_IMPROVE) {
-    const next = nextLivePhase(searchPhase);
-    const upTo = next ? PHASE_ORDER.indexOf(next) : PHASE_ORDER.length;
-    const skipped = PHASE_ORDER.slice(PHASE_ORDER.indexOf(searchPhase) + 1, upTo);
-    if (next) {
-      log(`PHASE ${searchPhase} -> ${next}: ${phaseStall} consecutive non-improving round(s)` +
-          (skipped.length ? `; SKIPPED ${skipped.join(', ')} (no implementation in this build, so ` +
-            'entering it would spend the allowance running the previous phase under a new name)' : '') +
-          `. The stall counter resets; ${next} is judged on its own rounds.`);
-      phaseLog.push({
-        phase: next, entered_round: round + 1,
-        reason: `${phaseStall} non-improving round(s) in ${searchPhase}`,
-        ...(skipped.length ? { skipped } : {}),
-      });
-      searchPhase = next;
-      phaseStall = 0;
+  // --- close the cycle, or hand the search on -------------------------------
+  if (roundPhase === PHASE_DEEP) {
+    // A deep round gets exactly one attempt, and what it did decides everything. Committed means a
+    // different program is now canonical, so the ladder restarts and searches THAT. Not committed
+    // means a ground-up rewrite starting from the current best failed to beat it, which is the
+    // strongest evidence available that there are no routes left -- stronger than any stall count,
+    // because it is a negative result from the broadest move the search has.
+    if (committedThisRound) {
+      advancePhase('the deep round banked a different implementation, so the ladder restarts on it',
+        round);
     } else {
-      stopReason = 'phase_ladder_exhausted';
-      log(`STOP: ${phaseStall} consecutive non-improving round(s) in ${searchPhase}, which is the ` +
-          `last phase of the ladder. Budget used ${dispatched}/${BUDGET}.`);
+      stopReason = 'deep_explore_failed';
+      log(`STOP: the deep round banked nothing. A ground-up rewrite from the current best did not `
+        + `beat it, so the search is out of routes. Budget used ${dispatched}/${BUDGET} over `
+        + `${round} round(s) across ${cycle} cycle(s).`);
     }
+  } else if (phaseStall >= MAX_NO_IMPROVE) {
+    advancePhase(escalationReason(false, phaseStall, MAX_NO_IMPROVE), round);
   }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
@@ -3290,11 +3348,12 @@ matter how the rest of the run looked.`,
       `${priorCumulativeVsSeed !== 1.0 ? ` (${cumulativeVsSeed().toFixed(2)}x vs seed)` : ''}` +
       `, phase=${roundPhase}, stall=${phaseStall}/${MAX_NO_IMPROVE}`);
 }
-// Falling out of the `while` with nothing set means the budget condition failed. Named here rather
-// than inferred by the reader: "the ladder ran out of phases" and "the caller's budget ran out" are
-// different verdicts about the search, and a report that says only "stopped" invites the wrong one.
+// Falling out of the `while` with nothing set means the budget condition failed. Named rather than
+// inferred: "a ground-up rewrite could not beat the incumbent" and "the caller's budget ran out" are
+// very different verdicts about the search, and a report that says only "stopped" invites the wrong
+// one -- the first says the kernel is done, the second says the run was.
 if (!stopReason) stopReason = 'budget_exhausted';
-log(`Search ended: ${stopReason}. Final phase ${searchPhase}; phases entered: ` +
+log(`Search ended: ${stopReason}. Final state ${searchPhase}, ${cycle} cycle(s). Ladder: ` +
     phaseLog.map(p => `${p.phase}@r${p.entered_round}`).join(' -> ') +
     `. Budget used ${dispatched}/${BUDGET} over ${round} round(s).`);
 
@@ -3478,6 +3537,7 @@ return {
   // different result from "the budget ran out in phase1" even when both report the same speedup.
   stopped_by: stopReason,
   final_phase: searchPhase,
+  cycles: cycle,
   phases_entered: phaseLog,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,

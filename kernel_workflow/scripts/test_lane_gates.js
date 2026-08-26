@@ -1020,18 +1020,24 @@ console.log('\n# the search-phase ladder is a ONE-WAY ratchet that skips phases 
      && L.PHASE_ORDER[1] === L.PHASE_ASM && L.PHASE_ORDER[2] === L.PHASE_DEEP,
     'the ladder is source -> asm -> deep, in that order', L.PHASE_ORDER.join(' -> '));
 
-  // One-way: every step goes strictly forward, and the last one goes nowhere.
+  // The ladder is a CYCLE, and the wrap is the point. A deep round rewrites the kernel from the
+  // ground up, so the tree it leaves behind has its own source-level and assembly-level headroom
+  // that nothing has searched. Ending there would spend the search's most expensive move and throw
+  // away the only thing it produced.
   {
-    const seen = [];
+    ok(L.nextLivePhase(L.PHASE_SOURCE) === L.PHASE_ASM
+       && L.nextLivePhase(L.PHASE_ASM) === L.PHASE_DEEP,
+      'within a cycle the ladder runs source -> asm -> deep');
+    ok(L.nextLivePhase(L.PHASE_DEEP) === L.PHASE_SOURCE,
+      'and deep_explore WRAPS to the source phase: its rewrite is a different route, so the next ' +
+      'cycle searches the new tree rather than the run ending on it');
+    // Walking it must return to the start rather than run off the end.
     let p = L.PHASE_SOURCE;
-    while (p) { seen.push(p); p = L.nextLivePhase(p); }
-    const idx = seen.map(x => L.PHASE_ORDER.indexOf(x));
-    ok(idx.every((v, i) => i === 0 || v > idx[i - 1]),
-      'walking the ladder only ever moves forward -- a phase that could be re-entered would ' +
-      'oscillate exactly at a plateau, where a lucky round is most likely to be noise',
-      seen.join(' -> '));
-    ok(L.nextLivePhase(seen[seen.length - 1]) === '',
-      'and the last live phase returns no successor, which is what makes its exhaustion terminal');
+    const seen = [p];
+    for (let i = 0; i < L.PHASE_ORDER.length; i++) { p = L.nextLivePhase(p); seen.push(p); }
+    ok(seen[seen.length - 1] === L.PHASE_SOURCE && seen.every(Boolean),
+      'the loop is closed -- no state returns an empty successor, so nothing ends by falling off ' +
+      'a list', seen.join(' -> '));
   }
 
   // An unimplemented phase is SKIPPED rather than entered. This is asserted against whatever the
@@ -1050,13 +1056,16 @@ console.log('\n# the search-phase ladder is a ONE-WAY ratchet that skips phases 
   ok(/while \(dispatched < BUDGET && !stopReason\) \{/.test(src),
     'the loop is bounded by budget and an explicit stop reason, not by the stall counter -- a ' +
     'counter that still ended the wave would make every phase after the first unreachable');
-  ok(/if \(phaseStall >= MAX_NO_IMPROVE\) \{/.test(src)
+  ok(/phaseStall >= MAX_NO_IMPROVE/.test(src)
      && /searchPhase = next;\s*\n\s*phaseStall = 0;/.test(src),
-    'exhausting the allowance escalates and RESETS the counter, so a new phase is judged on its ' +
+    'exhausting the allowance escalates and RESETS the counter, so a new state is judged on its ' +
     'own rounds instead of inheriting the stall that promoted it');
-  ok(/stopReason = 'phase_ladder_exhausted';/.test(src),
-    'and running out of phases is what ends the run, under a name a report can distinguish from ' +
-    'a budget that ran out');
+  ok(/stopReason = 'deep_explore_failed';/.test(src),
+    'a deep round that banked nothing is what ends the run -- a ground-up rewrite from the current ' +
+    'best failing to beat it is stronger evidence than any stall count');
+  ok(!/stopReason = 'tech_lead_stop'/.test(src),
+    'and the planner can no longer end the run: its stop is a statement about the LEVEL, which is ' +
+    'the premise for the next one rather than for going home');
   ok(/const roundPhase = searchPhase;/.test(src)
      && /search_phase: roundPhase,/.test(src),
     'the round records the phase it RAN in, pinned before the bottom-of-loop escalation can move ' +
@@ -1096,21 +1105,44 @@ console.log('\n# phase2 dispatches an ASSEMBLY engineer against a located keypoi
   // serves only the two entry points, so a JS guard cannot read the markdown.
 }
 
-console.log('\n# phase3 IS deep_explore, not a phase that may choose it');
+console.log('\n# the deep round closes a cycle: one rewrite, then restart or stop');
 {
   ok(/roundPhase === PHASE_DEEP && !planned\.some\(d => d\.specialty === 'deep_explore'\)/.test(src),
-    'the last phase promotes the round when the planner did not ask for a deep direction. Leaving ' +
-    'it discretionary would make phase3 indistinguishable from phase1 -- two escalations spent to ' +
-    'arrive somewhere that runs specialist directions again');
-  ok(/specialty: 'deep_explore',/.test(src) && /starting hypothesis rather than as the assignment/.test(src),
-    'and the planner\'s direction becomes the deep engineer\'s BRIEF rather than being discarded, ' +
-    'so a promoted round redirects the thinking instead of throwing it away');
+    'the deep round IS the deep engineer, promoted when the planner did not ask for one. Leaving ' +
+    'it discretionary would make the round that closes a cycle indistinguishable from a phase-1 ' +
+    'round, after two escalations spent getting there');
+  ok(/a DIFFERENT ROUTE, not a further step down this one/.test(src),
+    'and the mandate says so: a deep round exists to hand the NEXT cycle another route, not to ' +
+    'squeeze the current one further');
+  ok(/specialty: 'deep_explore',/.test(src)
+     && /starting hypothesis rather than as the assignment/.test(src),
+    'the planner\'s direction becomes the deep engineer\'s BRIEF rather than being discarded');
+
+  // The two outcomes, which are the whole reason the deep round is handled separately.
+  ok(/if \(roundPhase === PHASE_DEEP\) \{[\s\S]{0,900}if \(committedThisRound\) \{/.test(src),
+    'the deep round branches on whether it BANKED, not on a stall count -- it gets exactly one ' +
+    'attempt, and what it did with it decides everything');
+  ok(/the deep round banked a different implementation, so the ladder restarts on it/.test(src),
+    'a committed deep round restarts the ladder: the findings and keypoints of the last cycle ' +
+    'describe a tree that no longer exists');
+  ok(/if \(next === PHASE_SOURCE\) cycle\+\+;/.test(src),
+    'and the wrap is counted, because "round 12" alone does not say which tree was being searched');
+
+  // The planner's stop is now an escalation, in both places it can arrive.
+  ok(/plannerStopped && roundPhase !== PHASE_DEEP/.test(src)
+     && /advancePhase\(escalationReason\(true,/.test(src),
+    'a planner stop escalates instead of exiting, and is overridden entirely in a deep round -- ' +
+    'that round exists to produce one rewrite');
+  ok(/const advancePhase = \(why, atRound\) => \{/.test(src),
+    'both triggers go through ONE advance path, so the reasoned signal and the stall backstop ' +
+    'cannot drift into doing different things');
+
   ok(/SEARCH_PHASE: roundPhase,/.test(src),
-    'the planner is told which phase it is planning for -- otherwise it proposes source directions ' +
+    'the planner is told which state it is planning for -- otherwise it proposes source directions ' +
     'in a phase whose engineers cannot edit source');
   ok(/SEARCH_PHASE_STALL: /.test(src),
-    'and how much of the phase allowance is spent, so a plateau reads as the ladder working rather ' +
-    'than as a reason to stop');
+    'and how much of the allowance is spent, so a plateau reads as the ladder working rather than ' +
+    'as a reason to stop');
 }
 
 console.log('\n# SELECTION is the best candidate that PASSES, not the best candidate, executed');

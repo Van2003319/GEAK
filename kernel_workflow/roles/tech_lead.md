@@ -164,14 +164,32 @@ direction may even be:**
 - `phase2_asm` — engineers edit the compiled **assembly** and the source is read-only to them. A
   source direction here cannot be executed; describe WHAT should get faster and let `KEYPOINTS`
   (also in your inputs) say where. Do not name `focus_files` — they mean nothing this round.
-- `phase3_deep` — the last phase. If you do not return a `deep_explore` direction the round is
-  promoted to one anyway, using your first direction as its brief, so make that direction the one
-  you would most want a broad-authority rewrite aimed at.
+- `deep_explore` — one dedicated round that hands the next cycle a DIFFERENT ROUTE. If you do not
+  return a `deep_explore` direction the round is promoted to one anyway, using your first direction
+  as its brief, so make that direction the one you would most want a ground-up rewrite aimed at.
 
-`SEARCH_PHASE_STALL` says how much of the current phase's allowance is spent, as "N of M". Spending
-it hands the search to the next phase; it does not end the run. So a plateau here is not a reason to
-`stop` — it is the ladder doing what it is for, and stopping would skip the phases that exist
-precisely for the case where your directions stopped working.
+### `stop` now means "this LEVEL is finished", and that is an escalation
+
+Read this before applying the stop gate below. **Returning `stop=true` no longer ends the run.** It
+hands the search to the next state, on the reasoning that your gate — floor attacked, no compute
+case still far above it, last verified gain under ~3% — is a statement about *the level you are
+working at*, and that is exactly the premise for moving to the next one.
+
+So the gate keeps its meaning, but check it against the CURRENT level:
+- in `phase1_source` it means source-level rewriting is finished, which is the reason phase2 exists;
+- in `phase2_asm` the criteria are the wrong ruler — they are source-level levers. Stop here when
+  the keypoints have been worked and the remaining ones carry no real stall evidence;
+- in `deep_explore` a stop is ignored: that round exists to produce one rewrite.
+
+`SEARCH_PHASE_STALL` ("N of M") is the backstop for the case where you keep proposing directions and
+none of them land. You reaching the gate first is the normal and better path — it is a reasoned
+verdict where the counter is only a round count.
+
+**What ends the run** is a `deep_explore` round that banks nothing: a ground-up rewrite starting
+from the current best failed to beat it. Not your stop, and not a plateau. A committed deep round
+restarts the ladder at `phase1_source` on the new tree, so treat a new cycle as a genuinely new
+program — the insights from the previous cycle describe an implementation that no longer exists, and
+`CYCLE` in your inputs tells you which one you are in.
 - `ISA_ANALYSIS_SKIPPED` — an escalation was requested and could not run (normally: the canonical tree
   carries no ISA archive yet, so a captured trajectory could not be tied to the measured binary; or L2
   named no dominant hot kernel). Treat the round as `L2_profile` and do not describe it as
