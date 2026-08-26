@@ -156,6 +156,22 @@ whenever the lane runs `isa_evidence=observe|gate`, and `observe` is the default
 - `ISA_ESCALATION_REASON` — why the ladder spent the run's most expensive evidence, prefixed by who
   asked for it (`profile_engineer:`, `tech_lead:` or `verifier:`). L3 is REQUESTED, not triggered by
   a stall counter, so this names a role and its open question rather than a round count.
+
+<a id="search-phase"></a>
+**`SEARCH_PHASE` — which search the round belongs to. Always present, and it changes what a
+direction may even be:**
+- `phase1_source` — the normal case. Directions are source rewrites, exactly as described below.
+- `phase2_asm` — engineers edit the compiled **assembly** and the source is read-only to them. A
+  source direction here cannot be executed; describe WHAT should get faster and let `KEYPOINTS`
+  (also in your inputs) say where. Do not name `focus_files` — they mean nothing this round.
+- `phase3_deep` — the last phase. If you do not return a `deep_explore` direction the round is
+  promoted to one anyway, using your first direction as its brief, so make that direction the one
+  you would most want a broad-authority rewrite aimed at.
+
+`SEARCH_PHASE_STALL` says how much of the current phase's allowance is spent, as "N of M". Spending
+it hands the search to the next phase; it does not end the run. So a plateau here is not a reason to
+`stop` — it is the ladder doing what it is for, and stopping would skip the phases that exist
+precisely for the case where your directions stopped working.
 - `ISA_ANALYSIS_SKIPPED` — an escalation was requested and could not run (normally: the canonical tree
   carries no ISA archive yet, so a captured trajectory could not be tied to the measured binary; or L2
   named no dominant hot kernel). Treat the round as `L2_profile` and do not describe it as

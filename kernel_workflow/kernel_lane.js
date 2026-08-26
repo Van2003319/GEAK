@@ -2389,6 +2389,15 @@ while (dispatched < BUDGET && !stopReason) {
     // (or the research degraded) the key is absent and the prompt is byte-identical to a build
     // without this feature.
     ...(researchBriefPath ? { DEEP_SEARCH_BRIEF: researchBriefPath } : {}),
+    // Which phase this round is, and how close it is to handing the search on. Without it the
+    // planner would keep proposing source directions in a phase whose engineers cannot edit source,
+    // and would read a phase-2 plateau as a failure of its own ideas rather than as the ladder
+    // working. `SEARCH_PHASE_STALL` is deliberately the raw pair, not a percentage: "3 of 4" is a
+    // fact the planner can act on, a "75% exhausted" is a number it would have to interpret.
+    SEARCH_PHASE: roundPhase,
+    SEARCH_PHASE_STALL: `${phaseStall} of ${MAX_NO_IMPROVE} non-improving round(s) in this phase`,
+    ...(roundPhase === PHASE_ASM
+      ? { KEYPOINTS: (profileSummary && profileSummary.keypoints) || [] } : {}),
   };
   const plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).', planningInputs),
@@ -2403,7 +2412,29 @@ while (dispatched < BUDGET && !stopReason) {
     break;
   }
 
-  let directions = plan.directions.map((d, i) => ({
+  let planned = plan.directions;
+  // In the last phase `deep_explore` stops being the planner's option and becomes the phase itself.
+  // Leaving it discretionary would make phase3 indistinguishable from phase1: the ladder would have
+  // spent two escalations to arrive somewhere that runs specialist directions again. The planner's
+  // own direction is kept as the BRIEF -- its title and prompt are what the deep engineer is aimed
+  // at -- so this redirects the round rather than discarding the thinking behind it.
+  if (roundPhase === PHASE_DEEP && !planned.some(d => d.specialty === 'deep_explore')) {
+    const seed = planned[0] || {};
+    log(`Round ${round}: phase3 -- the planner returned no deep_explore direction, so the round is `
+      + `promoted to one. ${planned.length} specialist direction(s) fold into its brief.`);
+    planned = [{
+      ...seed,
+      id: seed.id || `r${round}_d0`,
+      title: seed.title ? `deep: ${seed.title}` : 'deep: open-ended rewrite',
+      specialty: 'deep_explore',
+      prompt: (seed.prompt ? `${seed.prompt}\n\n` : '')
+        + 'This round is the search\'s LAST phase: source-level directions and assembly edits have '
+        + 'both been exhausted. You have broad authority and a high target; treat the text above as '
+        + 'a starting hypothesis rather than as the assignment.',
+    }];
+  }
+
+  let directions = planned.map((d, i) => ({
     ...d,
     idx: i, id: d.id || `r${round}_d${i}`,
     gpu_id: GPU_MODE === 'pin' ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,

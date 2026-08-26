@@ -1096,6 +1096,23 @@ console.log('\n# phase2 dispatches an ASSEMBLY engineer against a located keypoi
   // serves only the two entry points, so a JS guard cannot read the markdown.
 }
 
+console.log('\n# phase3 IS deep_explore, not a phase that may choose it');
+{
+  ok(/roundPhase === PHASE_DEEP && !planned\.some\(d => d\.specialty === 'deep_explore'\)/.test(src),
+    'the last phase promotes the round when the planner did not ask for a deep direction. Leaving ' +
+    'it discretionary would make phase3 indistinguishable from phase1 -- two escalations spent to ' +
+    'arrive somewhere that runs specialist directions again');
+  ok(/specialty: 'deep_explore',/.test(src) && /starting hypothesis rather than as the assignment/.test(src),
+    'and the planner\'s direction becomes the deep engineer\'s BRIEF rather than being discarded, ' +
+    'so a promoted round redirects the thinking instead of throwing it away');
+  ok(/SEARCH_PHASE: roundPhase,/.test(src),
+    'the planner is told which phase it is planning for -- otherwise it proposes source directions ' +
+    'in a phase whose engineers cannot edit source');
+  ok(/SEARCH_PHASE_STALL: /.test(src),
+    'and how much of the phase allowance is spent, so a plateau reads as the ladder working rather ' +
+    'than as a reason to stop');
+}
+
 console.log('\n# SELECTION is the best candidate that PASSES, not the best candidate, executed');
 {
   // Ranking is by suite geomean; acceptance is per-route; and only `candidates[0]` was ever offered
