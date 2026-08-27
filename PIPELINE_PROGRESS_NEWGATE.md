@@ -1,5 +1,20 @@
 # BF16 GEMM — 冷启动 lane `coldstart_newgate_20260819`
 
+> **这是一份带日期的运行日志，不是操作手册。** 下面的记录里有一整套命令现在跑不了了：
+> `check_measurement_frame.py`、`register_epoch.py`、`measure_noise_floor.py`、
+> `noise_floor_stats.py`、`route_floors.py`、`deprovisionalize_epoch.py` 随每机纪元子系统
+> 一并删除，per-route 底噪表也一起没了。当时这些命令是真的跑过、结果是真的——所以正文**不改**，
+> 改了就等于伪造记录。但**不要照着执行**。
+>
+> 两处具体的失效：纪元字母（N/P/Q/R/T/V）已经无法解析回一个底噪百分比，唯一幸存的读数是
+> epoch R 在 tw008 的 7.12%；而 `if (winner && ROUTE_BANDS)` 这个门条件已经不存在了，
+> `routeGate` 现在在 `judgeCandidate` 里无条件调用，只是仍然只对通过 CANDIDATE_FLOOR 的候选
+> 生效——结论没变，机制变了。
+>
+> 当前可用的对应物：封闭机制清单用 `closed_mechanisms.py --brief`，
+> 天花板/余量用 lane 的 `SOL_STATUS`。
+
+
 本文件只服务这一条 lane。容器里还有另外两条线的接力物，**不要混写、也不要把它们的成绩当本 lane 的起点**：
 
 | 文件 | 属于哪条线 | 状态 |
@@ -180,17 +195,17 @@ EXIT=0
 **根因（已在代码里核实，不是只信 agent 的话）。** 这是第 5 个 gate 缺陷，§1 那四条之外的新的一条：
 
 - 本任务的 PRIMARY metric 由 harness 固定为**相对不可变 rocBLAS oracle** 的加速比（`COMMANDMENT.md` 116-129 行），而**种子只有 0.336** —— 候选树从一开始就在自己的比较基准**之下**。
-- `kernel_lane.js:2263`：`return primSpeedup(r.ver) > CANDIDATE_FLOOR;`，而 `CANDIDATE_FLOOR` 默认 **1.0**。于是从 0.336 爬到 rocBLAS 平价的**整段过程全部被过滤掉**，`candidates=[]` → `winner=null`。
-- 致命之处：本 lane 要测的 per-route gate 挂在 `kernel_lane.js:2352` 的 `if (winner && ROUTE_BANDS)` 后面。**winner 恒为 null，gate 就永远跑不到** —— 本 lane 会以另一种方式复现旧 lane "gate 一行都没打"的结局，且拿不到任何关于自身自变量的数据。
-- 代码自己的注释（`kernel_lane.js:113-118`）逐字描述了这个情形：候选"lands BELOW the comparator by construction"，在 1.0 下"its recovery phase is invisible"。旋钮本来就是为这个准备的。
+- `kernel_lane.js (the `primSpeedup(r.ver) > CANDIDATE_FLOOR` admission filter)`：`return primSpeedup(r.ver) > CANDIDATE_FLOOR;`，而 `CANDIDATE_FLOOR` 默认 **1.0**。于是从 0.336 爬到 rocBLAS 平价的**整段过程全部被过滤掉**，`candidates=[]` → `winner=null`。
+- 致命之处：本 lane 要测的 per-route gate 挂在 `kernel_lane.js (the per-route gate call inside `judgeCandidate`)` 的 `if (winner && ROUTE_BANDS)` 后面。**winner 恒为 null，gate 就永远跑不到** —— 本 lane 会以另一种方式复现旧 lane "gate 一行都没打"的结局，且拿不到任何关于自身自变量的数据。
+- 代码自己的注释（`kernel_lane.js (the `CANDIDATE_FLOOR` comment block)-118`）逐字描述了这个情形：候选"lands BELOW the comparator by construction"，在 1.0 下"its recovery phase is invisible"。旋钮本来就是为这个准备的。
 
 **处置。** 按 §2 的唯一合法路径改**文件**（不是手抄参数）：`kernel_workflow/lanes/coldstart_newgate_20260819.json` 增加 `candidate_floor: 0.29`，并写进 `_require` 让它被 pin 住。`lane_args.py --check` → **exit 0**（9 个参数，6 个 pinned 值匹配），`--print` 重新渲染后**原样**调用。
 
-- 为什么是 0.29：低于同场 control（0.3353）的幅度大于实测最宽的 route band（11.55%，最坏读数 0.2966），所以不会丢掉任何真实结果；同时诚实报告"比种子还差"的 engineer 仍然走 `kernel_lane.js:2086` 的 `trustworthyBelowBaseline` 跳过 verify 的经济性。
+- 为什么是 0.29：低于同场 control（0.3353）的幅度大于实测最宽的 route band（11.55%，最坏读数 0.2966），所以不会丢掉任何真实结果；同时诚实报告"比种子还差"的 engineer 仍然走 `kernel_lane.js (`const trustworthyBelowBaseline`)` 的 `trustworthyBelowBaseline` 跳过 verify 的经济性。
 - **提交判据没有被放松**：banking 仍然要过 per-route band gate 或 `cumulative` 上的 MIN_IMPROVE。改的是**被跟踪**的东西，不是**被采纳**的东西。
 - **配对性代价（如实记录）**：greedy lane 跑的是 1.0 默认值，所以两条 lane 现在差**两个**旋钮，严格意义上不再是单变量对照。这是权衡后的选择——floor 留在 1.0，本 lane 根本无法触发 per-route gate，那就是"干净但什么都测不到"。两条曲线应读作"per-route gate + 可达的候选表" vs "suite gate"；并注意 greedy 早期同样耗在这段隐形的恢复期里。
 
-**重启方式。** `resumeFromRunId: wf_e22ca8b0-fbb`。`CANDIDATE_FLOOR_TXT` 只出现在 Optimize 提示词一处（`kernel_lane.js:2041`），所以 Setup / Analyze / Benchmark / Profile 的提示词未变、命中缓存，昂贵的 baseline GPU 测量不用重做；只有 engineer 轮次重跑。新 task ID `wtlxltbmv`。
+**重启方式。** `resumeFromRunId: wf_e22ca8b0-fbb`。`CANDIDATE_FLOOR_TXT` 只出现在 Optimize 提示词一处（`kernel_lane.js (`CANDIDATE_FLOOR_TXT` in the Optimize prompt)`），所以 Setup / Analyze / Benchmark / Profile 的提示词未变、命中缓存，昂贵的 baseline GPU 测量不用重做；只有 engineer 轮次重跑。新 task ID `wtlxltbmv`。
 
 **round 1 另外值得带走的事实**（来自 retrospective，已并入 lane 记忆）：
 - 绑定项是 **occupancy 而非 LDS 复用**：128x128x64 要 34816 B → 1 CTA/CU，单靠寄存器分块只有 1.32x；BK 减半到 32（18432 B，3 CTA/CU）同样 tile 再拿 1.84x。超过 4x2 fragment grid 后寄存器分块这条轴就耗尽了。
@@ -217,7 +232,7 @@ EXIT=0
 ## 2026-08-19 15:2x — 第一次真正的提交：per-route band gate 首次运行并 ACCEPT
 
 `candidate_floor: 0.29` 落地后，round 1 重跑的结果第一次让 `winner` 非空，于是
-`kernel_lane.js:2352` 的 `if (winner && ROUTE_BANDS)` 分支——本 lane 存在的理由——
+`kernel_lane.js (the per-route gate call inside `judgeCandidate`)` 的 `if (winner && ROUTE_BANDS)` 分支——本 lane 存在的理由——
 在这个项目里第一次真的执行了。
 
 **独立复算（不采信 agent 的说法）。** 我用 Python 孪生 `scripts/route_gate.py`
@@ -311,7 +326,7 @@ prompt 未变，resume 只会重放同一次 policy_failed。retro 里那个 d0 
 
 注意 `~/.claude/.../workflows/wf_e22ca8b0-fbb.json` 这个记录文件停在 14:01 就不再更新了，
 所以里面只有**首次** launch 的回显；resume 之后的回显没有落进去。不要拿它当 live 配置读。
-live 进程确实跑在 0.29 上，证据是判决本身：admission filter（`kernel_lane.js:2263`
+live 进程确实跑在 0.29 上，证据是判决本身：admission filter（`kernel_lane.js (the `primSpeedup(r.ver) > CANDIDATE_FLOOR` admission filter)`
 `primSpeedup(r.ver) > CANDIDATE_FLOOR`）放行了 0.6114 并让 `winner` 非空，这在 floor=1.0
 下不可能发生。
 
@@ -332,7 +347,7 @@ live 进程确实跑在 0.29 上，证据是判决本身：admission filter（`k
    磁盘上 `round_1/engineer_2/worker_result.json`（13:32 写入）同样带 `['reduce_lds']`。
 2. verifier 收到的确实是空的。它的 prompt 里逐字是 `- ISA_MECHANISM_CLAIMS: []`（15:02:42）。
 3. 中间断在哪：这次 verify 走的是 **recovery 路径**。resume 之后 engineer_2 的 engineer agent
-   （`a06c97744fe75ffd9` / `ae6521b8b776e51ba`）没有返回结果，于是 `kernel_lane.js:2090`
+   （`a06c97744fe75ffd9` / `ae6521b8b776e51ba`）没有返回结果，于是 `kernel_lane.js (the `exit_code === 3` branch of `twinReject`)`
    的 `recovered = !eng || eng.status === 'failed'` 为真、`eng` 为 null，
    而 L2133 的 `eng && Array.isArray(eng.mechanism_claims) ? … : []` 就渲染成了 `[]`。
    verifier 拒绝自己替补 claim——这是对的，它被明确要求不许把假设改成证据的形状。
@@ -362,7 +377,7 @@ live 进程确实跑在 0.29 上，证据是判决本身：admission filter（`k
 （也正好会带上 claim）。
 
 **"如果当时是 gate 模式会怎样" —— 这个问题可以从代码直接回答，不必猜。**
-`isaEvidenceReject`（`kernel_lane.js:1627`）只在 `mechanism_verdict === 'refuted'` 时拒绝；
+`isaEvidenceReject`（`kernel_lane.js (`const isaEvidenceReject`)`）只在 `mechanism_verdict === 'refuted'` 时拒绝；
 HOLE、缺归档、`indeterminate`、以及任何 `checks` finding 都**不**拒绝，而且注释里给了理由：
 证据里的洞是我们的缺陷、不是候选的过错，在这个方向上失败会静默地毁掉正确的快 kernel。
 所以 gate 模式**不会**挡掉本轮这个候选。
@@ -537,7 +552,7 @@ to 16.44%"——这是 §13.6 的**加速比**那一列，而本模块在 §13.6
 
 ### 结构性发现：闸门只作用于 `candidates[0]`，而选 winner 用的是另一套判据
 
-`kernel_lane.js:2358  const winner = candidates[0] || null;`
+`kernel_lane.js (`const winner = candidates[0]`)  const winner = candidates[0] || null;`
 候选按 geomean 排序，**只有排头那个进闸门**。于是 round 2 的结局是：
 
 - 0.924 geomean 更高 → 当选 winner → 被逐路闸门以 0.0006 ms 的回退否决；
@@ -688,7 +703,7 @@ ACCEPT -- prefill_m1024_down +66.97% (band 0.89%), prefill_m2048_square +64.57% 
 
 ### 新发现：**integrated winner 永远没有同场控制臂**
 
-`kernel_lane.js:2372-2373`：
+`kernel_lane.js (the winner-commit block in `judgeCandidate`)-2373`：
 ```js
 const sameSession = !!winner.control_per_case;
 const incumbentSide = sameSession ? winner.control_per_case : bestPerCase;
@@ -1361,7 +1376,7 @@ evidence about headroom. `prefill_m128_square` at 0.834 and `decode_m96_up` at 0
 than the oracle -- routes 17% and 7% underwater are not closed by five knobs failing.
 
 What makes this a different draw from wave 3 rather than a repeat: `suggest_next` is **write-only across
-wave boundaries** (`kernel_lane.js:2630` reads it from the tech_lead's live memory, never from
+wave boundaries** (`kernel_lane.js (the `tech_lead:update_memory` call)` reads it from the tech_lead's live memory, never from
 `prior_state`), so wave 3's DO-NOT-RE-ISSUE list, its open-problem statement, and its three methodology
 corrections were all set to evaporate and be re-bought at full price. I promoted them into `insights`,
 which the resume path *does* import, and then checked rather than trusting it: the wave-4 agent transcript

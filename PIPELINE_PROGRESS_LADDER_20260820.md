@@ -1,5 +1,20 @@
 # BF16 GEMM — 冷启动 lane `coldstart_ladder_20260820`
 
+> **这是一份带日期的运行日志，不是操作手册。** 下面的记录里有一整套命令现在跑不了了：
+> `check_measurement_frame.py`、`register_epoch.py`、`measure_noise_floor.py`、
+> `noise_floor_stats.py`、`route_floors.py`、`deprovisionalize_epoch.py` 随每机纪元子系统
+> 一并删除，per-route 底噪表也一起没了。当时这些命令是真的跑过、结果是真的——所以正文**不改**，
+> 改了就等于伪造记录。但**不要照着执行**。
+>
+> 两处具体的失效：纪元字母（N/P/Q/R/T/V）已经无法解析回一个底噪百分比，唯一幸存的读数是
+> epoch R 在 tw008 的 7.12%；而 `if (winner && ROUTE_BANDS)` 这个门条件已经不存在了，
+> `routeGate` 现在在 `judgeCandidate` 里无条件调用，只是仍然只对通过 CANDIDATE_FLOOR 的候选
+> 生效——结论没变，机制变了。
+>
+> 当前可用的对应物：封闭机制清单用 `closed_mechanisms.py --brief`，
+> 天花板/余量用 lane 的 `SOL_STATUS`。
+
+
 本文件只服务这一条 lane。容器里还有另外三条线的接力物，**不要混写、也不要把它们的成绩当本 lane 的起点**：
 
 | 文件 | 属于哪条线 | 状态 |
