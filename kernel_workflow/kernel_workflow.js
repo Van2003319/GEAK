@@ -59,7 +59,7 @@ const KNOWN_ARGS = new Set([
   'use_learned_kb', 'kb_dir_cap', 'kb_cold_direction', 'update_experience',
   'warm_start', 'warm_start_match', 'warm_start_min_speedup', 'kb_artifacts_dir',
   'kb_mode', 'kb_store_dir', 'kb_remote', 'kb_framework_version',
-  'held_out', 'box_quiet',
+  'held_out', 'box_quiet', 'sol_shapes',
   'deadline_epoch', 'no_stop_s', 'max_forced_replans',
 ]);
 {

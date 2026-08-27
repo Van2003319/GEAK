@@ -70,6 +70,8 @@ const KNOWN_ARGS = new Set([
   // The measuring instrument for the KB arms: `held_out` marks a run whose lessons must not be
   // learned from, `box_quiet` records whether the box was contended while it was measured.
   'held_out', 'box_quiet',
+  // Where the task declares (m,n,k) per route, which is the only honest source for a SOL bound.
+  'sol_shapes',
   // Wall-clock window. Removed here when the launcher was decoupled, and restored with the merge
   // that brought the code back: the only stop conditions this lane has left are budget and
   // deep_explore_failed, neither of which is a clock, so without these a fixed-duration run has to
@@ -584,6 +586,27 @@ const WARM_START_RETURN_AFTER = WARM_START === 'return_after_read';
 const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts' : '')).replace(/\/+$/, '');
 const EXPERIENCE_STORE = `${WORKFLOW_DIR}/scripts/experience_store.py`;
+// ---------------------------------------------------------------------------
+// Speed-of-Light status for the planner.
+//
+// WHAT THIS IS NOT. `profileSolStrip` below deletes every SOL-shaped field an AGENT publishes,
+// because finding (89) was a profile that announced `sol_gap_x: 12` against a gated card that said
+// 6.2x -- a number with no ceiling behind it, read by the Director and every Engineer, and never
+// passing the gate that would have refused it. Nothing here weakens that. The difference is where
+// the ceiling comes from: `sol_guidance.py --arch` takes it ONLY from `sol_card.py` and REFUSES a
+// caller that also supplies one, so the number cannot be authored by whoever wants it to be true.
+//
+// The agent in this path is a TRANSCRIBER, not a source: it runs one fixed command and returns its
+// stdout. That is still a place a wrong number could enter, so the receipt has to carry the card it
+// came from and `solStatusFrom` refuses one whose `ceilings_source` does not name the arch -- the
+// same rule (89) states, applied to the only remaining way in.
+//
+// SHAPES ARE DECLARED BY THE TASK, never inferred. A SOL bound needs (m,n,k) per route, and the
+// only place those exist honestly is the task that froze the suite. No shapes file => no SOL_STATUS
+// and a named reason in the echo, because a headroom figure computed from guessed dimensions is
+// exactly the class of number this whole subsystem exists to keep out of the roadmap.
+const SOL_SHAPES = String(A.sol_shapes || '').trim();
+const SOL_GUIDANCE = `${WORKFLOW_DIR}/scripts/sol_guidance.py`;
 // Every candidate costs a full on-box verify to reject, so a recorded near-tie is not worth reading.
 const WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
   ? parseFloat(A.warm_start_min_speedup) : 1.05;
@@ -1051,9 +1074,59 @@ const profileSolStrip = (rep, where) => {
       + `has no calibrated roofline behind it, so it has no ceiling provenance to publish (89). `
       + `The measured counters are kept.`);
     rep.sol_note = 'SOL-shaped fields were removed: the roadmap profile has no ceiling '
-      + 'provenance. Any headroom claim needs a measured ceiling, not a nameplate one.';
+      + 'provenance. Any headroom claim needs a measured ceiling, not a nameplate one. A grounded '
+      + 'one arrives separately as SOL_STATUS, computed by the lane from the gated card.';
   }
   return rep;
+};
+
+// The measured time each route actually spends, joined to the shapes the task declared. Both halves
+// have to come from the same route NAME: a gap is a ratio between a bound and a measurement, so
+// pairing route i's shape with route j's time produces a number that is wrong without being
+// implausible. Routes the task declared but this run did not measure are DROPPED rather than
+// defaulted, and the caller reports how many.
+const solRoutesFor = (shapes, cases) => {
+  const timeOf = new Map();
+  for (const c of (Array.isArray(cases) ? cases : [])) {
+    const ms = c && Number(c.optimized_ms);
+    if (c && c.name && Number.isFinite(ms) && ms > 0) timeOf.set(String(c.name).trim(), ms);
+  }
+  const routes = [], missing = [];
+  for (const s of (Array.isArray(shapes) ? shapes : [])) {
+    const name = String((s && s.route) || '').trim();
+    const ms = timeOf.get(name);
+    if (!name || !Number.isFinite(ms)) { if (name) missing.push(name); continue; }
+    routes.push({ route: name, m: s.m, n: s.n, k: s.k, measured_s: ms / 1000 });
+  }
+  return { routes, missing };
+};
+
+// Refuse a receipt that cannot name the ceiling it used. `--arch` makes `sol_guidance.py` take the
+// bound from the gated card and REFUSE a caller that supplies one, so a well-formed receipt always
+// carries the card's own source line. A receipt without it did not come from that path, and the
+// only remaining explanation is the transcriber -- which is finding (89) arriving by a new door.
+const solStatusFrom = (rec, arch, basis) => {
+  if (!rec || rec.ok !== true) {
+    return { status: null, why: rec && rec.error ? String(rec.error) : 'the resolver returned nothing' };
+  }
+  const src = String(rec.ceilings_source || '');
+  if (!src.toLowerCase().includes(String(arch).toLowerCase())) {
+    return { status: null,
+      why: `the receipt does not name ${arch} as the source of its ceiling (got `
+        + `"${src || 'nothing'}"), so the number has no card behind it and is refused -- this is (89) `
+        + 'and the transcription step is the only way it could still get in' };
+  }
+  return {
+    status: {
+      basis, ceilings_source: src,
+      weighted_achievement: rec.weighted_achievement, median_achievement: rec.median_achievement,
+      screen_passed: rec.screen_passed,
+      ceiling_contradicted: rec.ceiling_contradicted || [],
+      gaming_suspected: rec.gaming_suspected || [],
+      routes: Array.isArray(rec.routes) ? rec.routes : [],
+    },
+    why: '',
+  };
 };
 
 // --- Deep Research Agent (DRA) schemas (opt-in via args.dra_enabled) -------
@@ -1355,6 +1428,33 @@ const VALIDATE_SCHEMA = obj({
 }, ['director_verified_speedup_geomean', 'validation_status']);
 
 // Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
+// The transcription contract for `sol_guidance.py --json`. Only the fields the planner reads, plus
+// `ceilings_source` -- which is not decoration: it is the one field that lets the lane tell a
+// receipt produced by the gated card from a number the transcriber improvised.
+const SOL_SCHEMA = obj({
+  ok: { type: 'boolean' },
+  // Named when the command refused. `sol_card.py` raises rather than substituting a default when a
+  // card has no peak for a dtype, and that refusal is the answer -- see the measured/fp8 case.
+  error: { type: 'string' },
+  basis: { type: 'string' }, ceilings_source: { type: 'string' },
+  weighted_achievement: { type: 'number' }, median_achievement: { type: 'number' },
+  screen_passed: { type: 'boolean' },
+  ceiling_contradicted: { type: 'array', items: { type: 'string' } },
+  gaming_suspected: { type: 'array', items: { type: 'string' } },
+  routes: {
+    type: 'array',
+    items: obj({
+      route: { type: 'string' }, gap: { type: 'number' }, achievement: { type: 'number' },
+      regime: { type: 'string' }, verdict: { type: 'string' },
+      sol_us: { type: 'number' }, measured_us: { type: 'number' },
+      // The module's own caveats travel with the route. "compute ceiling has no witness ... which
+      // ranks nothing" is the difference between a bound that discriminates and one that does not,
+      // and the planner cannot weigh a gap without it.
+      notes: { type: 'array', items: { type: 'string' } },
+    }),
+  },
+}, ['ok']);
+
 const WARMSTART_RESOLVE_SCHEMA = obj({
   read_reason: { type: 'string' }, slug: { type: 'string' },
   // What this run's name derived to vs the page actually served, so a surprising match is visible.
@@ -1562,6 +1662,12 @@ phase('Setup');
       `${shown('gpu_mode', GPU_MODE)}  gpu_ids=${GPU_IDS}`);
   log(`  ${shown('ir_diagnostics', IR_DIAGNOSTICS ? 'on' : 'off')}` +
       `  evidence_ladder=${LADDER_ENABLED ? 'L1..L4' : 'L1..L2 (no IR trajectory, so no L3/L4)'}`);
+  // Named here because the alternative is that a planner runs without a headroom figure and nobody
+  // notices: a missing SOL_STATUS looks exactly like a run where the hardware question never came up.
+  log(`  ${shown('sol_shapes', SOL_SHAPES || '(none)')}` +
+      `  sol_status=${SOL_SHAPES
+        ? 'theoretical basis, ceiling from the gated arch card'
+        : 'OFF -- no task shapes, so the planner gets no headroom figure'}`);
   // Stale text is worse here than no text: this echo exists so a reader can see what will decide
   // the round before any GPU time is spent, and it went on promising a derivation that had been
   // deleted. `not supplied` is not a degraded state any more -- it means every route is held to
@@ -2624,6 +2730,81 @@ correctness check; only report committed=true if it still passes. Return JSON {c
   }
 }
 
+// ===========================================================================
+// SOL_STATUS: how much of the hardware is still on the table, from the gated card.
+//
+// Refreshed only when the times change -- once on the baseline, then after each COMMITTED round's
+// reprofile. A gap is a ratio between a fixed bound and a measurement, so recomputing it on a round
+// that banked nothing would spend an agent call to print the same number.
+//
+// THEORETICAL is the headline basis, which is what was asked for: the datasheet bound is what is
+// physically left. Its known weakness is stated to the planner rather than hidden -- against it
+// rocBLAS itself sits 3.5-7.4x away on this suite, so "4x remains" says the same thing about every
+// route and cannot tell you WHICH one to spend a direction on. The measured-achievable basis is the
+// one that discriminates, so it is fetched too when the card has it. On this fp8 suite it does not,
+// and the card raising rather than substituting a default IS the answer: nobody has microbenchmarked
+// an fp8 peak on this box, and a bound nobody measured must not be presented as one that was.
+// ===========================================================================
+let solStatus = null;
+let solReason = '';
+const refreshSol = async (cases, label) => {
+  if (!SOL_SHAPES) { solReason = 'no sol_shapes file was passed, so no route has a declared (m,n,k)'; return; }
+  if (!GFX) { solReason = 'the baseline profile named no gfx, so no card can be selected'; return; }
+  const shapes = await agentT(
+    `Read ${JSON.stringify(SOL_SHAPES)} and return its contents verbatim as StructuredOutput. It is `
+    + `JSON of the form {dtype, routes:[{route,m,n,k}]}. Do not add, drop, reorder, or recompute any `
+    + `field, and do not invent a route the file does not contain. If the file does not exist, return `
+    + `{dtype:"", routes:[]} -- that is a valid answer meaning the task declared no shapes.`,
+    { phase: 'Optimize', label: `sol:shapes ${label}`,
+      schema: obj({ dtype: { type: 'string' },
+        routes: { type: 'array', items: obj({ route: { type: 'string' },
+          m: { type: 'number' }, n: { type: 'number' }, k: { type: 'number' } }) } }) }) || {};
+  const { routes, missing } = solRoutesFor(shapes.routes, cases);
+  if (!routes.length) {
+    solReason = `${SOL_SHAPES} declared ${(shapes.routes || []).length} route(s) but none of them `
+      + 'matched a measured case by name, so every gap would have paired a bound with another '
+      + `route's time`;
+    return;
+  }
+  if (missing.length) {
+    log(`  [sol] ${missing.length} declared route(s) were not measured this run and are excluded: `
+      + `${missing.join(', ')}`);
+  }
+  const spec = { dtype: shapes.dtype, routes };
+  const specPath = `${EVAL_DIR}/sol/${label}_spec.json`;
+  const rec = await agentT(
+    `You are the SOL resolver. Run EXACTLY this and return the JSON it prints on stdout, verbatim, `
+    + `as StructuredOutput -- do not add, drop, reorder, reinterpret, or recompute any field, and do `
+    + `not supply a ceiling of your own. Set ok:true when the command exits 0. If it exits non-zero, `
+    + `set ok:false and put its stderr in \`error\`: a refusal is a valid answer here (the card `
+    + `raises rather than defaulting when it has no peak for a dtype) and must be reported, not `
+    + `worked around. Copy \`source\` from the first route's \`ceilings\` into \`ceilings_source\`, `
+    + `and each route's \`measured_s\` into \`measured_us\` as microseconds.
+\`\`\`bash
+mkdir -p ${JSON.stringify(`${EVAL_DIR}/sol`)}
+cat > ${JSON.stringify(specPath)} <<'SOLSPEC'
+${JSON.stringify(spec, null, 2)}
+SOLSPEC
+python3 ${JSON.stringify(SOL_GUIDANCE)} ${JSON.stringify(specPath)} --arch ${GFX} \\
+  --basis theoretical --json | tee ${JSON.stringify(`${EVAL_DIR}/sol/${label}_receipt.json`)}
+\`\`\``,
+    { phase: 'Optimize', label: `sol:resolve ${label}`, schema: SOL_SCHEMA });
+  const { status, why } = solStatusFrom(rec, GFX, 'theoretical');
+  solStatus = status;
+  solReason = why;
+  if (!status) { log(`  [sol] no status this round: ${why}`); return; }
+  const worst = [...status.routes].sort((a, b) => (b.gap || 0) - (a.gap || 0))[0];
+  log(`  [sol] ${label}: weighted achievement ${Number(status.weighted_achievement).toFixed(3)} of `
+    + `the ${GFX} datasheet bound; furthest route ${worst ? worst.route : '?'} at `
+    + `${worst ? Number(worst.gap).toFixed(2) : '?'}x. Ceiling: ${status.ceilings_source.slice(0, 90)}`);
+  if (status.gaming_suspected.length || status.ceiling_contradicted.length) {
+    log(`  [sol] SCREEN: gaming_suspected=[${status.gaming_suspected.join(', ')}] `
+      + `ceiling_contradicted=[${status.ceiling_contradicted.join(', ')}]`);
+  }
+};
+await refreshSol(BASELINE_PER_CASE, 'baseline');
+if (!solStatus && solReason) log(`  [sol] disabled: ${solReason}`);
+
 // `noImprove < MAX_NO_IMPROVE` used to be the third clause. It is `!stopReason` now because that
 // counter no longer ends a run: a stalled phase ESCALATES (see `advancePhase`), and only the last
 // phase of a cycle turns a stall into a stop. Leaving the old clause in would end the run at the
@@ -2929,6 +3110,11 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
     } : {}),
     ...(roundPhase === PHASE_ASM
       ? { KEYPOINTS: (profileSummary && profileSummary.keypoints) || [] } : {}),
+    // Present only when a card actually produced one. Absent is the honest state and it is
+    // load-bearing: a planner handed `SOL_STATUS: null` would have to decide what a null headroom
+    // means, and the whole subsystem exists because that decision used to be made by whoever was
+    // reading. When it is absent the reason is in the run log, not in the prompt.
+    ...(solStatus ? { SOL_STATUS: solStatus } : {}),
     // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
     ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
     ...(forbidStop ? { STOP_NOT_PERMITTED:
@@ -3724,6 +3910,10 @@ matter how the rest of the run looked.`,
         }),
         { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
       profileSummary = profileSolStrip(profileSummary, `reprofile r${round}`);
+      // The tree moved, so the gaps did. Recomputed from `bestPerCase`, which the commit above just
+      // advanced to this winner's times -- the same rows the ledger and the next round's plan read,
+      // so the headroom the planner sees and the times it plans against cannot disagree.
+      await refreshSol(bestPerCase, `r${round}`);
     }
     committedThisRound = commitOK;
   }

@@ -1521,6 +1521,66 @@ console.log('\n# the roadmap profile may not publish a ceiling it did not earn -
     + 'TechLead reads, so covering only the baseline would leak from round 1 on');
 }
 
+console.log('\n# ...and the grounded one that replaces it: SOL_STATUS from the gated card');
+{
+  const S = new Function(
+    grab(/const solRoutesFor = \([\s\S]*?const solStatusFrom = \([\s\S]*?\n\};\n/, 'the SOL helpers')
+    + '\nreturn { solRoutesFor, solStatusFrom };')();
+
+  // THE JOIN. Shapes and times arrive from different places and are married by route NAME, so the
+  // failure to guard against is not a crash -- it is a bound paired with the wrong route's time,
+  // which yields a plausible number that is wrong.
+  const shapes = [{ route: 'a', m: 2, n: 4096, k: 4096 }, { route: 'b', m: 8, n: 11008, k: 4096 }];
+  const cases = [{ name: 'b', optimized_ms: 0.05 }, { name: 'a', optimized_ms: 0.02 }];
+  const joined = S.solRoutesFor(shapes, cases);
+  ok(joined.routes.length === 2
+     && joined.routes.find(r => r.route === 'a').measured_s === 0.00002
+     && joined.routes.find(r => r.route === 'b').m === 8,
+    'each route carries ITS OWN shape and ITS OWN time -- the two lists arrive in different orders, '
+    + 'and pairing them positionally is a gap that is wrong without being implausible',
+    JSON.stringify(joined.routes));
+  ok(S.solRoutesFor(shapes, [{ name: 'a', optimized_ms: 0.02 }]).routes.length === 1
+     && S.solRoutesFor(shapes, [{ name: 'a', optimized_ms: 0.02 }]).missing.join() === 'b',
+    'a declared route this run did not measure is DROPPED and NAMED, not defaulted -- a zero or a '
+    + 'carried-over time would put an invented measurement under a real bound');
+  for (const bad of [[{ name: 'a', optimized_ms: 0 }], [{ name: 'a', optimized_ms: -1 }],
+                     [{ name: 'a' }], [{ optimized_ms: 0.02 }]])
+    ok(S.solRoutesFor(shapes, bad).routes.length === 0,
+      'a non-positive or nameless time is not a measurement, so it contributes no route',
+      JSON.stringify(bad));
+
+  // THE PROVENANCE DOOR. `--arch` makes sol_guidance take the ceiling from the card and refuse a
+  // caller-supplied one, so the only remaining way an ungrounded number gets in is the agent that
+  // transcribes stdout. That is exactly finding (89) arriving by a new route.
+  const good = { ok: true, ceilings_source: 'gfx942 theoretical card (datasheet peak, UNATTAINED)',
+    weighted_achievement: 0.1, routes: [] };
+  ok(S.solStatusFrom(good, 'gfx942', 'theoretical').status !== null,
+    'a receipt that names the card it used is accepted');
+  ok(S.solStatusFrom({ ...good, ceilings_source: 'gfx90a nameplate' }, 'gfx942', 'theoretical').status === null,
+    'a receipt naming ANOTHER arch is refused -- a gfx90a bound on a gfx942 box is the same class '
+    + 'of error as no bound at all, and it would read as a real one');
+  ok(S.solStatusFrom({ ...good, ceilings_source: '' }, 'gfx942', 'theoretical').status === null,
+    'and a receipt with no source at all is refused: that is (89) verbatim, one door further along');
+  ok(S.solStatusFrom({ ok: false, error: 'card has no peak for dtype' }, 'gfx942', 'theoretical').status === null
+     && /no peak/.test(S.solStatusFrom({ ok: false, error: 'card has no peak for dtype' }, 'gfx942', 'theoretical').why),
+    'a REFUSAL is carried as its own reason, not swallowed -- the card raising because it has no '
+    + 'measured fp8 peak is the answer, and a fallback bound would be the bug');
+  ok(S.solStatusFrom(null, 'gfx942', 'theoretical').status === null,
+    'and a dead resolver yields no status rather than an empty one that reads as "no headroom"');
+
+  // Wiring: computed is not the same as consulted, and refreshed is not the same as correct.
+  ok(/\.\.\.\(solStatus \? \{ SOL_STATUS: solStatus \} : \{\}\)/.test(src),
+    'SOL_STATUS reaches the planner, and only when there IS one -- a null handed to the prompt '
+    + 'makes the agent decide what a missing ceiling means, which is the decision this replaces');
+  ok(/await refreshSol\(BASELINE_PER_CASE, 'baseline'\)/.test(src)
+     && /await refreshSol\(bestPerCase, `r\$\{round\}`\)/.test(src),
+    'it is computed on the baseline and recomputed after a COMMITTED round -- refreshing on a round '
+    + 'that banked nothing would re-derive the same gaps, and NOT refreshing after one that did '
+    + 'would plan the next round against the headroom of a tree that no longer exists');
+  ok(/--basis theoretical/.test(src) && /--arch \$\{GFX\}/.test(src),
+    'the command pins both the basis and the arch, so the ceiling cannot come from the caller');
+}
+
 console.log(failures ? `\nFAIL: ${failures} check(s) failed.`
   : '\nPASS: the admission gates hold.');
 process.exit(failures ? 1 : 0);
