@@ -517,12 +517,20 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
   // its two admissibility predicates and its accounting stay together: they are one
   // rule split across four names, and a mutation that moved one away from the others
   // would be invisible to a per-function grab.
+  // The phase names come along because the ladder now gates on them. Grabbed rather than restated:
+  // a guard holding its own copy of 'phase2_asm' would keep passing after the lane renamed it, and
+  // every assertion below would then be exercising the fall-through branch instead of the gate.
   const L = new Function(
-    grab(/const STAGE_L1 = [\s\S]*?\nconst reachedStage = \([\s\S]*?\n\};\n/, 'the evidence ladder')
+    grab(/const PHASE_SOURCE = [\s\S]*?const PHASE_ORDER = \[[^\]]*\];\n/, 'the phase names')
+    + grab(/const STAGE_L1 = [\s\S]*?\nconst reachedStage = \([\s\S]*?\n\};\n/, 'the evidence ladder')
     + '\nreturn { STAGE_L1, STAGE_L2, STAGE_L3, STAGE_L4, STAGE_FAILED, STAGE_LEGACY,'
+    + ' PHASE_SOURCE, PHASE_ASM, PHASE_DEEP,'
     + ' EVIDENCE_MODEL, reachedStageOf, hasDominantHotKernel, evidenceLadder,'
     + ' admissibleAttribution, wantsCompilerEscalation, reachedStage };')();
-  const ladder = L.evidenceLadder;
+  // Phase defaults to the SOURCE phase here, in the harness and not in the lane: every case below
+  // was written about a phase-1 round, and the phase gate has its own cases further down.
+  const ladder = (rounds, profile, enabled, phase) =>
+    L.evidenceLadder(rounds, profile, enabled, phase === undefined ? L.PHASE_SOURCE : phase);
   // A profile that named a hot kernel. Required for any escalation: a trajectory is
   // captured per function, so without one L3 would trace a guess.
   const hot = { top_kernels: [{ name: '_Z10hot_kernelPf', pct_of_total: 91.2 }] };
@@ -575,6 +583,35 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
      && ladder([rnd(L.STAGE_L3)], asks(), true).requested !== L.STAGE_L4,
     'L4 is NEVER requested at the top of a round, however loudly L3 was asked for: it is entered '
     + 'from inside the round, on a question L3 formed');
+
+  // THE PHASE GATE. L3 rebuilds from SOURCE, so it may only run in the phase that searches source.
+  // Each of the three requesters is checked separately: the point of deriving requesters from the
+  // tree was that a per-call-site rule lapses, and a gate that caught two of three would lapse the
+  // same way.
+  for (const [who, rounds, profile] of [
+    ['profile_engineer', [rnd(L.STAGE_L2)], asks('counters cannot separate issue from dependency')],
+    ['tech_lead', [planAsked()], hot],
+    ['verifier', [rnd(L.STAGE_L2, ['refuted'])], hot],
+  ]) {
+    ok(ladder(rounds, profile, true, L.PHASE_SOURCE).requested === L.STAGE_L3,
+      `${who} asking in a phase-1 round still escalates -- the gate below must not cost the phase `
+      + 'that L3 exists for');
+    for (const p of [L.PHASE_ASM, L.PHASE_DEEP]) {
+      const r = ladder(rounds, profile, true, p);
+      ok(r.requested === null, `${who} asking in a ${p} round does NOT buy a recompile`);
+      // Named, not silent, and the requester survives into the record. A skip nobody is told about
+      // is indistinguishable from a round where nobody asked, and the planner reading the round
+      // would conclude the profiler had no question rather than that the phase could not answer it.
+      ok(r.skip_reason !== '' && r.requested_by.join() === who,
+        `and the refusal says why and still names ${who} as having asked`);
+    }
+  }
+  ok(/edited assembly/.test(ladder([rnd(L.STAGE_L2)], asks(), true, L.PHASE_ASM).skip_reason)
+     && /about to stop existing/.test(
+          ladder([rnd(L.STAGE_L2)], asks(), true, L.PHASE_DEEP).skip_reason),
+    'and the two phases are refused for their OWN reasons -- phase2 because the measured binary '
+    + 'did not come from the source that would be recompiled, deep because the tree is being '
+    + 'replaced. One shared "wrong phase" message would hide that they are different facts');
 
   // Two requesters at once is the case where L3 is most clearly worth its cost.
   {
@@ -674,8 +711,11 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
   }
 
   // Wiring (55): a gate whose result is computed and discarded is a comment.
-  ok(/const ladderState = evidenceLadder\(history\.rounds, profileSummary, LADDER_ENABLED\);/.test(src),
-    'the round loop actually consults the ladder rather than deciding depth inline');
+  ok(/const ladderState = evidenceLadder\(history\.rounds, profileSummary, LADDER_ENABLED, roundPhase\);/.test(src),
+    'the round loop actually consults the ladder rather than deciding depth inline, and hands it '
+    + 'the PHASE -- pinned to `roundPhase` and not to `searchPhase`, because the live variable can '
+    + 'have moved by the bottom of this same iteration and the ladder would then be answering for '
+    + 'the phase that replaced the one it ran in');
   ok(!/evidenceLadder\([^)]*phaseStall/.test(src) && !/evidenceLadder\([^)]*noImprove/.test(src),
     'and it passes no stall counter: a ladder that could still read one would keep the old '
     + '"a flat round buys a recompile" path alive beside the request path');

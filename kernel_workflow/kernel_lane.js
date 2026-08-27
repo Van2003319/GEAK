@@ -2207,13 +2207,41 @@ const l3Requesters = (prior, profile) => {
   return out;
 };
 
-const evidenceLadder = (rounds, profile, enabled) => {
+// `phase` is REQUIRED. L3 recompiles from source in a scratch tree and L4 reads the compiler's own
+// source, so both answer the question "how does this SOURCE become this machine code" -- and only
+// one of the three states is searching source. The gate is not a style preference, it is the same
+// provenance rule the ISA archive already enforces one level down:
+//
+//   phase2_asm    the measured binary came out of asm_roundtrip.py, i.e. a hand-edited .s. A
+//                 trajectory recompiled from source describes a DIFFERENT binary, and an
+//                 attribution to a neighbouring binary reads exactly like a real one. The phase
+//                 has its own instrument for this -- isa_signals.py keypoint, which reads the
+//                 artifact rather than rebuilding one.
+//   deep_explore  the round exists to replace the tree. Evidence bought here describes the
+//                 implementation that is about to stop existing.
+//
+// A request made in the wrong phase is SKIPPED and named, not deferred. Carrying it into the next
+// phase-1 round would re-ask it about a tree that a deep rewrite had meanwhile replaced, which is
+// the same stale-evidence failure one cycle further out.
+const evidenceLadder = (rounds, profile, enabled, phase) => {
   if (!enabled) return { requested: null, from: '', reason: '', skip_reason: '', requested_by: [] };
   const list = Array.isArray(rounds) ? rounds : [];
   const prior = list.length ? list[list.length - 1] : null;
   const from = reachedStageOf(prior);
   const asks = l3Requesters(prior, profile);
   if (!asks.length) return { requested: null, from, reason: '', skip_reason: '', requested_by: [] };
+  if (phase !== PHASE_SOURCE) {
+    return {
+      requested: null, from, reason: '', requested_by: asks.map(a => a.by),
+      skip_reason: `${asks.map(a => a.by).join(' and ')} asked for L3, but this is a ${phase} round `
+        + (phase === PHASE_ASM
+          ? 'and the binary that was measured came from an edited assembly, so a trajectory '
+            + 'recompiled from source would describe a different program -- the question this phase '
+            + 'can answer is a KEYPOINT in the artifact that ran'
+          : 'and the round exists to replace this tree, so a lowering trajectory would attribute '
+            + 'the plateau of an implementation that is about to stop existing'),
+    };
+  }
   if (!hasDominantHotKernel(profile)) {
     return {
       requested: null, from, reason: '', requested_by: asks.map(a => a.by),
@@ -2642,7 +2670,7 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
   // Nothing here counts rounds any more. L3 runs when profile_engineer asked for it in this round's
   // profile, when the TechLead asked for it while planning the last one, or when the last round's
   // machine code refuted the mechanism it claimed. Absent all three, a phase-1 round is L1 -> L2.
-  const ladderState = evidenceLadder(history.rounds, profileSummary, LADDER_ENABLED);
+  const ladderState = evidenceLadder(history.rounds, profileSummary, LADDER_ENABLED, roundPhase);
   // Read once per round from the same profile the ladder consults, so the ISA
   // receipt and the escalation decision cannot disagree about which kernel is hot.
   const hotKernelNames = (profileSummary && Array.isArray(profileSummary.top_kernels)
