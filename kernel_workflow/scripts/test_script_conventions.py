@@ -103,6 +103,21 @@ COVERED_ELSEWHERE = {
 # deleting it, both mean editing this list -- which is the point. The tests below check BOTH
 # directions, because an entry that quietly gained a caller is as misleading as one that lost it.
 OPERATOR_TOOLS = {
+    "fp8_two_day_run.sh":
+        "The LAUNCHER, so it is a root of this search and never a target of it. It runs the lane "
+        "for a fixed wall-clock budget in waves, which is where 'two days' lives now that the lane "
+        "has no clock of its own -- its only stop conditions are budget and deep_explore_failed.",
+    "route_gate.py":
+        "The Python twin of `routeGate` in kernel_lane.js, which is the LIVE gate. Nothing runs "
+        "this at runtime; test_route_gate_parity.py executes both on the same inputs and requires "
+        "the same verdict, after they were found disagreeing on four separate rules at once. Kept "
+        "because the parity test needs two implementations to compare -- deleting it would delete "
+        "the comparison, not the risk.",
+    "lockable_lanes.py":
+        "Operator diagnostic for the GPU lock pool. Records why lanes 0 and 1 are unusable here: "
+        "gpu_lock.sh opens the lock file for WRITE and /tmp/team_gpu_locks/gpu_{0,1}.lock are "
+        "root-owned, so flock fails for this user. Referenced from a lane file's `_note_gpu_ids` "
+        "prose, which is documentation and not a call.",
     "audit_pin_coverage.py":
         "Guard-quality audit, finding (84). Scores every source-pinning assertion in the JS suites "
         "by whether any mutant flips it, i.e. finds guards that are green because they match text "
@@ -151,16 +166,27 @@ class ReachabilityIsDeclaredTest(unittest.TestCase):
 
     ROOTS = ("kernel_lane.js", "kernel_workflow.js")
 
-    def _pipeline_reachable(self):
-        """Scripts a launch point could actually RUN, as opposed to merely mention.
+    # A mention is not a call, and the distinction is the whole check. `route_gate.py` is discussed
+    # at length in a comment explaining why the LIVE gate is the JS twin beside it, and
+    # `lockable_lanes.py` is named in a lane file's `_note_gpu_ids` prose. A first version of this
+    # matched a bare `scripts/x.py` anywhere and credited both -- passing for exactly the reason it
+    # exists to catch. So comment lines are dropped before scanning, JSON `_`-prefixed keys (the
+    # convention here for commentary) are dropped with them, and what is left must look like an
+    # invocation: a `python3 <path>` command, or a JS/shell binding that holds the path.
+    _COMMENT = re.compile(r"^\s*(?://|#)", re.M)
+    _JSON_NOTE = re.compile(r'^\s*"_[^"]*"\s*:.*$', re.M)
+    _INVOKE = re.compile(
+        r"(?:python3?\s+\S*?|=\s*[`'\"]?\S*?|\$\{[A-Z_]+\}/scripts/|bash\s+\S*?)"
+        r"([a-z_0-9]+\.(?:py|sh))\b")
 
-        A `python3 .../x.py` command line or a JS constant holding that path is a caller. Prose that
-        names the file is not -- `route_gate.py` is discussed at length in a comment that explains
-        why the LIVE gate is the JS twin beside it, and counting that as a call is how the loose
-        version of this check credited ten scripts that nothing runs.
-        """
-        run = re.compile(r"(?:python3?\s+[^\n`'\"]*?|scripts/|\$\{[A-Z_]+\}/scripts/)"
-                         r"([a-z_0-9]+\.(?:py|sh))")
+    def _callables_in(self, text, is_json=False):
+        if is_json:
+            text = self._JSON_NOTE.sub("", text)
+        text = "\n".join(l for l in text.splitlines() if not self._COMMENT.match(l))
+        return {m.group(1) for m in self._INVOKE.finditer(text)}
+
+    def _pipeline_reachable(self):
+        """Scripts a launch point could actually RUN, as opposed to merely mention."""
         roots = [HERE.parent / r for r in self.ROOTS]
         roots += sorted((HERE.parent / "roles").glob("*.md"))
         roots += sorted(HERE.glob("*.sh"))
@@ -168,14 +194,15 @@ class ReachabilityIsDeclaredTest(unittest.TestCase):
         seen, frontier = set(), set()
         for path in roots:
             if path.exists():
-                frontier |= {m.group(1) for m in run.finditer(path.read_text(errors="ignore"))}
+                frontier |= self._callables_in(path.read_text(errors="ignore"),
+                                               is_json=path.suffix == ".json")
         frontier &= {p.name for p in HERE.iterdir()}
         while frontier:
             seen |= frontier
             nxt = set()
             for name in frontier:
                 text = (HERE / name).read_text(errors="ignore")
-                found = {m.group(1) for m in run.finditer(text)}
+                found = self._callables_in(text)
                 found |= {f"{m}.py" for m in re.findall(r"^\s*(?:import|from)\s+(\w+)", text, re.M)}
                 nxt |= (found & {p.name for p in HERE.iterdir()}) - seen
             frontier = nxt
