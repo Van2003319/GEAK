@@ -23,6 +23,7 @@ their own files.
 from __future__ import annotations
 
 import ast
+import re
 import unittest
 from pathlib import Path
 
@@ -87,6 +88,133 @@ COVERED_ELSEWHERE = {
         "disk-vs-registry inventory equality test",
     ),
 }
+
+
+# Scripts NOTHING in the pipeline runs, and why each is kept anyway.
+#
+# Why this list exists. Every module here has a test file, because the class below requires one, and
+# a directory where all 25 scripts are tested reads as a directory where all 25 are USED. Ten of them
+# were not: two clusters that only import each other, plus a few one-off analyses whose question has
+# since been settled. Nothing was wrong with any of them -- what was wrong is that a reader had no
+# way to tell which half runs, and reached for whichever name matched their problem.
+#
+# The rule is the same one KNOWN_ARGS applies to arguments: an unclassified script is a hard failure,
+# so the next orphan announces itself instead of joining a pile. Wiring one into the lane, or
+# deleting it, both mean editing this list -- which is the point. The tests below check BOTH
+# directions, because an entry that quietly gained a caller is as misleading as one that lost it.
+OPERATOR_TOOLS = {
+    "audit_pin_coverage.py":
+        "Guard-quality audit, finding (84). Scores every source-pinning assertion in the JS suites "
+        "by whether any mutant flips it, i.e. finds guards that are green because they match text "
+        "rather than because they check behaviour. Not lane-reachable by design -- it inspects the "
+        "tests, not the run -- but it IS run: ci-l0-checks.yml prints its report on every push, "
+        "because the two guards that had to be rewritten during the upstream merge were both of "
+        "exactly the kind it counts.",
+    "bandwidth_regime.py":
+        "Operator analysis. Checks a latency table against physics before classifying each route's "
+        "regime. The regime half now also arrives per-route inside SOL_STATUS; the validity half "
+        "(is this table a measurement of THIS kernel doing THIS work) has no equivalent and is why "
+        "it is kept. Run by hand when a table looks too good.",
+    "kernel_launch_facts.py":
+        "Operator analysis, finding (144). Derives a kernel's per-shape launch facts from its "
+        "SOURCE, to settle a claim the ledger is about to repeat about a feature the kernel does "
+        "not have. Deliberately not in the round loop: it answers a question a human asks about a "
+        "specific assertion, not one the lane asks every round.",
+    "mfma_feed_model.py":
+        "Round-8 analysis for the bf16 GEMM: is the 128x128 BK=32 loop starved for in-flight loads. "
+        "The question it was built for is now a closure in closed_mechanisms.py (prefetch depth, "
+        "four residency points, no untested member left), so its conclusion outlived it. Kept "
+        "because the model is the reusable part if that axis ever reopens.",
+    "tile_design_space.py":
+        "Round-8 analysis, pairs with mfma_feed_model.py: which macro tile feeds MFMA better than "
+        "128x128 BK=32 and at what cost. Same status -- the tiles it ranked have since been "
+        "measured and closed.",
+    "tile_fill_model.py":
+        "Round-8 analysis, third of the trio: does a bigger macro-tile still fill the machine. "
+        "Answers the question tile_design_space.py cannot, and is meaningless without it.",
+    "mutate_python.py":
+        "Test infrastructure. Drives the mutation sweeps that check a guard fails when the thing it "
+        "guards is broken -- so it is upstream of the suite rather than downstream of the lane.",
+    "run_js_tests.py":
+        "Test infrastructure. Hosts the JS guards in an embedded engine on a box with no node, "
+        "which is the only reason they run here at all.",
+}
+
+
+class ReachabilityIsDeclaredTest(unittest.TestCase):
+    """A script the pipeline cannot reach must say so, and a tool that gains a caller must stop.
+
+    The failure this prevents is not a crash; it is a reader believing a file is load-bearing. That
+    belief is expensive in both directions -- effort spent maintaining something nothing runs, and
+    conclusions drawn from a script the lane never called.
+    """
+
+    ROOTS = ("kernel_lane.js", "kernel_workflow.js")
+
+    def _pipeline_reachable(self):
+        """Scripts a launch point could actually RUN, as opposed to merely mention.
+
+        A `python3 .../x.py` command line or a JS constant holding that path is a caller. Prose that
+        names the file is not -- `route_gate.py` is discussed at length in a comment that explains
+        why the LIVE gate is the JS twin beside it, and counting that as a call is how the loose
+        version of this check credited ten scripts that nothing runs.
+        """
+        run = re.compile(r"(?:python3?\s+[^\n`'\"]*?|scripts/|\$\{[A-Z_]+\}/scripts/)"
+                         r"([a-z_0-9]+\.(?:py|sh))")
+        roots = [HERE.parent / r for r in self.ROOTS]
+        roots += sorted((HERE.parent / "roles").glob("*.md"))
+        roots += sorted(HERE.glob("*.sh"))
+        roots += sorted((HERE.parent / "lanes").glob("*.json"))
+        seen, frontier = set(), set()
+        for path in roots:
+            if path.exists():
+                frontier |= {m.group(1) for m in run.finditer(path.read_text(errors="ignore"))}
+        frontier &= {p.name for p in HERE.iterdir()}
+        while frontier:
+            seen |= frontier
+            nxt = set()
+            for name in frontier:
+                text = (HERE / name).read_text(errors="ignore")
+                found = {m.group(1) for m in run.finditer(text)}
+                found |= {f"{m}.py" for m in re.findall(r"^\s*(?:import|from)\s+(\w+)", text, re.M)}
+                nxt |= (found & {p.name for p in HERE.iterdir()}) - seen
+            frontier = nxt
+        return seen
+
+    def test_every_script_is_either_reachable_or_declared_an_operator_tool(self):
+        reachable = self._pipeline_reachable()
+        for path in sorted(p for p in HERE.iterdir()
+                           if p.is_file() and p.suffix in MODULE_SUFFIXES
+                           and not p.name.startswith("test_")):
+            with self.subTest(script=path.name):
+                self.assertTrue(
+                    path.name in reachable or path.name in OPERATOR_TOOLS,
+                    f"{path.name} is not reachable from any launch point and is not declared in "
+                    f"OPERATOR_TOOLS. Wire it in, delete it, or declare it with the reason it is "
+                    f"kept -- a script that is none of the three is one the next reader will assume "
+                    f"runs.")
+
+    def test_no_declared_operator_tool_has_quietly_become_reachable(self):
+        """The other direction, and the one that rots silently.
+
+        An entry that gained a caller keeps its "run by hand" note while the lane depends on it, so
+        the note now describes the opposite of what happens -- and the next person to change it will
+        change it as if nothing calls it.
+        """
+        reachable = self._pipeline_reachable()
+        for name, why in sorted(OPERATOR_TOOLS.items()):
+            with self.subTest(script=name):
+                self.assertNotIn(
+                    name, reachable,
+                    f"{name} is now reachable from a launch point, but OPERATOR_TOOLS still says: "
+                    f"{why!r}. Move it out of the list and say what runs it.")
+
+    def test_every_declared_tool_still_exists(self):
+        for name in sorted(OPERATOR_TOOLS):
+            with self.subTest(script=name):
+                self.assertTrue((HERE / name).exists(),
+                                f"{name} was deleted but is still declared; a list describing files "
+                                f"that are gone stops being read as a description of the directory")
 
 
 class EveryScriptIsCoveredTest(unittest.TestCase):

@@ -275,6 +275,14 @@ jobs:
       # trains the reader to ignore the one signal it was added to give.
       - name: kernel lane gates + evidence ladder regression
         run: node kernel_workflow/scripts/test_lane_gates.js
+      # Reports, does not gate -- on purpose. It scores how many source-pinning assertions in the
+      # guards above are load-bearing, and the honest answer today is "23 of 133", so a threshold
+      # would either pass everything or fail every build. The number is the point: a guard that
+      # matches text instead of behaviour is green while the thing it guards is broken, and two of
+      # them had to be rewritten during the upstream merge for exactly that reason. Visible on every
+      # push, so the count moving the wrong way is noticed rather than rediscovered.
+      - name: guard pin-coverage audit (report only)
+        run: python3 kernel_workflow/scripts/audit_pin_coverage.py
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
       # job can run the JS half, so without it the two implementations are pinned on the Python side
       # alone and are free to drift — which lets a kernel pass one side and be refused by the other.
