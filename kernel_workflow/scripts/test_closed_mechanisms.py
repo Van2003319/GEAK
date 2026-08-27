@@ -54,6 +54,25 @@ class EveryEntryCitesAMeasurementTest(unittest.TestCase):
         for c in CM.CLOSED:
             self.assertRegex(c.epoch, r"^[A-Z](,[A-Z])*$", c.axis)
 
+    def test_every_entry_carries_the_evidence_the_epoch_letter_no_longer_can(self):
+        """The letters stopped resolving; these four fields are what is left.
+
+        `measure_noise_floor.py` / `register_epoch.py` / `route_floors.py` and the per-route floor
+        tables were deleted with the epoch subsystem, so nothing can turn "epoch Q" back into a
+        percentage. That makes rule 2 unenforceable through the letter and load-bearing through the
+        prose: `measured` is the effect with its sign, `control` is what the negative control did,
+        and together they are what a reader now has to judge tightness from. An entry missing either
+        is one whose bound cannot be assessed at all -- it was resting on the resolver.
+        """
+        for c in CM.CLOSED:
+            with self.subTest(axis=c.axis):
+                self.assertTrue(c.measured.strip(),
+                                f"{c.axis} states no measured effect, and the epoch letter can no "
+                                f"longer stand in for one")
+                self.assertTrue(c.control.strip(),
+                                f"{c.axis} states no negative control, so its effect cannot be "
+                                f"separated from whatever the box was doing")
+
     def test_every_entry_states_its_bound(self):
         for c in CM.CLOSED:
             self.assertTrue(c.bound.strip(), c.axis)
@@ -237,6 +256,32 @@ class CliTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(HERE / "closed_mechanisms.py")] + argv,
                               input=stdin, capture_output=True, text=True)
 
+    def test_a_flag_says_the_epoch_letter_no_longer_resolves(self):
+        """Said where the decision happens, not only in the module docstring.
+
+        The role that acts on this verdict reads stderr; it does not open the source. A caveat that
+        lives only in the header is one the reader whose decision it changes never sees -- and the
+        decision here is whether to drop a direction on the strength of a bound whose tightness
+        cannot be re-derived.
+        """
+        closure = CM.CLOSED[0]
+        proc = self._run(["--proposals", "-"],
+                         stdin=json.dumps([{"title": closure.aliases[0], "prompt": closure.axis}]))
+        self.assertEqual(proc.returncode, 6, proc.stderr)
+        self.assertIn("ALREADY MEASURED SHUT", proc.stderr)
+        self.assertIn("historical label", proc.stderr)
+        # The scale matters as much as the caveat: "closed at under 2%" under a 7.12% floor was
+        # never measured shut, and the number is what makes that concrete.
+        self.assertIn("7.12%", proc.stderr)
+
+    def test_a_clean_proposal_is_not_lectured_about_epochs(self):
+        """The note rides with a flag. Printing it unconditionally would train the reader past it."""
+        proc = self._run(["--proposals", "-"],
+                         stdin=json.dumps([{"title": "something nobody has measured",
+                                            "prompt": "an axis with no closure"}]))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("historical label", proc.stderr)
+
     def test_list_emits_the_registry_as_sorted_json(self):
         proc = self._run(["--list"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -326,20 +371,62 @@ class RolePromptTest(unittest.TestCase):
     def test_the_prompt_says_it_is_a_citation_not_a_veto(self):
         self.assertIn("not a veto", self.PROMPT)
 
-    def test_every_registry_entry_is_reproduced_in_the_prompt(self):
-        # Finding (131): provenance that requires a lookup is provenance that
-        # gets skipped. The planner must see the closures without opening a
-        # second file -- and the two copies must not drift, which is what this
-        # test is really for.
-        for c in CM.CLOSED:
-            self.assertIn(c.finding.split(",")[0], self.PROMPT, c.axis)
+    def test_the_registry_is_NOT_reproduced_in_the_prompt(self):
+        """The inverse of what this used to require, and the reason it changed.
 
-    def test_the_prompt_does_not_read_as_the_routes_being_finished(self):
-        # The registry closes MECHANISMS. prefill_m1024_down is still the
-        # richest route in the suite, and a planner that reads this table as a
-        # route blacklist would abandon the best target on the board.
-        self.assertIn("does *not* say", self.PROMPT)
+        Finding (131) said provenance that requires a lookup is provenance that gets skipped, so the
+        prompt carried a hand-written copy of all 28 closures and this test pinned it by checking
+        every finding id appeared. That check could only see whether the ids were present -- it could
+        not see whether the prose beside them still matched, and the prose is the part a planner acts
+        on. Two copies with a guard on the cheap half is the shape of a duplicate that drifts
+        confidently.
+
+        `--brief` answers (131) properly: the lookup is one subprocess, and it renders from the
+        registry, so it cannot disagree with it. What this test now protects is that nobody
+        re-introduces the copy the next time the lookup feels like friction.
+        """
+        copied = [c.axis for c in CM.CLOSED if c.bound[:60] in self.PROMPT]
+        self.assertEqual(
+            [], copied,
+            "these closures' bound text has been copied back into the prompt. The registry is the "
+            "one source; point the planner at `--brief` instead, which prints the same thing and "
+            "cannot fall out of step with the data it prints.")
+
+    def test_the_prompt_sends_the_planner_to_the_listing_BEFORE_it_drafts(self):
+        # `--proposals` checks directions that are already written, which cannot stop them being
+        # written. The pre-planning view is what the deleted table was actually for, and it has to
+        # be pointed at explicitly or the replacement is just a deletion.
+        self.assertIn("--brief", self.PROMPT)
+        self.assertIn("before", self.PROMPT.lower())
+
+    def test_the_brief_carries_the_caveat_the_prompt_used_to_carry(self):
+        # The registry closes MECHANISMS. prefill_m1024_down is still the richest route in the
+        # suite, and a planner reading the listing as a route blacklist would abandon the best
+        # target on the board. That warning moved with the content; if it had not, deleting the
+        # table would have deleted the one line stopping the worst misreading of it.
+        import io
+        import contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            CM.main(["--brief"])
+        self.assertIn("not finished", out.getvalue())
+        self.assertIn("do not re-aim a priced one", out.getvalue())
         self.assertIn("prefill_m1024_down", self.PROMPT)
+
+    def test_the_prompt_no_longer_offers_a_reopen_justification_nothing_can_evidence(self):
+        """"A quieter box" was the standard escape, and it stopped being checkable.
+
+        A closure is only as tight as the noise floor that bounded it, so a narrower floor reopens
+        it -- true, and unusable now that `measure_noise_floor.py` / `register_epoch.py` /
+        `route_floors.py` and the floor tables are deleted. A prompt still offering it invites a
+        justification whose evidence cannot be produced, which is worse than offering nothing.
+        """
+        self.assertIn("no longer a justification", self.PROMPT)
+        for gone in ("measure_noise_floor.py", "register_epoch.py", "route_floors.py"):
+            self.assertFalse(
+                (HERE / gone).exists(),
+                f"{gone} is back -- if the floors are measurable again, this prompt section and "
+                f"rule 2 in closed_mechanisms.py should be restored together")
 
 
 if __name__ == "__main__":

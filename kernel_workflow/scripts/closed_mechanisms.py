@@ -25,6 +25,29 @@ stop work rather than to aim it:
    bounded at "under 2%" on a box whose floor was 7% is bounded at 7%, and it
    reopens on a quieter box. This is why the entries carry an epoch letter and
    not just a finding number.
+
+   THE LETTERS NO LONGER RESOLVE TO A FLOOR, and that has to be said out loud
+   rather than discovered. `measure_noise_floor.py`, `register_epoch.py`,
+   `route_floors.py`, `noise_floor_stats.py` and `deprovisionalize_epoch.py` were
+   all deleted with the per-machine epoch subsystem, and the per-route floor
+   tables went with them. Nothing in this tree can turn "epoch Q" back into a
+   percentage. Only one datum survives, in a progress log: epoch R on tw008 was
+   7.12%, which is the size of the effect this rule is about -- a mechanism
+   "closed at under 2%" under that floor was never measured shut at all.
+
+   So the letters are HISTORICAL LABELS now: they say two arms were bounded by
+   the same box and are comparable to each other, and they say nothing about how
+   tight either bound is. What carries the weight instead is the prose already
+   required in every entry -- `measured` (the number, with its sign), `control`
+   (what the negative control did), `bound` (what the prize is bounded at) and
+   `reopens_when`. Those are self-contained; the letter is not. Read a closure
+   accordingly, and do not treat a tight-sounding `bound` as verified precision
+   unless `measured` names an effect that clears its own noise.
+
+   Restoring the resolver would mean re-measuring floors on the current box,
+   which is a decision about the pipeline and not a fix to this file. Until then
+   `check()` says this at the point it flags a proposal, because a caveat in a
+   docstring is not read by the role that acts on the verdict.
 3. **Every entry states what would reopen it.** A closure with no reopen
    condition is not a measurement, it is a ban. `reopens_when` is mandatory and
    the tests enforce that it is non-empty.
@@ -1313,12 +1336,36 @@ def check(proposals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--list", action="store_true", help="print the registry as JSON")
+    p.add_argument("--brief", action="store_true",
+                   help="one line per closure: what was shut, where, and what reopens it. This is "
+                        "the pre-planning view -- `--proposals` checks a draft you have already "
+                        "written, which is too late to stop you writing it")
     p.add_argument("--proposals", help="JSON file: a list of proposal objects, "
                                        "or '-' for stdin")
     args = p.parse_args(argv)
 
     if args.list:
         print(json.dumps([c.as_dict() for c in CLOSED], indent=2, sort_keys=True))
+        return 0
+
+    if args.brief:
+        # Rendered from the data rather than kept as prose somewhere. `roles/tech_lead.md` used to
+        # carry a hand-copied table of all of this "so you do not have to go and look", which made
+        # the registry two files that nobody could keep in step -- and the copy is the one the agent
+        # actually reads. One source, printed on demand, costs a subprocess and cannot drift.
+        print(f"{len(CLOSED)} mechanisms measured shut. Aim a NEW mechanism at a rich route; do not "
+              f"re-aim a priced one. A route appearing here is not finished -- only the listed "
+              f"mechanism is.")
+        for c in CLOSED:
+            where = "suite" if c.routes == (SUITE,) else ", ".join(c.routes)
+            print(f"\n- {c.axis}\n    where: {where}   finding: {c.finding}   epoch: {c.epoch}"
+                  f"\n    bound: {c.bound}"
+                  f"\n    reopens when: {c.reopens_when}")
+        print(f"\nThe epoch letters no longer resolve to a noise floor -- the per-machine floor "
+              f"tables were deleted with the epoch subsystem. Judge tightness from each entry's "
+              f"measured effect and negative control (`--list` has both in full), not from how "
+              f"confident its bound sounds. The one surviving floor reading is 7.12% (epoch R, "
+              f"tw008).")
         return 0
 
     if not args.proposals:
@@ -1348,6 +1395,16 @@ def main(argv: Sequence[str] | None = None) -> int:
               f"{record['finding']}: {record['measured']}. Bound: "
               f"{record['bound']}. Reopens when: {record['reopens_when']}.",
               file=sys.stderr)
+    if verdict["flagged"]:
+        # Stated once per invocation, at the point a role is about to drop a direction. Rule 2 above
+        # says a closure is only as tight as the floor that bounded it; the tooling that could name
+        # that floor is gone, so the caller has to weigh `measured` and `control` itself. Putting
+        # this only in the docstring would hide it from the one reader whose decision it changes.
+        print(f"  NOTE: epoch {'/'.join(sorted({r['epoch'] for r in verdict['flagged']}))} above is "
+              f"a historical label, not a retrievable noise floor -- the per-machine floor tables "
+              f"were deleted with the epoch subsystem. Judge tightness from `measured` and "
+              f"`control`, not from how confident `bound` sounds. For scale: the one surviving "
+              f"floor reading is 7.12% (epoch R, tw008).", file=sys.stderr)
 
     print(json.dumps(verdict, indent=2, sort_keys=True))
     return 6 if verdict["flagged"] else 0
