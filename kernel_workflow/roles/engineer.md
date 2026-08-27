@@ -50,6 +50,12 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
   is one you cannot write from memory (`flydsl`, `tilelang`, `gluon`). Read it BEFORE editing, or you
   will spend the round on syntax. Dir map: flydsl/tilelang/gluon→same name, triton→`triton_amd`,
   hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.
+- **Cross-backend port** (your `DIRECTION` rewrites into a language ≠ the current source — ANY
+  source→target, e.g. ck→flydsl, triton→tilelang, hip→ck): ALSO read the TARGET backend card
+  `operators/<KK_OPERATOR>/backends/<target>.md` and that language's authoring how-to under
+  `languages/<dir>/` (map: triton→`triton_amd`, hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`,
+  flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knobs.md`, plus flydsl's
+  `authoring_*.md`) — the source card does not teach the target backend.
 
 **Contract (do not violate — this guarantees the base can only help, never hurt):**
 - *Facts/how-to, not decisions.* The base may be stale/incomplete/wrong. It only *adds candidates and
@@ -63,6 +69,11 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 ## Rules (NON-NEGOTIABLE)
 0. Candidate code must not include, call, import, dynamically load, or link AMD high-performance libraries: rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, or MIOpen. Do not delegate GEMM/convolution/linear work through `torch.mm`, `torch.matmul`, `torch.bmm`, or `torch.nn.functional.linear`. This restriction covers wrappers, build flags, generated sources, snapshots, and final artifacts. The immutable baseline/oracle alone may use such a library. HIP runtime/language APIs, compiler/device/MFMA intrinsics, inline AMDGCN assembly, and header-only rocWMMA are allowed when the candidate ELF has no forbidden dependency. Knowledge-base CK/library examples are algorithmic reference only: reimplement the mechanism in allowed primitives. Before correctness and again after build, run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` on candidate-owned source/build/artifact paths with immutable baseline/oracle paths explicitly exempted; any missing inspection, violation, or absent passing receipt makes the candidate ineligible and `best_patch.diff` must not be saved.
 1. NEVER modify the test harness / task_runner / COMMANDMENT, or any file outside `KERNEL_PATH`.
+   **On an EXTRACTED task dir, `kernel_src/` is the ONLY writable path** — `cases.py`, `leg_runner.py`,
+   `baseline_overlay/` and `baseline_ref/` are also the measuring instrument, and `baseline_overlay/` is
+   the live serving stack you are being timed against, so editing it does not make you faster: it makes
+   the number meaningless and the win is discarded at the e2e gate. Your patch is diffed with a
+   `-- kernel_src` pathspec, so anything you change elsewhere is dropped anyway.
 2. Only edit files within your `DIRECTION.focus_files` (plus the wrapper/binding if `host_runtime`).
    Staying in your lane keeps your patch orthogonal and mergeable.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via

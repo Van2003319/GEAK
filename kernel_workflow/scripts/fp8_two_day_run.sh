@@ -36,7 +36,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LANE_ARGS="${SCRIPT_DIR}/lane_args.py"
 
 command -v python3 >/dev/null || { echo "FATAL: python3 not on PATH"; exit 1; }
-command -v claude  >/dev/null || { echo "FATAL: claude CLI not on PATH"; exit 1; }
+
+# Find claude ourselves rather than trusting the caller's PATH. It lives in ~/.local/bin, which
+# only a LOGIN shell adds, so this script ran fine from `bash -lc` and died instantly from tmux's
+# default command, a piped `bash -s`, or a systemd-style launch -- all of which are how an
+# unattended two-day daemon actually gets started. Measured 2026-08-27: three launch attempts
+# exited on "claude CLI not on PATH" while the identical command worked in the foreground. A
+# behaviour that depends on who invoked it is the same fault as a build that depends on who
+# exported PYTORCH_ROCM_ARCH, and it gets the same fix.
+if ! command -v claude >/dev/null; then
+    for _cand in "$HOME/.local/bin" /usr/local/bin /opt/claude/bin; do
+        if [ -x "$_cand/claude" ]; then
+            PATH="$_cand:$PATH"
+            export PATH
+            break
+        fi
+    done
+fi
+command -v claude >/dev/null || {
+    echo "FATAL: claude CLI not found on PATH nor in \$HOME/.local/bin, /usr/local/bin, /opt/claude/bin"
+    exit 1
+}
 [ -f "$LANE_FILE" ] || { echo "FATAL: no such lane file: $LANE_FILE"; exit 1; }
 
 STATE_DIR="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("state_dir",""))' "$LANE_FILE")"
@@ -103,6 +123,8 @@ WAVE_PROMPT="$(cat <<PROMPT
 1. 先跑 python3 ${LANE_ARGS} --check ${LANE_FILE} —— 必须 exit 0。不是 0 就停下来修文件，不要绕过。
 2. 再用 python3 ${LANE_ARGS} --print ${LANE_FILE} 渲染出 Workflow(...) 调用。
 3. 原样调用它。不要手抄参数，不要增删任何键。
+4. **等它跑完再结束你这一轮。** 不要把 Workflow 丢到后台然后回报「已启动」就收工 ——
+   一波就是一次完整的 lane 运行，几小时量级。它没结束你就没结束。
 
 这个 task 的两条规矩，违反了这一波就作废：
 - examples/tasks/dense_fp8_gemm_rowwise/oracle_wrapper.py 是不可变 oracle，是所有 speedup 的分母。
@@ -122,6 +144,21 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
     exit 0
 fi
 
+# `claude -p` treats a Workflow as a BACKGROUND task and kills it at a 600s ceiling, then exits
+# rc=0 -- "finished cleanly". Measured 2026-08-27: wave 1 ran 11 minutes, was cut off in the
+# lane's Setup phase ("Background tasks still running after 600s; terminating"), reported success,
+# and the loop started wave 2 with a SECOND Workflow against the same state_dir. Left alone that
+# is a cold restart every 11 minutes for two days, never reaching the optimize loop, with
+# concurrent writers to one state dir -- the exact "start over" failure the protocol forbids,
+# dressed up as a clean run. 0 means wait for the workflow instead of the ceiling.
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
+
+# Defence in depth for the same class of bug. A real wave runs for hours: it builds a COMMANDMENT,
+# profiles, dispatches engineers, verifies. An rc=0 wave that lasted minutes did NOT do that, and
+# whatever ended it early will end the next one early too, so looping is how a broken run burns two
+# days looking busy. Treat it as a failure so the three-strike stop catches it.
+MIN_WAVE_S="${MIN_WAVE_S:-1800}"
+
 wave=0
 while :; do
     NOW="$(date -u +%s)"
@@ -139,17 +176,26 @@ while :; do
     wave=$(( wave + 1 ))
     say "wave ${wave} starting ($(( LEFT / 3600 ))h $(( (LEFT % 3600) / 60 ))min left)"
     # `timeout` is the hard stop: a wave may not outlive the budget.
+    wave_t0="$(date -u +%s)"
     set +e
     timeout --signal=TERM --kill-after=120 "$LEFT" \
         claude --dangerously-skip-permissions --effort max -p "$WAVE_PROMPT" \
         >>"${STATE_DIR}/wave_${wave}.log" 2>&1
     rc=$?
     set -e
+    wave_s=$(( $(date -u +%s) - wave_t0 ))
     case "$rc" in
-        0)   say "wave ${wave} finished cleanly" ;;
-        124) say "wave ${wave} was cut off by the deadline" ;;
-        *)   say "wave ${wave} exited rc=${rc} -- see ${STATE_DIR}/wave_${wave}.log" ;;
+        0)   say "wave ${wave} finished cleanly after $(( wave_s / 60 ))min" ;;
+        124) say "wave ${wave} was cut off by the deadline after $(( wave_s / 60 ))min" ;;
+        *)   say "wave ${wave} exited rc=${rc} after $(( wave_s / 60 ))min -- see ${STATE_DIR}/wave_${wave}.log" ;;
     esac
+    if [ "$rc" -eq 0 ] && [ "$wave_s" -lt "$MIN_WAVE_S" ]; then
+        say "  but $(( wave_s / 60 ))min is too short to be a real wave (< $(( MIN_WAVE_S / 60 ))min)."
+        say "  Something ended it early while reporting success. Check the tail of"
+        say "  ${STATE_DIR}/wave_${wave}.log for a background-task ceiling, a refused lane file,"
+        say "  or an agent that launched the workflow and returned instead of waiting."
+        rc=90   # counts as a failure below, so three of these stop the run
+    fi
     # A wave that dies in seconds is failing, not working. Three of those in a row and the loop is
     # burning the budget on a broken precondition rather than on search.
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then

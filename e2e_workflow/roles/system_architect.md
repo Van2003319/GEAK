@@ -20,8 +20,11 @@ You are invoked per PHASE. Read first, every time:
 - `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
   cage; the workflow performs well without it). Read it AFTER forming your own profile-driven plan, as a
   cross-check + a source of EXTRA candidates — it only ADDs options, never prunes them or skips
-  measurement; the on-box bake-off + e2e gate is the judge. CURATE it after a run (merge/insert ≥★★ /
-  archive contradicted) per `knowledge/learned/README.md` — never blind-append.
+  measurement; the on-box bake-off + e2e gate is the judge. **Read the index and judge relevance by
+  meaning, not by string match** — a card written for a neighbouring op or a different tile regime often
+  still applies; and `ls` the folder, since the index is hand-kept today and has drifted before (see
+  `knowledge/learned/README.md`). CURATE it after a run (merge/insert ≥★★ / archive contradicted) —
+  never blind-append.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
 - The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
@@ -241,6 +244,20 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    e2e by MORE than the noise band. Otherwise drop it — say so.
 5. Write `EVAL_DIR/strategy.md` (human-readable plan) and return the routing.
 
+> **Every head candidate must identify a device kernel and a structured callable chain.**
+> - Copy `entity_kind` and `device_kernel` from the profiled row. Route only `gpu_kernel` rows; if a
+>   dispatcher was expanded, route its device children rather than recreating the outer aggregate.
+> - `live_call_seam` is prose context only. Never copy arrows, signatures, paths, or prose into
+>   `target_callable`.
+> - Build `seam_candidates[]` from source and the baseline server log. Each entry has an exact importable
+>   `target_callable` (`module:attr`), `role` (`outer_wrapper|dispatcher|op_seam|inner_launcher|kernel_entry`),
+>   matching `device_kernels`, `depth`, and evidence. Include every plausible callable on the live path.
+> - Keep native/JIT `kernel_entry` objects as source evidence only; replacing them can break their
+>   `.run`, `.warmup`, or cache protocols. For non-fused heads prefer the deepest safe
+>   `inner_launcher`/`op_seam`; fused heads must select the whole-operation `op_seam`.
+> - `target_callable` is only an initial hint. The Extractor may add a missing inner launcher and must
+>   prove the final choice with runtime markers; merely rejecting an outer wrapper is not discovery.
+
 Return JSON:
 ```json
 {
@@ -253,6 +270,15 @@ Return JSON:
   "head_candidates": [
     {"id": "h0", "short_name": "...", "op_kind": "gemm|attn", "pct_gpu_time": 0.0,
      "shapes": "[[1024,5120],[5120,34816]]", "dtype": "bf16", "regime": "prefill|decode|both",
+     "entity_kind": "gpu_kernel",
+     "device_kernel": "<exact GPU symbol copied from profile>",
+     "target_callable": "<exact module:attr hint selected from seam_candidates, or ''>",
+     "seam_candidates": [
+       {"target_callable": "<exact module:attr>",
+        "role": "outer_wrapper|dispatcher|op_seam|inner_launcher|kernel_entry",
+        "device_kernels": ["<exact profiled GPU symbol>"], "depth": 0,
+        "runtime_verified": false, "evidence": "source/log evidence"}
+     ],
      "transpose_b": true, "bias": false,
      "candidate_backends": ["aiter","hipblaslt","triton","ck"],
      "is_fused_kernel": false,
@@ -354,11 +380,17 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
 
 1. **CURATE `SKILL_DIR/knowledge/learned/` — do NOT blind-append.** Follow the curate transaction in
    `knowledge/learned/README.md`: read `INDEX.md`, then for each durable finding:
-   - **Match the reuse key** `kernel_class · gfx · regime`. If a card exists → **MERGE** (bump
-     `confirms`, raise `confidence` if strengthened, widen/correct `effect`, append a `source`, update
-     `last_seen`) and update its one INDEX line. Do NOT create a second card for the same key.
+   - **Match the reuse key** — one line of plain English naming the op, the arch, and whatever else
+     distinguishes it (framework, dtype/quant format, regime), e.g. `bf16 fused-MoE grouped GEMM ·
+     gfx942/MI300X · vLLM`. Match **by meaning**: a differently-worded card for the same lever on the
+     same op/arch IS the same card. If one exists → **MERGE** (bump `confirms`, raise `confidence` if
+     strengthened, widen/correct `effect`, append a `source`, update `last_seen`, extend
+     `keywords`/`kernels`) and update its one INDEX line. Do NOT create a second card for the same key.
    - **INSERT a new card ONLY if novel AND effective (≥★★** = single-run non-overlapping, or ≥2
-     consistent, or Director-verified e2e). Each card carries `lever / apply / verify / source`, stays
+     consistent, or Director-verified e2e). Open it with the full **discovery header** (`name`,
+     `description` — the one line that becomes the index entry, `keywords`, `kernels`, `platforms`,
+     `kernel_class`, `regime`): that header is what makes the card findable and is what the index will be
+     generated from once every card here has one. Each card carries `lever / apply / verify / source`, stays
      ≤~15 lines, and gets ONE INDEX line. Keep `INDEX.md` ≤40 lines (evict lowest `confidence×freshness`).
    - **NULL / overlapping / unverified → write NOTHING to `learned/`** (it goes only in the eval-dir report).
    - **A surprising negative → a CONDITIONED `caution:` line** on the relevant card (e.g. "on
@@ -373,6 +405,12 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      (`exp/e2e_*<Model>*/ YYYY-MM-DD`, `config/ck_tune/`, `<skill>/<file>.md`), never a path a reader
      can't reproduce. Run-config-only facts (which authors were enabled, an image missing a tool) stay
      in the eval-dir report unless generalized into a conditioned `caution:`. (See `learned/README.md` rule 7.)
+   - **Stay in YOUR sink, and cite the other one.** Write only under `SKILL_DIR/knowledge/learned/`.
+     A gain that came from a kernel the `kernel_workflow` lane produced is recorded here as **the e2e
+     delta + which exploration was worth the budget**, with a citation to that workflow's card
+     (`kernel_workflow/knowledge/learned/<slug>.md`) for the technique itself — the lane already wrote
+     it there. Do NOT copy the kernel card in, and do NOT write into `kernel_workflow/knowledge/learned/`
+     (that sink is owned by the lane's own `update_experience` step, gated by the isolated A/B).
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
 3. **Calibrate the roofline prior (ONLY if one was used — `ANALYSIS_SKILL_DIR` non-empty and a
    `profile_roofline_json` exists; else skip).** For each direction this milestone measured, record
@@ -402,7 +440,7 @@ Return JSON:
 
 Inputs: `EVAL_DIR`, full `HISTORY`, `BASELINE_THROUGHPUT`, `FINAL_THROUGHPUT`, accepted config +
 kernel changes, `MILESTONES`, `BUDGET_USED`, `BUDGET`, `MIN_KERNEL_TASKS`, `PROFILE_TOPN`, `WORKLOAD`,
-`MODEL_NAME`, `SKILL_DIR`.
+`MODEL_NAME`, `SKILL_DIR`, and — when the standalone tuning phase ran — `TUNING_RESULT` (see §2b).
 
 Write TWO files:
 
@@ -481,6 +519,7 @@ attempt, win or not. REQUIRED sections, in order:
      Phases                                                     [  step · cum  ]
      ✅ 1  Setup        preflight + TRUE baseline <tok/s>        [ Δ17m  · 0:17 ]
      ✅ 3  ConfigSweep  cfg0 ✘−X% · ⭐ aiter +Y% · cuda-graph ✓   [ Δ45m  · 1:49 ]
+     ⭐ 4  TuningSkill  2 ops tuned · engaged ✓ · A/B ✓+X.X%     [ Δ1h12m· 3:01 ]
      🔧 5  HeadKernel   extract+bake-off+author+integrate        [ Δ5h41m· 8:13 ]
         ❌ h0 GEMM  <pct>%GPU · stock=triton matmul_ogs (mxfp4)  [ Δ2h03m       ]
            ├ ✘ triton-opt     tile tune  1.12× iso · e2e ✘−0.4% [ Δ38m         ]
@@ -496,6 +535,49 @@ attempt, win or not. REQUIRED sections, in order:
      `❌ integrate  A/B 1768.5 → 1536.7 = ✘−13.1% · parity ✓` — parity ✓ is numeric-only, the throughput
      still ✘. A **no-win** run closes with `✅ Validate  Director A/B <b>→<f> = 0.9997× · validated_no_win`
      (validated, no regression, NO win). Only `validated_win` earns a `🏁`+`⭐` final stack.
+
+2b. **🎛️ Tuning skillset — attributable contribution** — MANDATORY whenever `TUNING_RESULT` is present
+   (omit the section entirely when it is absent, i.e. the phase did not run). This answers a question the
+   headline speedup cannot: **how much of the gain came from tuning?** The phase runs standalone before
+   HeadKernel and measures its own interleaved pre/post A/B precisely so this number exists — report it,
+   do not fold it into the total and do not re-derive it from the run baseline.
+
+   Write, in this order:
+   - **One-line verdict**: `<pre> → <post> tok/s, +X.XX% (×Y.YYY) — <gate>`, then its **share of the
+     run's total gain** (`TUNING_RESULT.share_of_total_gain_pct`, e.g. `≈41% of the run's total gain`).
+     If the share is `null`, say `no net run gain to apportion` rather than printing a percentage.
+     These legs are the tuning phase's own same-session A/B; the Director's `validate` reconciliation
+     applies to the RUN headline, not to this section — do not overwrite these two numbers with it.
+   - **Ops tuned table**: `op | backend | tuner | shapes | isolated× | engaged? | artifact`. One row per
+     op in `ops_tuned`, including ops that were attempted and produced nothing (say so).
+   - **Engagement evidence** — quote it verbatim from `engagement_evidence`. This is the skillset's
+     central claim (a tuned artifact that the runtime never loads is not a win, and it fails silently),
+     and the orchestrator refuses to bank an accept without it. If the gate was `no_win` *because*
+     engagement could not be proven, say that explicitly — it is a very different outcome from "tuning
+     was tried and the kernel was already optimal".
+   - **Correctness/accuracy gate**: `correctness_gate` + `accuracy_note`.
+   - **Measurement discipline**: the noise floor used (`noise_floor_pct`) and whether the A/B was
+     interleaved (`ab_interleaved`). On gfx950 a back-to-back A/B drifts far more than a real tuning win,
+     so a non-interleaved result must be flagged as suspect rather than quoted as fact.
+   - **Deployed artifacts + required env** (`artifacts`, `apply_env`, `apply_flags`) — and state plainly
+     that these are folded into the accepted config, so every later phase (HeadKernel, Milestone,
+     Finalize, Validate) was measured **on top of** the tuned stack. This is why head-kernel deltas in §3
+     must not be added to the tuning delta: tuning is already in their reference leg.
+   - **Does it ship?** — `deploy_bundle`, `in_final_bundle` and `final_bundle_engagement_recheck`. A
+     tuning win is usually a data artifact plus a cache invalidation, which cannot ride the `PYTHONPATH`
+     overlay; it reaches production only because Finalize concatenated its diff into `final_patch.diff`
+     and made `final_launch.sh` run its `deploy.sh` before launch. If `in_final_bundle` is false or the
+     engagement re-check failed, say so **here and in §1** — a gain that the shipped bundle does not
+     reproduce is a reporting failure, not a footnote. Name the cache-invalidation commands
+     (`cache_invalidation`) for anyone applying `final_patch.diff` by hand.
+   - **What tuning could NOT reach** — levers absent on this image (`preflight.absent`), ops with no
+     tuner, and anything the skillset flagged as broken for this stack/arch. These are provisioning
+     actions, not measured no-wins.
+   - Whether `tuning-kb` was consulted (`mode`: `kb_assisted`) or the run derived everything blind
+     (`derived`). A `kb_assisted` win is a reproduction of a known result; label it as such.
+
+   Source: `EVAL_DIR/tuning/tuning_report.md` (+ `tuning/bench_pre`, `tuning/bench_post`,
+   `tuning/env_audit.txt`, `tuning/claims_report.json`). Read the real files; never invent.
 
 3. **Head-kernel deep-dive** (the centerpiece) — for EACH head op a `####` sub-section titled
    `<id> — <op> (<pct>% GPU) — RESULT: <ACCEPTED +X% | no win | flagged>`, containing:
@@ -558,7 +640,9 @@ attempt, win or not. REQUIRED sections, in order:
    configuration gain and must never be described as pure measurement drift.
 
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
-`final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
+`final/bench/bench_summary.json`, `config/sweep_results.json`,
+`tuning/tuning_report.md` + `tuning/bench_{pre,post}/bench_summary.json` (the §2b attribution),
+`overlay/cand_*/integrate_result.json`,
 `kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json` (incl. its `backend_absent[]`),
 `env_report.json` (`absent_backends` → the BACKEND ABSENT section),
 `profile/round_*/profile_topN.{md,json}`, and artifact mtimes for the timeline.

@@ -9,11 +9,12 @@ export const meta = {
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
     { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
+    { title: 'WarmStart', detail: 'search the experience KB (remote geak:kernel:* when credentialed, else local kb_artifacts/) for the best curated patch per optimization direction for this (kernel,language,gfx), validate each through the verify gate, adopt the first that passes [warm_start!=off]' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
     { title: 'Report', detail: 'tech_lead writes the final report + patch' },
-    { title: 'Validate', detail: 'director independently validates vs the true baseline' },
+    { title: 'Validate', detail: 'director independently validates vs the true baseline, then the TechLead curates ONE distilled card into knowledge/learned/ on a measured win [update_experience!=off]' },
   ],
 };
 
@@ -59,6 +60,22 @@ const KNOWN_ARGS = new Set([
   'shared_kb', 'global_kb', 'e2e_feedback', 'harness_addendum',
   'dra_enabled', 'dra_max_questions', 'dra_blindspot', 'dra_max_blindspots',
   'agent_timeout_ms', 'agent_retries',
+  // Learned-KB / warm-start, from upstream. This list is ours -- upstream has no KNOWN_ARGS -- so a
+  // merge brings the code that READS these and nothing that ADMITS them, and every one of them
+  // becomes the hard error above. That failure is silent in the worst way: the lane refuses at
+  // startup, so a KB-on run and a typo look identical from the launcher.
+  'use_learned_kb', 'kb_dir_cap', 'kb_cold_direction', 'update_experience',
+  'warm_start', 'warm_start_match', 'warm_start_min_speedup', 'kb_artifacts_dir',
+  'kb_mode', 'kb_store_dir', 'kb_remote', 'kb_framework_version',
+  // The measuring instrument for the KB arms: `held_out` marks a run whose lessons must not be
+  // learned from, `box_quiet` records whether the box was contended while it was measured.
+  'held_out', 'box_quiet',
+  // Wall-clock window. Removed here when the launcher was decoupled, and restored with the merge
+  // that brought the code back: the only stop conditions this lane has left are budget and
+  // deep_explore_failed, neither of which is a clock, so without these a fixed-duration run has to
+  // be simulated from outside. Apostrophes are avoided inside this block on purpose -- the extractor
+  // in scripts/lane_args.py reads it with a quote-delimited regex.
+  'deadline_epoch', 'no_stop_s', 'max_forced_replans',
   // Dispatcher-owned, forwarded verbatim, unused by the worker.
   'backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script',
 ]);
@@ -519,6 +536,110 @@ const DRA_MAX_BLINDSPOTS = (() => {
   const v = parseInt(A.dra_max_blindspots != null ? A.dra_max_blindspots : 4, 10);
   return Number.isFinite(v) && v >= 1 ? v : 4;
 })();
+
+// ---------------------------------------------------------------------------
+// LEARNED-KNOWLEDGE SINK. Derived from WORKFLOW_DIR and nothing else, so a lane spawned by
+// e2e_workflow still curates into kernel_workflow/knowledge/learned/ — e2e's learned/ is a
+// separate memory owned by its own system_architect step.
+//   update_experience = on (default) | off | false | none
+// The bake-off dispatcher passes `off` and curates once centrally instead (N parallel lanes would
+// file N near-duplicate cards for one op).
+const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
+// How much of ONE round the learned KB may steer. Measured, not guessed: an arm whose planner was
+// handed at most 3 matched cards and could KB-seed at most one direction reached 4.45x geomean on 16
+// kernels; the same 16 under a planner that reads the whole 84-line index and picks freely reached
+// 3.44x — a 22.7% regression, with the losses concentrated on kernels where the bounded arm had found
+// an unusual win (one went 25.77x -> 2.15x). Both arms averaged ~3 rounds, so it was not lost rounds.
+// The index-reading design is better at RECALL; what it lost was the profile-driven direction that
+// nothing from the KB had touched — the per-round control. `knowledge/learned/README.md` says the KB
+// must be "an accelerant, NOT a cage", and this is the line that keeps that true.
+//   KB_DIR_CAP        directions per round that may draw on cards (default 1)
+//   KB_COLD_DIRECTION at least one direction per round must be profile-only (default on)
+// Whether the planner is being pointed at the learned KB at all. Defined HERE because this lane is
+// where it is USED: the constant of this name lives in the dispatcher, and referencing it from the
+// lane threw `USE_LEARNED_READ is not defined` at the first plan step of every kernel — 13 of them
+// before the run was stopped. A parse test cannot catch that: the file compiles, and the reference
+// only resolves when the line runs. Default ON, matching this branch's design where the tech_lead
+// role reads INDEX.md unconditionally; `use_learned_kb=false` turns the budget block off with it.
+const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
+const KB_DIR_CAP = Math.max(0, parseInt(A.kb_dir_cap != null ? A.kb_dir_cap : 1, 10));
+const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_direction : 'true') === 'true';
+let kbCapBound = 0;      // rounds where the cap actually had to strip something
+const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experience : 'on').trim().toLowerCase() || 'on';
+const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
+
+// ---------------------------------------------------------------------------
+// WARM-START (local experience KB). Before the optimize loop, search the machine-produced
+// kb_artifacts/ store for the top-3 best patches for THIS (kernel, language, gfx), validate
+// each through the SAME verify_engineer gate, and adopt the first that passes; after Validate,
+// write this run's own win back.
+//   on (default)      | read + validate top-3, ADOPT the first that passes.
+//   reference         | read top-3 as prose only, never auto-apply.
+//   return_after_read | adopt then RETURN before the optimize loop.
+//   off/false/none, a STATE_DIR resume, or no arch => cold start (byte-identical to pre-feature).
+const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
+const WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+const WARM_START_REF_ONLY = WARM_START === 'reference';
+const WARM_START_RETURN_AFTER = WARM_START === 'return_after_read';
+const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
+  (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts' : '')).replace(/\/+$/, '');
+const EXPERIENCE_STORE = `${WORKFLOW_DIR}/scripts/experience_store.py`;
+// Every candidate costs a full on-box verify to reject, so a recorded near-tie is not worth reading.
+const WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
+  ? parseFloat(A.warm_start_min_speedup) : 1.05;
+// How hard the resolver may work to map this run's kernel name onto a stored page. The name is
+// layout-derived (`fused_moe_kernel` standalone, `fused_moe_kernel_task` from an e2e head extraction),
+// so `exact` alone would make the head path miss its own history; `fuzzy` also accepts an op_kind.
+const WARM_START_MATCH = ['exact', 'normalized', 'fuzzy'].includes(String(A.warm_start_match || '').trim())
+  ? String(A.warm_start_match).trim() : 'fuzzy';
+// Which PLANE the experience comes from and goes back to. Same phases, same schemas, same verify
+// gate either way — only the two command strings differ, because the store subcommands were built
+// to print the same JSON as the directory ones.
+//   local (default)  the curated kb_artifacts/ tree, keyed by slug.
+//   store            a KB Store on disk in the shape the service uses, keyed by canonical id.
+//                    This is the plane that later becomes the remote service, so a run in this
+//                    mode is the rehearsal for it.
+const KB_MODE = String(A.kb_mode || 'local').trim().toLowerCase() === 'store' ? 'store' : 'local';
+const KB_STORE_DIR = String(A.kb_store_dir ||
+  (KB_ARTIFACTS_DIR ? KB_ARTIFACTS_DIR.replace(/\/[^/]*$/, '') + '/kb_store_local' : '')).replace(/\/+$/, '');
+// The key carries a rocm <major>.<minor>; on a box without /opt/rocm the measured stack is empty and
+// every record would file under `unspecified`, which splits one kernel's history across two keys.
+const KB_FRAMEWORK_VERSION = String(A.kb_framework_version || '').trim();
+const KB_VERSION_FLAG = KB_FRAMEWORK_VERSION ? ` --framework-version ${JSON.stringify(KB_FRAMEWORK_VERSION)}` : '';
+const KB_ROOT_OK = KB_MODE === 'store' ? !!KB_STORE_DIR : !!KB_ARTIFACTS_DIR;
+// Whether this run may also talk to the KB Store SERVICE, on top of whichever local plane KB_MODE
+// selected. `auto` (default) uses it when credentials are present and silently does not when they
+// are not; `off` restores the directory-only behaviour byte for byte.
+const KB_REMOTE = String(A.kb_remote || 'auto').trim().toLowerCase() === 'off' ? 'off' : 'auto';
+// The credentials are NOT visible from this process. They live in the user's profile, and the
+// shells these commands run in are non-interactive, so `process.env.KB_STORE_TOKEN` is empty here
+// even on a box where the service is configured. Deciding the plane in JS would therefore mean
+// deciding it wrong. Instead every emitted command exports its own credentials from the profile's
+// two sources and then branches on what it actually got — the test happens where the answer is
+// knowable. The token is read from a 0600 file into a variable, never passed in argv, because
+// `ps` is world-readable on this box.
+// The gateway's internal AMD CA is not in a stock container trust store, so a KB command run inside
+// one fails TLS (the old workaround was `curl -k`). DETECT then heal: only when the caller has NOT
+// already established trust (SSL_CERT_FILE unset) do we point urllib/requests/curl/node at the first
+// readable AMD-root bundle we find. Most callers here run OUTSIDE the warm-start launcher (which sets
+// these at `docker run`), so this self-heal is what keeps their KB reachable. Path-only, no CA
+// content; overridable with KB_CA_BUNDLE; a no-op when SSL_CERT_FILE is already set or no bundle is
+// readable (so CI and already-trusting images are byte-identical). DNS (the host has none
+// in-container) is a launch concern, handled with `docker run --add-host`.
+// GEAK_KB_STORE_* wins over the bare KB_STORE_* (so a host that also runs Hyperloom, which carries
+// its own KB_STORE_*, can point GEAK at a distinct store); re-exported under the bare names every
+// downstream reader here branches on.
+const KB_ENV_PRELUDE =
+  'export KB_STORE_URL="${GEAK_KB_STORE_URL:-${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}}"; ' +
+  'export KB_STORE_TOKEN="${GEAK_KB_STORE_TOKEN:-${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}}"; ' +
+  'if [ -z "${SSL_CERT_FILE:-}" ]; then for _ca in "${KB_CA_BUNDLE:-}" ' +
+  '/shared_nfs/hyperloom/ca/amd-ca-combined.pem "$HOME/amd-extra-ca-bundle.pem"; do ' +
+  '[ -n "$_ca" ] && [ -r "$_ca" ] && { export SSL_CERT_FILE="$_ca" REQUESTS_CA_BUNDLE="$_ca" ' +
+  'CURL_CA_BUNDLE="$_ca" NODE_EXTRA_CA_CERTS="$_ca"; break; }; done; fi; ';
+// Writing in store mode records BOTH planes in one call, so it needs both roots: the directory tree
+// stays the source of truth a curation pass edits, and the store is derived from it.
+const KB_WRITE_OK = KB_ROOT_OK && !!KB_ARTIFACTS_DIR;
+const kebab = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 
 // ---------------------------------------------------------------------------
 // DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
@@ -1002,6 +1123,13 @@ const PLAN_SCHEMA = obj({
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
+      // Learned cards that SEEDED this direction, by filename. Structural attribution: the planner
+      // declares what it opened, the script joins that against what the VERIFIER independently
+      // measured. Declared here rather than inferred because the read path is semantic — the planner
+      // reads INDEX.md and judges by meaning, so nothing downstream can reconstruct which card it
+      // acted on. A citation is not a causal claim (the planner saw the profile too, and one run
+      // holds no counterfactual); it is the only way a card can ever LOSE standing.
+      learned_refs: { type: 'array', items: { type: 'string' } },
     }, ['id', 'title', 'specialty', 'prompt']),
   },
   // The planner's L3 request, which necessarily applies to the NEXT round: the ladder runs before
@@ -1201,6 +1329,12 @@ const REPORT_SCHEMA = obj({
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
 }, ['final_speedup_geomean', 'report_path', 'final_patch']);
 
+const UPDATE_EXPERIENCE_SCHEMA = obj({
+  action: { type: 'string' },      // created | merged | skipped
+  card_path: { type: 'string' },   // path under knowledge/learned/, or "" if nothing distilled
+  key: { type: 'string' }, note: { type: 'string' },
+}, []);
+
 const VALIDATE_SCHEMA = obj({
   kernel_name: { type: 'string' },
   director_verified_speedup_geomean: { type: 'number' },
@@ -1219,6 +1353,47 @@ const VALIDATE_SCHEMA = obj({
   timing_basis: { type: 'string' },
   oracle_digest: { type: 'string' },   // (67): the arbiter's own recomputation of the pinned oracle
 }, ['director_verified_speedup_geomean', 'validation_status']);
+
+// Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
+const WARMSTART_RESOLVE_SCHEMA = obj({
+  read_reason: { type: 'string' }, slug: { type: 'string' },
+  // What this run's name derived to vs the page actually served, so a surprising match is visible.
+  requested_slug: { type: 'string' }, match_tier: { type: 'string' },
+  // store mode only: the key the candidates came from. Declared rather than left to
+  // additionalProperties so the agent relaying this JSON has no reason to drop it.
+  canonical_id: { type: 'string' },
+  // Same kernel, another language: the wrong target_language was passed, not an empty store.
+  other_language_pages: { type: 'array', items: { type: 'string' } },
+  filtered: obj({
+    total: { type: 'number' }, retired: { type: 'number' }, below_min_speedup: { type: 'number' },
+    same_direction_collapsed: { type: 'number' },
+  }),
+  candidates: {
+    type: 'array',
+    items: obj({
+      rank: { type: 'number' }, slug: { type: 'string' }, speedup: { type: 'number' },
+      exp_dir: { type: 'string' }, arch: { type: 'string' },
+      patch_path: { type: 'string' }, prose_path: { type: 'string' },
+      strategy: { type: 'string' }, status: { type: 'string' },
+      // direction = the IDEA (one rank each). comparable=false: recorded on a different bench key
+      // than rank 1's, so the order between them is a prior only.
+      direction: { type: 'string' }, bench_key: { type: 'string' }, comparable: { type: 'boolean' },
+    }, ['rank', 'patch_path']),
+  },
+}, ['read_reason']);
+// Warm-start writer output = experience_store.py `write` JSON, verbatim. written=false with reason
+// "duplicate_impl" is a success: the store already held this code and counted a reproduction.
+const WARMSTART_WRITE_SCHEMA = obj({
+  written: { type: 'boolean' }, reason: { type: 'string' }, slug: { type: 'string' },
+  dir: { type: 'string' }, speedup: { type: 'number' },
+  reproduced: { type: 'string' }, reproductions: { type: 'number' },
+  // store mode only: where the same result landed on the KB plane. `replaced` says which of the
+  // two outcomes it was — a new candidate under the key, or this patch's own one measured again.
+  remote: obj({
+    written: { type: 'boolean' }, reason: { type: 'string' }, canonical_id: { type: 'string' },
+    session_id: { type: 'string' }, champion: { type: 'boolean' }, replaced: { type: 'boolean' },
+  }),
+}, ['written']);
 
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
@@ -1279,6 +1454,49 @@ async function agentT(p, o) {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// WALL-CLOCK DEADLINE (opt-in; absent => byte-identical to a build without it).
+//   DEADLINE_EPOCH  unix seconds after which NO new optimization round may start.
+//   NO_STOP_S       while more than this many seconds remain, the TechLead may not end the run on
+//                   its own convergence gates; it gets exactly one forced re-plan.
+// In CODE and not in the caller's prose because the prose version was measured: a "fixed 4h window
+// per kernel" comparison whose window had no implementation anywhere realised 1.55h to 15.22h, a
+// 9.81x spread, and the comparison it existed to make was void. The loop below is
+// `while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE)` — no time term. Emphatic prompt text
+// is not a constraint, it is one more input to a judgement call.
+// A workflow script has no clock (Date.now() is unavailable — it would break resume), so the time is
+// read by a tiny low-effort agent. If that read FAILS the run is NOT killed: an unreadable clock
+// returns Infinity, degrading to the old budget-only behaviour rather than truncating a healthy run.
+const DEADLINE_EPOCH = (() => {
+  const v = parseInt(A.deadline_epoch != null ? A.deadline_epoch : 0, 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+})();
+const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));
+// Run-level cap on how many TechLead stops may be refused (forcedReplans is not reset per round).
+// Not 1: the refusal must scale with the window, or a long budget is handed back early.
+// Not unbounded: a role that truly cannot name a direction would spend the window planning.
+const MAX_FORCED_REPLANS = Math.max(1, parseInt(A.max_forced_replans != null ? A.max_forced_replans : 6, 10));
+const CLOCK_SCHEMA = { type: 'object', properties: { epoch: { type: 'number' } },
+                       required: ['epoch'], additionalProperties: true };
+let deadlineHit = false;
+let forcedReplans = 0;
+
+async function secondsLeft(tag) {
+  if (!DEADLINE_EPOCH) return Infinity;
+  const r = await agentT(
+    `Run EXACTLY this command and nothing else:
+\`\`\`bash
+date +%s
+\`\`\`
+Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT run anything else.`,
+    { phase: 'Optimize', label: `clock ${tag}`, effort: 'low', schema: CLOCK_SCHEMA });
+  if (!r || !Number.isFinite(r.epoch)) {
+    log(`  [deadline] clock read failed at ${tag} — treating time as unlimited for this check.`);
+    return Infinity;
+  }
+  return DEADLINE_EPOCH - r.epoch;
 }
 
 // Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so both
@@ -1496,6 +1714,9 @@ if (MODE === 'author') {
     roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
       TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
       GPU_ID: GPU_POOL, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
+      // The author engineer reads the learned index too, so the switch has to reach it. It is the
+      // second reader; a switch that covers one of two readers is not a switch.
+      LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
@@ -1744,8 +1965,13 @@ let isaCanonicalArchive = null;
 // is invisible; with it, a verifier reporting a different parent hash makes the disagreement loud.
 let isaCanonicalSourceHash = null;
 let bestPerCase = BASELINE_PER_CASE;
-let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
+let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source} — also set by a warm-start adopt
+let roundsCommitted = 0;     // rounds this run actually landed; a warm-start adopt is NOT one of them
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
+// One row per KB-seeded direction, joined against what the verifier measured (see the push site in
+// the round loop). Fed to update_experience and returned to the caller: a driver aggregating these
+// is how anyone notices the KB has been cited fifty times and never once carried a round.
+const citations = [];
 
 // Finding (69). The post-build policy receipt, checked rather than assumed.
 // See POLICY_SUMMARY_SCHEMA for why this is a summary and not the file.
@@ -2198,7 +2424,195 @@ const resolveVsSeedFrame = (perCase, prior) => {
   log(`vs-seed frame: ${vsSeedFrame.toUpperCase()} -- ${r.why}`);
 }
 
-while (dispatched < BUDGET && !stopReason) {
+// ===========================================================================
+// PHASE: WarmStart. The recorded speedup only RANKS; adoption is decided by a fresh
+// measurement through the verify gate here. gfx comes from the baseline profile's
+// on-box `device` string (no extra probe).
+// ===========================================================================
+const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
+let warm_start = { adopted: false, read_reason: WARM_START_ON ? 'read' : 'disabled', candidates: [] };
+let skipLoop = false;
+if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
+  phase('WarmStart');
+  if (!GFX) {
+    warm_start.read_reason = 'missing_arch';
+    log('[kb] warm-start skipped: no gfx detected from the baseline profile device string.');
+  } else {
+    // The two planes take a different root flag and a different name→page rule (the store addresses
+    // by canonical id, so there is nothing to match fuzzily), and print the same JSON.
+    const localResolveCmd = KB_MODE === 'store'
+      ? `resolve-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+      : `resolve --root ${JSON.stringify(KB_ARTIFACTS_DIR)} --match ${WARM_START_MATCH}`;
+    const commonArgs =
+      `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\\n` +
+      `  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\\n` +
+      `  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}`;
+    // Remote first, local curated tree as the fallback. The service is the shared plane and should
+    // win when it has an answer, but it is still filling up, while `kb_artifacts/` holds a hand-
+    // curated history (retired entries, one entry per direction) that a thin remote page must not
+    // shadow. An empty remote answer is indistinguishable from a 404 on this scheme, so "no
+    // candidates" — not "no error" — is what triggers the second read. Both reads are seconds and
+    // no GPU; the thing they protect against is a cold start that costs hours.
+    const resolveScript = KB_REMOTE === 'off'
+      ? `python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\\n  ${commonArgs}`
+      : `${KB_ENV_PRELUDE}
+REMOTE_OUT=''
+if [ -n "$KB_STORE_TOKEN" ]; then
+  REMOTE_OUT=$(python3 ${JSON.stringify(EXPERIENCE_STORE)} resolve-remote --plane remote${KB_VERSION_FLAG} \\
+  ${commonArgs} 2>/dev/null || true)
+  if printf '%s' "$REMOTE_OUT" | python3 -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin).get("candidates") or []) else 1)' 2>/dev/null; then
+    printf '%s\\n' "$REMOTE_OUT"; exit 0
+  fi
+fi
+python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\
+  ${commonArgs}`;
+    const resolved = await agentT(
+      `You are the warm-start resolver. Run EXACTLY this ${KB_REMOTE === 'off' ? 'command' : 'script'} ` +
+      `and return its single-line JSON stdout verbatim as StructuredOutput — do not add, drop, reorder, ` +
+      `or reinterpret any field. ` +
+      (KB_REMOTE === 'off' ? '' :
+        `It tries the shared KB Store service first and falls back to the on-disk knowledge base by ` +
+        `itself; run it as one script, do not split it into separate commands. `) +
+      `An empty candidate list is a VALID answer meaning "nothing recorded for this kernel yet". Do not ` +
+      `retry with different flags and do not invent candidates:
+\`\`\`bash
+${resolveScript}
+\`\`\``,
+      { phase: 'WarmStart', label: 'warm_start:resolve', schema: WARMSTART_RESOLVE_SCHEMA }) || {};
+    warm_start.read_reason = resolved.read_reason || 'read';
+    warm_start.slug = resolved.slug || '';
+    warm_start.match_tier = resolved.match_tier || '';
+    warm_start.filtered = resolved.filtered || null;
+    const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
+    warm_start.candidates = cands.map(c => ({
+      rank: c.rank, slug: c.slug, speedup: c.speedup, direction: c.direction || '', status: 'read',
+    }));
+    const f = resolved.filtered || {};
+    // Which plane actually answered. Only the key-addressed subcommand emits `canonical_id`, so its
+    // presence separates a store read from a slug-tree read; in `local` KB_MODE the only key-
+    // addressed reader in the script is the remote one, so that is also the remote/fallback tell.
+    // Worth logging either way: the canonical id is the address, and on a scheme with no search a
+    // thin answer and a mis-keyed question look identical from the outside.
+    warm_start.plane = resolved.canonical_id ? (KB_MODE === 'store' ? 'store' : 'remote') : 'local';
+    if (resolved.canonical_id) log(`[kb] plane=${warm_start.plane} key=${resolved.canonical_id}`);
+    else if (KB_REMOTE !== 'off') log('[kb] plane=local (service had no candidates, or no credentials)');
+    log(`[kb] experience read: slug=${resolved.slug || '?'} (${resolved.match_tier || 'exact'} match of ` +
+      `${resolved.requested_slug || KERNEL_NAME}) reason=${warm_start.read_reason} ` +
+      `candidates=${cands.length}${f.total ? ` of ${f.total} recorded [${f.retired || 0} retired, ` +
+      `${f.below_min_speedup || 0} below ${WARM_START_MIN_SPEEDUP}x, ` +
+      `${f.same_direction_collapsed || 0} same-direction]` : ''}`);
+    const otherLangs = Array.isArray(resolved.other_language_pages) ? resolved.other_language_pages : [];
+    if (!cands.length && otherLangs.length) {   // wrong target_language, not an empty store
+      log(`[kb] NOTE: no ${TARGET_LANGUAGE} page, but the store holds ${otherLangs.join(', ')} — ` +
+        `check the target_language this lane was invoked with.`);
+    }
+    // reference-only: prose is already mirrored to EVAL_DIR/kb_references by the resolver; do not apply.
+    if (!WARM_START_REF_ONLY) {
+      const editableCsv = ((analysis && analysis.modifiable_files) || []).join(',');
+      for (const c of cands) {                              // already rank-ordered (fastest first)
+        const rec = warm_start.candidates.find(x => x.rank === c.rank);
+        const remapOut = `${EVAL_DIR}/warm_start/cand_${c.rank}/remapped.diff`;
+        const ver = await agentT(
+          roleAgent('verify_engineer', 'verify',
+            'Validate a HISTORICAL warm-start patch — the SAME gate as any round candidate. The patch was ' +
+            'won in the workspace that produced it, whose paths need not exist here, so FIRST run EXACTLY:\n' +
+            '```bash\n' +
+            `mkdir -p ${JSON.stringify(`${EVAL_DIR}/warm_start/cand_${c.rank}`)}\n` +
+            `python3 ${JSON.stringify(EXPERIENCE_STORE)} remap --patch ${JSON.stringify(c.patch_path)} \\\n` +
+            `  --out ${JSON.stringify(remapOut)} --editable ${JSON.stringify(editableCsv)} \\\n` +
+            `  --workspace ${JSON.stringify(CANONICAL)}\n` +
+            '```\n' +
+            'It prints one line of JSON. remapped=true: apply the REMAPPED patch (its paths were rewritten ' +
+            'onto this workspace). reason "no_change_needed": apply the original PATCH. Any other reason ' +
+            '(notably "unmapped_paths" — the patch touches files this workspace does not have): return ' +
+            'status:"apply_failed", notes "patch_outside_editable_set", and DO NOT apply or benchmark. ' +
+            'Apply with `git apply "$P" || git apply --3way "$P"`. On ANY failure restore the working copy ' +
+            'fully (git checkout -- . and delete untracked files) before returning so the next candidate ' +
+            'starts from a clean tree.', {
+            CANONICAL, PATCH: c.patch_path, REMAP_OUT: remapOut,
+            // Same gate as a round candidate means the same INPUTS as a round candidate.
+            // verify_engineer.md runs the oracle digest, which needs the task dir; upstream's
+            // warm-start call omitted it, so the historical patch would have been verified against
+            // whatever the agent guessed the oracle was. Caught by test_oracle_digest.
+            TASK_DIR: KERNEL_PATH_ORIG,
+            VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
+            EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
+            GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+            ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+          }),
+          { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
+        const sp = primSpeedup(ver);
+        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
+          const adopt = await agentT(
+            `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
+\`\`\`bash
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+cd ${CANONICAL}
+git checkout -- .
+# the remapped patch when verify produced one (its paths fit THIS workspace), else the stored one
+P=${JSON.stringify(remapOut)}; [ -f "$P" ] || P=${JSON.stringify(c.patch_path)}
+git apply "$P" || git apply --3way "$P"
+git -c user.email=team@workflow -c user.name=team add -A
+git -c user.email=team@workflow -c user.name=team commit -q -m "warm-start adopt: ${c.slug} (${sp.toFixed(2)}x)"
+git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
+\`\`\`
+If BOTH applies fail, apply manually to match intent, then add -A + commit and RE-RUN the COMMANDMENT
+correctness check; only report committed=true if it still passes. Return JSON {committed, current_best_diff, note}.`,
+            { phase: 'WarmStart', label: `warm_start:adopt c${c.rank}`, schema: COMMIT_SCHEMA });
+          if (adopt && adopt.committed) {
+            // The optimize loop now builds ON this patch: cumulative starts at the adopted Nx, so this
+            // run's own rounds only earn the delta above it (split out as incremental_speedup below).
+            cumulative = sp;
+            bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
+            finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
+              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path };
+            if (bestSeen < sp) bestSeen = sp;
+            warm_start.adopted = true;
+            warm_start.adopted_speedup = sp;
+            warm_start.slug = c.slug;
+            // Carried into the write-back: the idea this run started from, and the entry it
+            // descends from — lineage a later curation pass cannot recover from the diff alone.
+            warm_start.direction = c.direction || '';
+            warm_start.exp_dir = c.exp_dir || '';
+            if (rec) rec.status = 'adopted';
+            log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
+            profileSummary = await agentT(
+              roleAgent('profile_engineer', 'reprofile',
+                'Re-profile the adopted warm-start state and classify the new bottleneck.', {
+                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+                COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+              }),
+              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+            if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
+            break;
+          }
+        }
+        if (rec && rec.status !== 'adopted') rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
+        log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
+      }
+    }
+  }
+}
+
+// `noImprove < MAX_NO_IMPROVE` used to be the third clause. It is `!stopReason` now because that
+// counter no longer ends a run: a stalled phase ESCALATES (see `advancePhase`), and only the last
+// phase of a cycle turns a stall into a stop. Leaving the old clause in would end the run at the
+// first stalled phase-1, which is exactly the level the ladder exists to move past.
+while (!skipLoop && dispatched < BUDGET && !stopReason) {
+  // --- (0) HARD STOP: no new round may START past the deadline ----------
+  // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
+  // is never interrupted — a killed round leaves a half-verified patch and no report.
+  let left = await secondsLeft(`pre-r${round + 1}`);
+  if (left <= 0) {
+    deadlineHit = true;
+    log(`WALL-CLOCK DEADLINE reached after ${round} round(s) (budget used ${dispatched}/${BUDGET}) — ` +
+        `starting no further rounds; going straight to report + validation.`);
+    break;
+  }
+  if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
+
   round++;
   // Pinned at the TOP of the round. The ladder can escalate at the bottom of this same iteration,
   // and a record written from the live variable afterwards would file the round that exhausted a
@@ -2408,7 +2822,27 @@ while (dispatched < BUDGET && !stopReason) {
   }
 
   // --- (a) Plan the round ------------------------------------------------
-  const planningInputs = {
+  // A FUNCTION of `forbidStop`, not an object, so the forced re-plan below can rebuild the same
+  // inputs with one key added. Building it twice by hand is how a replan ends up planning against a
+  // different input set than the round it replaces.
+  const planInputs = (forbidStop) => ({
+    // FIRST, deliberately. Stated UNCONDITIONALLY, in both directions: `use_learned_kb=false` used
+    // to omit the budget and nothing else, while roles/tech_lead.md still listed
+    // knowledge/learned/INDEX.md among the files to read -- so the off switch removed the budget
+    // that CONSTRAINS the KB and left the instruction that USES it, and the KB-off control arm was
+    // never actually KB-off. The role gates on this value, so it has to be present whichever way it
+    // points. Kept at the top because test_kb_switch.py follows one level of helper indirection and
+    // reads a bounded window of the body; a switch buried below that window is one the guard cannot
+    // see, which is the same class of lapse the guard exists to catch.
+    LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
+    ...(USE_LEARNED_READ ? { LEARNED_KB_BUDGET:
+      `At most ${KB_DIR_CAP} of this round's directions may draw on learned cards, and you must cite ` +
+      `the cards you used in that direction's \`learned_refs\`. ` +
+      (KB_COLD_DIRECTION ? `At least ONE direction must be planned from the profile alone, with an ` +
+        `empty \`learned_refs\` — it is this round's control, and without it a round cannot tell you ` +
+        `whether the cards helped or merely crowded out what you would have tried anyway. ` : '') +
+      `Read as much of the index as you like; the budget is on how much of the ROUND the KB steers, ` +
+      `not on what you may look at.` } : {}),
     // The escalation ladder's output, spread only when it produced something. An
     // `attributed` block names a constraint the next edit must satisfy AND the
     // directions it ruled out -- the paper's point being that deep evidence earns
@@ -2467,10 +2901,45 @@ while (dispatched < BUDGET && !stopReason) {
     } : {}),
     ...(roundPhase === PHASE_ASM
       ? { KEYPOINTS: (profileSummary && profileSummary.keypoints) || [] } : {}),
-  };
-  const plan = await agentT(
-    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).', planningInputs),
+    // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
+    ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
+    ...(forbidStop ? { STOP_NOT_PERMITTED:
+      `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still ` +
+      `unspent, and this is the LAST phase of the cycle, so there is no level left to escalate to — ` +
+      `a stop here ends the run. This is a FIXED-WINDOW measurement: ending early is an invalid data ` +
+      `point no matter how good the number or how well argued the rationale, and your role's own ` +
+      `convergence gates (launch floor closed, gain under the promotion bar, roofline %, "only a ` +
+      `different tech stack is left") do NOT authorise stopping here. Plan at least one direction. ` +
+      `Switch lever rather than re-running an exhausted one — algorithm / memory / compute / ` +
+      `host_runtime, or a dedicated deep_explore ground-up rewrite. If every direction really is ` +
+      `exhausted, spend the round RE-MEASURING the committed best to tighten its error bars and say ` +
+      `so. Sizing: keep the round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
+  });
+  let plan = await agentT(
+    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
+      planInputs(false)),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+
+  // NO EARLY STOP, but only where the ladder has nowhere left to go. Upstream refuses EVERY stop
+  // while the window is unspent, because there a stop ends the run outright. Here a stop in
+  // phase1/phase2 is the reasoned signal that THIS LEVEL is finished and it escalates instead --
+  // refusing it would keep the planner grinding a level it just declared done, which is the opposite
+  // of what the window should buy. The deep round is the last state of the cycle, so a stop there is
+  // the one that can still hand hours back, and that is the one worth refusing. Bounded by
+  // MAX_FORCED_REPLANS so a role that genuinely cannot name a direction degrades to stopping rather
+  // than spending the window on planning.
+  while (roundPhase === PHASE_DEEP && DEADLINE_EPOCH && left > NO_STOP_S &&
+         forcedReplans < MAX_FORCED_REPLANS &&
+         (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
+    forcedReplans++;
+    log(`Round ${round}: stop=true in the last phase with ${(left / 60).toFixed(0)} min left — ` +
+        `refusing (#${forcedReplans}), re-planning.`);
+    plan = await agentT(
+      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
+        planInputs(true)),
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
+    left = await secondsLeft(`replan-r${round}`);
+  }
 
   // The planner reporting this level finished ESCALATES; it does not end the run. Its stop gate is
   // a statement about the current level -- floor attacked, no compute case far above it, last gain
@@ -2580,6 +3049,11 @@ while (dispatched < BUDGET && !stopReason) {
           `round would attribute a source result to the assembly phase.`
         : isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and ALL knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
+          // "ALL" is what makes this exclusion necessary: without it a KB-off run still sent the deep
+          // engineer into knowledge/learned/, so the switch covered the planner and not the one role
+          // with the broadest licence to act on a card.
+          (USE_LEARNED_READ ? '' : `— EXCLUDING knowledge/learned/, which is off for this run: do not open ` +
+            `INDEX.md or any card there. `) +
           `(you have broad authority — combine algorithm + memory + compute + host_runtime levers in one ` +
           `coherent rewrite), and follow them. You MAY edit ANY modifiable source (kernel + Python wrapper ` +
           `+ C++ binding), not just focus_files. Run your OWN multi-iteration measure→(self-)profile→rewrite ` +
@@ -3169,6 +3643,10 @@ matter how the rest of the run looked.`,
       cumulative = winner.geomean;
       bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
       finalWinner = winner;
+      // Inside the (127) guard on purpose. This counter is what the curation step reads to decide
+      // whether the run is entitled to teach; a refused commit that still incremented it would let a
+      // run that moved nothing file a card.
+      roundsCommitted += 1;
       // Inside the (127) guard, and deliberately absent from the `else`. This pointer
       // names the tree the NEXT round's candidates are mutations of, so it may only
       // move when the canonical tree demonstrably moved. On a refused commit canonical
@@ -3299,9 +3777,56 @@ matter how the rest of the run looked.`,
     if (mem.bottleneck_now) history.bottleneck_now = mem.bottleneck_now;
     if (mem.suggest_next) history.suggest_next = mem.suggest_next;
   }
+  // Enforce the round's KB budget. Honest about what this can and cannot do: stripping a citation
+  // does NOT un-influence a direction that was already planned with a card in mind — only the prompt
+  // above can do that. What the strip buys is OBSERVABILITY: `kbCapBound` counts the rounds where the
+  // planner overran its budget, so "the KB quietly took over planning" becomes a number in the run's
+  // return value instead of something you infer from a speedup that got worse.
+  if (USE_LEARNED_READ) {
+    let seeded = 0; const stripped = [];
+    for (const d of directions) {
+      if (!d.learned_refs || !d.learned_refs.length) continue;
+      if (seeded < KB_DIR_CAP) { seeded++; continue; }
+      stripped.push(d.id); d.learned_refs = [];
+    }
+    // A round where EVERY direction is KB-seeded has no control in it at all.
+    if (KB_COLD_DIRECTION && directions.length && directions.every(d => (d.learned_refs || []).length)) {
+      const last = directions[directions.length - 1];
+      stripped.push(`${last.id}(forced cold)`); last.learned_refs = [];
+    }
+    if (stripped.length) {
+      kbCapBound++;
+      log(`Round ${round}: KB budget ${KB_DIR_CAP} exceeded — un-cited ${stripped.join(', ')} ` +
+          `(the directions still run). Rounds where the cap bound so far: ${kbCapBound}.`);
+    }
+  }
+
+  // Join the planner's declared citations against what the verifier independently measured. Derived
+  // here rather than self-reported: the planner said which card seeded which direction, the verifier
+  // re-measured that direction without knowing, and their join is a fact neither one could fake.
+  // `became_winner` and not `verified > 1.0` is the standing test — verified_geomean is measured
+  // against the FROZEN baseline, so once a kernel sits at 2.5x cumulative every non-regressing
+  // direction clears 1.0 and a card would accrue credit for advancing nothing.
+  for (const r of clean) {
+    for (const cardRef of (r.d.learned_refs || [])) {
+      citations.push({
+        card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
+        // null, NOT 0, when the verifier produced nothing. `kb.py` scores <=1.0 as a real loss, so
+        // encoding "no evidence" as 0 charged a card for a verifier that crashed or timed out.
+        cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
+          ? r.ver.verified_geomean : null,
+        // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
+        // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
+        // card while the committed best already sat at 2x — a confirmation for advancing nothing,
+        // which is precisely what the three-state scoring was written to avoid. Require both.
+        became_winner: !!(winner && winner.id === r.d.id && improved),
+      });
+    }
+  }
   history.rounds.push({
     round,
-    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty })),
+    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
+      learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
       verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
       // Carried into HISTORY so the next round's planner can tell "this mechanism
@@ -3532,6 +4057,180 @@ log(`COMPLETE. ${KERNEL_NAME}: ${finalPrimary != null
       : `NO published speedup (${verdict.trust})`}` +
     ` (status ${validation ? validation.validation_status : 'none'}). Results in ${EVAL_DIR}`);
 
+// ===========================================================================
+// PHASE: UpdateExperience — distill ONE reusable card into this workflow's knowledge/learned/
+// (see knowledge/learned/README.md). Runs ONCE, at the very end: never per round, because only
+// the final director-verified speedup is evidence a card may cite. `validation` is required for
+// the same reason — without it `finalPrimary` falls back to the TechLead's own unverified
+// `cumulative`. ADD-only, so a skipped or failing step leaves the run byte-neutral.
+// ===========================================================================
+let learned_card = null;
+// Two runs must never become a card, and neither is a failure. A run that shared its GPU measured
+// contention, not the kernel. A run on a HELD-OUT kernel is the instrument for measuring whether the
+// KB helps at all — distil it and the next A/B over that kernel reads back its own answer and looks
+// spectacular. Defaults are permissive, so the CALLER is the one who has to declare a busy box.
+const BOX_QUIET = String(A.box_quiet != null ? A.box_quiet : 'true') === 'true';
+const HELD_OUT = String(A.held_out != null ? A.held_out : 'false') === 'true';
+const kbGate = !BOX_QUIET ? 'the box was contended — the number measured neighbours, not the kernel'
+  : HELD_OUT ? 'this kernel is in the held-out split and is the measuring instrument'
+  : '';
+if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
+// `validation.validation_status === 'accepted'` and not merely "a validation object exists": a
+// `flagged` result means the director found a reason not to believe the number (patch install
+// no-op, correctness fail, contended box), and curating from it teaches the next run a lesson this
+// run did not earn. Reported in review of #411.
+const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
+if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+  try {
+    learned_card = await agentT(
+      roleAgent('update_experience', 'Validate',
+        'Curate one distilled learned card from this lane\'s verified win (ADD-only, measured evidence, ' +
+        'ratios not wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
+          SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
+          PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+          WINNER: {
+            kernel: KERNEL_NAME, language: TARGET_LANGUAGE, mode: MODE, gfx: GFX,
+            kernel_class: (analysis && analysis.kernel_type) || '',
+            speedup: finalPrimary, validation_status: validation ? validation.validation_status : '',
+            bottleneck: profileSummary ? profileSummary.bottleneck : '',
+          },
+          // `rounds[]` (per-round directions + per-candidate claimed/verified/status + running
+          // `cumulative`) is what makes the card's `stack:` attribution and `pitfall:` lines derivable.
+          HISTORY: history,
+          // What this run's plan cited and what the verifier then measured. CONTEXT ONLY — the
+          // counters are applied by `kb.py drain` from the ledger filed below, never by this agent.
+          // The comment that used to sit here said the curator merges them, which stopped being
+          // true when that arithmetic moved into code.
+          CITATIONS: citations,
+          PROFILE: profileSummary,
+          REPORT_PATH: report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
+        }),
+      { phase: 'Validate', label: 'update_experience', schema: UPDATE_EXPERIENCE_SCHEMA });
+    if (learned_card && learned_card.card_path) {
+      log(`[kb] learned card ${learned_card.action || 'written'}: ${learned_card.card_path}`);
+    }
+  } catch (e) {
+    log(`[kb] update_experience skipped: ${e && e.message ? e.message : e}`);
+  }
+}
+
+// FILE THE CITATION LEDGER — OUTSIDE the curation gate, and deliberately so.
+// This is the loss half of the loop. It first shipped INSIDE the `finalPrimary > 1.0` branch above,
+// which is the exact bias it exists to remove: the runs that produce losses are the ones that did
+// not beat the baseline, were flagged, or ran on a contended box, and every one of them was
+// filtered out before it could file anything. Selecting successful runs into the feedback data is
+// worse than no feedback, because the resulting counters look earned. Reported in review of #411.
+// Curation (writing a NEW card) still requires a verified win — a run with nothing to teach must
+// not teach — but the ledger of what the cards ALREADY in the tree did is owed for every run.
+// `held_out` is the one exception: that split is the measuring instrument, so it neither writes
+// cards nor votes on them.
+// A workflow script has no filesystem, hence the one-line agent; the JSON is assembled by
+// `kb.py cite` rather than by the agent, because a proposal hand-written by a model is one more
+// place for the schema to drift.
+if (citations.length && !HELD_OUT) {
+  try {
+    await agentT(
+      `Run EXACTLY this command and nothing else. Do NOT edit any file.
+\`\`\`bash
+cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} cite \\
+--run-id ${JSON.stringify(KERNEL_NAME)} \\
+--kernel ${JSON.stringify(KERNEL_NAME)} --citations -
+${JSON.stringify(citations)}
+CITEJSON
+\`\`\`
+Return {"filed": <the "citations" number the command printed, or 0>}.`,
+      { phase: 'Validate', label: 'kb:cite', effort: 'low',
+        schema: { type: 'object', properties: { filed: { type: 'number' } },
+                  required: ['filed'], additionalProperties: true } });
+    log(`[kb] citation ledger filed: ${citations.length} row(s) for the next drain`);
+  } catch (e) {
+    log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
+  }
+}
+
+// ===========================================================================
+// Write this run's outcome back to kb_artifacts/ — the producer half of the loop.
+// The script applies its own gate and never fails the run; the `finalPrimary > 1.0`
+// pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
+// ===========================================================================
+let kb_written = null;
+if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+  const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
+  const finalPatch = report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`;
+  const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
+  // What the store cannot infer from a diff but needs to curate this entry later. `direction` is the
+  // IDEA, and only a warm start supplies a real one: a round title is free-form per run, so kebabbing
+  // it would mint a unique label every time and group nothing. Unlabeled is honest — resolve treats
+  // such an entry as its own direction, and a curation pass assigns the shared label later.
+  const winnerDirection = kebab(warm_start.direction || '');
+  const metricKind = HAS_WORKLOAD ? 'time_weighted' : 'geomean';
+  // Commas separate the list, so a case name may not contain one.
+  const caseNames = (bestPerCase || []).map(c => c && String(c.name || '').replace(/,/g, ';'))
+    .filter(Boolean).join(',');
+  // write-remote runs the directory write first and files the same entry in the store, so the two
+  // planes cannot drift; its extra `remote` field rides along under the schema's open object.
+  // `--plane both` extends that ordering one hop further: directory tree, then local store, then the
+  // service. Unlike the read there is no branch on credentials here, because `_open_plane` already
+  // makes the right call — a `both` without them degrades to the local planes and reports
+  // `remote_unavailable` rather than failing, which is the behaviour we would have written by hand.
+  const remoteWriteOn = KB_REMOTE !== 'off' && !!KB_STORE_DIR;
+  const writeCmd = remoteWriteOn
+    ? `write-remote --plane both --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+    : KB_MODE === 'store'
+      ? `write-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+      : 'write';
+  kb_written = await agentT(
+    `You are the experience writer. Run EXACTLY this command (it applies its own gates and prints a ` +
+    `single-line JSON) and return that JSON verbatim as StructuredOutput. If the command errors, return ` +
+    `{"written": false, "reason": "io_error"}` +
+    (remoteWriteOn
+      ? ` — do NOT retry it and do NOT adjust its arguments. It may reach the shared KB Store service, ` +
+        `and every write that service accepts is PERMANENT (it exposes no delete), so a second attempt ` +
+        `creates a second permanent record instead of fixing the first.`
+      : `.`) + `
+\`\`\`bash
+${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
+  --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
+  --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
+  --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\
+  --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
+  --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
+  --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
+${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` : ''}
+\`\`\``,
+    { phase: 'Validate', label: 'kb:write', schema: WARMSTART_WRITE_SCHEMA });
+  const remoteWrite = (kb_written && kb_written.remote) || null;
+  if (remoteWrite) {
+    log(remoteWrite.written
+      // `replaced` distinguishes the two write outcomes the store has: a NEW patch appends a session
+      // under the same key, the SAME patch remeasured lands back on its own content-addressed one.
+      ? `[kb] plane=store ${remoteWrite.replaced ? 'updated' : 'appended'} ` +
+        `${remoteWrite.canonical_id}/${remoteWrite.session_id}${remoteWrite.champion ? ' (champion)' : ''}`
+      : `[kb] plane=store not written: ${remoteWrite.reason || 'unknown'}`);
+  }
+  log(kb_written && kb_written.written
+    ? `[kb] experience written: ${kb_written.slug} (speedup ${finalPrimary.toFixed(2)}, direction ` +
+      `${winnerDirection || 'unlabeled'})`
+    : kb_written && kb_written.reason === 'duplicate_impl'
+      // Not a failure — the expected outcome of adopting a warm start and not beating it.
+      ? `[kb] experience already known — counted as reproduction #${kb_written.reproductions || '?'} of ` +
+        `${kb_written.reproduced || kb_written.dir}`
+      : `[kb] experience not written: ${kb_written ? kb_written.reason : 'writer returned nothing'}`);
+}
+
+// finalPrimary is the total vs the pristine baseline; when a warm-start patch was adopted, split out
+// the delta ABOVE it so a KB-derived gain is never reported as this run's own work.
+//
+// With no round committed after the adopt, the workspace still holds exactly the adopted code, and
+// the two numbers are two measurements of the SAME thing taken at different times — the ratio is
+// bench noise (~2% on this box; `_gemm_a16_w16_kernel` reported 0.98 and read as a regression).
+// Report 1.0 and say why, rather than dressing the noise up as a delta.
+const noRoundsAfterAdopt = !!(warm_start.adopted && roundsCommitted === 0);
+const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
+  ? (noRoundsAfterAdopt ? 1.0
+     : Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_speedup : null)
+  : finalPrimary;
+
 return {
   mode: MODE,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
@@ -3563,4 +4262,57 @@ return {
   phases_entered: phaseLog,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  // null when the step was off, or the run earned nothing worth a card.
+  // Which condition actually ended the loop. RECORDED, not inferred: on the previous campaign this
+  // existed only in the driver's return value, which the caller sees after ALL its kernels finish —
+  // so a parent-process death erased it for every kernel already done, and the realised window had
+  // to be reconstructed from queue timestamps. It is the whole point of an enforced window that you
+  // can tell a run that used its budget from one that gave up.
+  stopped_by: deadlineHit ? 'deadline'
+    : (dispatched >= BUDGET) ? 'budget'
+    : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
+    : 'tech_lead_stop',
+  deadline_hit: deadlineHit,
+  forced_replans: forcedReplans,
+  // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
+  // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
+  learned_citations: citations,
+  // Rounds where the planner overran the KB budget. A KB that binds every round is one that has taken
+  // over planning, which is the regression this budget exists to catch.
+  kb_cap_bound_rounds: kbCapBound,
+  // The monoculture canary, and it costs no GPU time: how many DISTINCT (specialty, focus_files)
+  // directions this run explored vs how many it issued. A KB that helps raises the verified speedup;
+  // a KB that cages lowers this without raising that. Reported on KB-less runs too — those are the
+  // baseline it has to be read against.
+  direction_entropy: (() => {
+    const seen = new Set(); let n = 0;
+    for (const r of history.rounds) for (const d of (r.directions || [])) {
+      n++; seen.add(`${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`);
+    }
+    return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
+  })(),
+  learned_card: learned_card && learned_card.card_path
+    ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
+    : null,
+  // Warm-start (local experience KB) outcome. adopted=false + read_reason on a cold start.
+  warm_start: {
+    adopted: warm_start.adopted,
+    read_reason: warm_start.read_reason,
+    slug: warm_start.slug || '',
+    // How the store was reached and what it filtered out: tells a genuine cold start from a
+    // name/language mismatch that only looks like an empty KB.
+    match_tier: warm_start.match_tier || '',
+    filtered: warm_start.filtered || null,
+    adopted_speedup: warm_start.adopted ? warm_start.adopted_speedup : null,
+    total_speedup: Number.isFinite(finalPrimary) ? finalPrimary : null,
+    incremental_speedup: incrementalSpeedup,
+    // true = the run adopted a stored patch and never improved on it; incremental is 1.0 by
+    // definition, not by measurement.
+    no_rounds_after_adopt: noRoundsAfterAdopt,
+    rounds_committed: roundsCommitted,
+    incremental_improved: !!(warm_start.adopted && Number.isFinite(incrementalSpeedup) && incrementalSpeedup > 1 + MIN_IMPROVE),
+    returned_after_read_kb: !!warm_start.returned_after_read_kb,
+    candidates: warm_start.candidates,
+  },
+  kb_written: kb_written && kb_written.written ? { slug: kb_written.slug, dir: kb_written.dir } : null,
 };

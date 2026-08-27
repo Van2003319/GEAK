@@ -75,6 +75,14 @@ JS_TESTS = {
     "test_expert_skills_off_identical.js": (E2E, LANE),
     "test_analysis_skill_off_identical.js": (
         E2E, E2E_ROLES / "profiler.md", E2E_ROLES / "system_architect.md"),
+    # Three more e2e guards, arriving with the upstream merge. Registered on the way IN rather than
+    # after the next audit: the inventory check above is what makes an unregistered guard a failure,
+    # and the whole point of that check is that a merge is exactly when files appear without anyone
+    # deciding who runs them.
+    "test_kernel_canonicalization_parity.js": (
+        E2E, E2E_SCRIPTS / "tests" / "kernel_symbols.json"),
+    "test_tuning_skillset_phase.js": (E2E, E2E_ROLES / "tuning_specialist.md"),
+    "test_time_budget_reserve.js": (E2E,),
 }
 
 # Where each suite's file lives, and what `__dirname` must resolve to inside it.
@@ -84,6 +92,9 @@ JS_TESTS = {
 SUITE_DIRS = {
     "test_expert_skills_off_identical.js": E2E_SCRIPTS,
     "test_analysis_skill_off_identical.js": E2E_SCRIPTS,
+    "test_kernel_canonicalization_parity.js": E2E_SCRIPTS,
+    "test_tuning_skillset_phase.js": E2E_SCRIPTS,
+    "test_time_budget_reserve.js": E2E_SCRIPTS,
 }
 
 
