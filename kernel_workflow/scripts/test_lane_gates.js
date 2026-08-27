@@ -205,10 +205,17 @@ console.log('\n# the final validation verdict, executed');
     'a refused verdict publishes no geomean -- the self-report is not resurrected as a verified number');
   ok(/validation_trust: verdict\.trust,/.test(src) && /timing_basis: verdict\.basis,/.test(src),
     'the lane hands the consumer its verdict and its timing basis, not just a free-text status');
-  ok(/const rankable = \(c\) => c\.kind !== 'lane' \|\| c\.validation_trust === 'verified';/.test(wfSrc) &&
-     /cands\.filter\(c => c\.speedup > 1\.0 && rankable\(c\)\)/.test(wfSrc) &&
-     !/cands\.filter\(c => c\.speedup > 1\.0\)\.sort/.test(wfSrc),
-    'the bake-off ranks only lanes whose own arbiter stands behind the number');
+  // The declaration is read as a whole and then asked what it REQUIRES, because the merge with
+  // upstream added a second conjunct (validation_status === accepted). A literal match would have
+  // failed on a predicate that got strictly stricter, which is the wrong direction for a guard to
+  // fire in. The trust clause must still be in there -- dropping it is what this exists to catch.
+  {
+    const decl = (wfSrc.match(/const rankable = \(c\) =>[\s\S]*?;\n/) || [''])[0];
+    ok(/c\.kind !== 'lane'/.test(decl) && /c\.validation_trust === 'verified'/.test(decl) &&
+       /cands\.filter\(c => c\.speedup > 1\.0 && rankable\(c\)\)/.test(wfSrc) &&
+       !/cands\.filter\(c => c\.speedup > 1\.0\)\.sort/.test(wfSrc),
+      'the bake-off ranks only lanes whose own arbiter stands behind the number', decl.trim());
+  }
   ok(/cannot win: /.test(wfSrc),
     'a fast-but-unverified lane is excluded out loud, which is what makes it not "found nothing"');
   ok(/timing_basis: \{ type: 'string' \}/.test(src),
@@ -1053,9 +1060,16 @@ console.log('\n# the search-phase ladder is a ONE-WAY ratchet that skips phases 
 
   // Wiring, lexically. The executed part above proves the transition table; these prove the loop
   // actually turns on it rather than computing it and carrying on.
-  ok(/while \(dispatched < BUDGET && !stopReason\) \{/.test(src),
-    'the loop is bounded by budget and an explicit stop reason, not by the stall counter -- a ' +
-    'counter that still ended the wave would make every phase after the first unreachable');
+  // Matched on the loop head's CONTENTS rather than on its exact text: warm-start added a
+  // `!skipLoop` clause, and a literal match would have read that as the stall counter coming back.
+  // What the check is actually about is which of the three clauses may appear, so it says that.
+  {
+    const loopHead = (src.match(/while \([^)]*dispatched < BUDGET[^)]*\) \{/) || [''])[0];
+    ok(loopHead !== '' && /!stopReason/.test(loopHead) && !/noImprove/.test(loopHead),
+      'the loop is bounded by budget and an explicit stop reason, not by the stall counter -- a ' +
+      'counter that still ended the wave would make every phase after the first unreachable',
+      loopHead || '(no loop head matched dispatched < BUDGET)');
+  }
   ok(/phaseStall >= MAX_NO_IMPROVE/.test(src)
      && /searchPhase = next;\s*\n\s*phaseStall = 0;/.test(src),
     'exhausting the allowance escalates and RESETS the counter, so a new state is judged on its ' +

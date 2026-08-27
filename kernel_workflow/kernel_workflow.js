@@ -534,12 +534,15 @@ if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend &
 // be believed, promoted by every downstream step. Reported in review of #411. `laneRows` still
 // carries every lane for transparency; only eligibility to WIN is tightened.
 //
-// BOTH conditions, not either. They test different fields for different failures: `validation_trust`
-// says an independent arbiter produced the number, `validation_status` says that arbiter accepted it.
-// A hung validate agent passes the second and fails the first; a `flagged` correctness failure passes
-// the first and fails the second. Taking one alone reopens whichever hole the other was written for.
-const ACCEPTED = (c) => String(c.validation_status || '').toLowerCase() === 'accepted';
-const rankable = (c) => c.kind !== 'lane' || (c.validation_trust === 'verified' && ACCEPTED(c));
+// Upstream's version of this gate reads `validation_status === 'accepted'` instead. It is NOT added
+// as a second conjunct, because here it would be strictly narrower than what is already checked and
+// wrong at the edge: `validationVerdict` in kernel_lane.js only returns `verified` once the status
+// has passed `accept` OR `validated` (:4024) on top of oracle pinning, correctness and timing basis,
+// and this fork's own director emits `validated` as a normal outcome. Requiring the literal string
+// `accepted` would refuse a fully arbitrated `validated` lane -- test_mode_dispatch.js has exactly
+// that fixture. A row that reaches here with no verdict defaults to `unverified` above, so the
+// failure upstream was closing (a `flagged` lane winning) is closed by the trust check alone.
+const rankable = (c) => c.kind !== 'lane' || c.validation_trust === 'verified';
 for (const c of cands) {
   if (c.speedup > 1.0 && !rankable(c)) {
     log(`lane ${c.lang}:${c.mode} scored ${c.speedup.toFixed(2)}x but cannot win: ` +
