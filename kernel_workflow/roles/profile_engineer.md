@@ -46,10 +46,31 @@ stall — and hands that location to an engineer that is about to edit those exa
    dominant symbol from `top_kernels`; without it the whole binary is searched and a cold kernel can
    outrank the hot one on raw instruction count.
 
-2. If `ISA_ARCHIVE` is empty or the archive has no disassembly, emit the assembly yourself and
-   localise on that instead — same text, and it is the text the engineer will edit:
-   `python3 $ASM_ROUNDTRIP_HELPER emit --source-root <src dir> --source-file <X.hip> --out /tmp/kp.s`
-   then point `--archive` at the directory holding it.
+2. If `ISA_ARCHIVE` is empty or the archive has no disassembly, localise on the assembly the
+   engineer is actually about to edit. **Ask what that is before you produce it:**
+
+   ```bash
+   python3 $ASM_ROUNDTRIP_HELPER incumbent --source-root <src dir>
+   ```
+
+   - `continue_from_assembly: true` → point `--archive` at the directory holding the `.s` it names.
+     That file is the INCUMBENT: the accumulated result of every phase2 round that banked, and the
+     file this round's engineers will continue from.
+   - otherwise (no assembly, or every row `superseded`) → emit, and localise on that:
+     `python3 $ASM_ROUNDTRIP_HELPER emit --source-root <src dir> --source-file <X.hip> --out /tmp/kp.s`
+
+   **Do not emit when there is an incumbent.** `emit` regenerates the assembly from source, which is
+   the compiler's output — and once a phase2 round has banked, that is a *different program* from
+   the one being edited. Windows localised in it may not exist in the incumbent at all, and the
+   engineer, told to re-locate by `fingerprint`, would then land on whichever site in its own
+   assembly happens to match. That reads in the log exactly like a localised round.
+
+2b. **Score against `ASM_LEDGER` before you return.** It carries one row per window edit any earlier
+   round measured. A window whose only remaining edit kinds are already `confirmed` (that edit is IN
+   the incumbent) or `broke-correctness` is not a fresh opportunity however well it scores — the
+   tool ranks on static stall proxies and cannot know it was already worked. Drop those and say so
+   in `notes`. A `dead-end` row is weaker evidence here: its `reopens_when` is usually "if the
+   schedule around this window changes", and the last accepted edit was one.
 
 3. Return the `keypoints` array from the tool **verbatim**. Do not rewrite the windows, do not merge
    them, and do not add ones the tool did not produce: the engineer relocates a window by

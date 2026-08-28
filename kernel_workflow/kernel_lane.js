@@ -1265,6 +1265,30 @@ const ISA_EVIDENCE_SCHEMA = obj({
   claims_indeterminate: { type: 'array', items: { type: 'string' } },
   high_findings: { type: 'number' }, notes: { type: 'string' },
 }, ['exit_code', 'mechanism_verdict']);
+// The assembly-restore receipt. It answers a question that only exists in phase2 and that no
+// other receipt on this path can reach: was the candidate's DEVICE CODE in the binary at all.
+//
+// `build.ninja` has one `cuda_compile` edge per translation unit and its input is the `.hip`;
+// nothing in the graph compiles a `.s`. So an assembly patch applies into a tree where nothing
+// reads it, ninja compiles the untouched source, and the benchmark times the PARENT -- while
+// policy, twin-sync, the oracle digest and correctness all report a clean pass. `asm_restore` is
+// the evidence that `asm_roundtrip.py restore` put the edited assembly into the object the link
+// picks up.
+//
+// `edited` is a boolean rather than a count for the same reason `mechanism_verdict` is an enum:
+// the interesting value is the one a summary would round away. `false` means the engineer
+// submitted a pristine `.s`, so the candidate is byte-identical to its parent -- which must be
+// recorded as "no edit was made" and never as "the edit had no effect", the second being a
+// closure of a direction nothing tried. `reached_binary` is the corroborating read from the ISA
+// diff, and it is OPTIONAL because with no parent archive there is nothing to diff against;
+// absent means unjudged, and `asmRestoreReject` only refuses on an explicit `false`.
+const ASM_RESTORE_SCHEMA = obj({
+  exit_code: { type: 'number' },
+  assembly_found: { type: 'number' }, restored: { type: 'number' },
+  edited: { type: 'boolean' }, reached_binary: { type: 'boolean' },
+  source_files: { type: 'array', items: { type: 'string' } },
+  receipt: { type: 'string' }, notes: { type: 'string' },
+}, ['exit_code', 'assembly_found']);
 // The deep-analysis return, shared by L3 (`ir`) and L4 (`compiler`).
 //
 // `status` has four values and each one is load-bearing:
@@ -1337,6 +1361,19 @@ const ENG_SCHEMA = obj({
   // so the claim cannot be fitted to the result. Present only when the lane runs
   // with isa_evidence=observe|gate.
   mechanism_claims: { type: 'array', items: { type: 'string' } },
+  // phase2 only, and both are memory rather than result.
+  //
+  // `asm_ledger_rows` is the assembly phase's own ledger, kept separate from `history.ledger`
+  // because the two close different things. A source row closes a MECHANISM -- "a wider staging
+  // load did not help" -- while an assembly row closes a WINDOW plus an edit kind, and the same
+  // mechanism id in two windows is two experiments. Merging them would also import the wrong
+  // verdict semantics: a source `dead-end` records that the compiler's output was already the
+  // better program, which is the precise thing phase2 exists to disprove.
+  asm_ledger_rows: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  // Whether this round built ON the banked assembly or restarted from the compiler's output.
+  // Load-bearing for reading the curve: a round that re-emitted is measured against a different
+  // program than one that continued, and without this a restart looks like a round that found less.
+  continued_from: { type: 'string', enum: ['incumbent', 'cold_emit', 'superseded_reemit'] },
 }, ['status', 'speedup_geomean']);
 
 const VERIFY_SCHEMA = obj({
@@ -1368,6 +1405,11 @@ const VERIFY_SCHEMA = obj({
   // The next question: did the mechanism survive the compiler? Present only when
   // the lane runs with isa_evidence=observe|gate.
   isa_evidence: ISA_EVIDENCE_SCHEMA,
+  // And the question below both of them, which only phase2 raises: was the candidate's device
+  // code built at all? Declared unconditionally, not gated on the phase -- an assembly patch also
+  // reaches this schema from the recovery path and from a warm-start candidate won in an earlier
+  // wave, and an undeclared field is stripped before `asmRestoreReject` can ever see it.
+  asm_restore: ASM_RESTORE_SCHEMA,
 }, ['status', 'verified_geomean', 'policy_pass']);
 
 const INTEGRATE_SCHEMA = obj({
@@ -1384,6 +1426,11 @@ const INTEGRATE_SCHEMA = obj({
 const MEMORY_SCHEMA = obj({
   insights: { type: 'array', items: { type: 'string' } },
   ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  // The assembly phase's ledger, carried beside the source one rather than inside it. Its unit is
+  // a WINDOW (kernel + block + ordinal + fingerprint) plus an edit kind, because the same edit in
+  // two windows is two experiments; the source ledger's unit is a mechanism, and one row per
+  // mechanism would collapse every window that mechanism was ever tried in onto one verdict.
+  asm_ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
   bottleneck_now: { type: 'string' }, suggest_next: { type: 'string' },
 }, ['insights']);
 
@@ -2073,7 +2120,11 @@ let isaCanonicalSourceHash = null;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source} — also set by a warm-start adopt
 let roundsCommitted = 0;     // rounds this run actually landed; a warm-start adopt is NOT one of them
-const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
+// `asm_ledger` is a SIBLING of `ledger`, not a slice of it. See MEMORY_SCHEMA: the two have
+// different units (a mechanism vs a window+edit) and different verdict vocabularies, and phase2's
+// engineers are handed only the assembly one -- a source `dead-end` is a statement that the
+// compiler's output won, which is the proposition the assembly phase exists to test.
+const history = { insights: [], ledger: [], asm_ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
 // One row per KB-seeded direction, joined against what the verifier measured (see the push site in
 // the round loop). Fed to update_experience and returned to the caller: a driver aggregating these
 // is how anyone notices the KB has been cited fifty times and never once carried a round.
@@ -2468,6 +2519,74 @@ const twinReject = (rep, label) => {
   return null;
 };
 
+// The assembly gate, one layer BELOW `twinReject`. Twin-sync answers "was the
+// edited file compiled"; this answers a question that only exists in phase2 and
+// that nothing else on this path can answer: "was the candidate's device code in
+// the binary at all".
+//
+// It exists because `build.ninja` has no edge that compiles a `.s`. An assembly
+// patch applies cleanly into a tree where nothing reads it, ninja compiles the
+// untouched `.hip`, correctness passes, and the benchmark times the PARENT. The
+// verifier's own report is internally consistent and says nothing is wrong,
+// which is what makes this worth a gate rather than a log: the failure has no
+// symptom, so escalating on one would never fire.
+//
+// UNLIKE `isaEvidenceReject` this is not conditional on a mode. `isa_evidence`
+// is about explaining a measurement and may honestly be switched to observe;
+// this is about whether the measurement is of the candidate, and there is no
+// setting under which timing the wrong binary is an acceptable answer. It is the
+// same asymmetry finding (87) already drew: missing evidence ABOUT the
+// measurement must refuse, missing evidence about the mechanism must not.
+//
+// `phaseIsAsm` is only consulted for an ABSENT receipt, and only because absence
+// is genuinely ambiguous: a source candidate has no assembly to restore and
+// correctly reports none. In phase2 the ambiguity is gone -- `asm_engineer.md`
+// forbids editing source, so every patch that phase produces is a `.s` -- and a
+// verifier that returned no receipt there did not run step 2d.
+const asmRestoreReject = (rep, label, phaseIsAsm) => {
+  const where = label || 'verify';
+  // Same scoping rule as the gates above: only reports claiming a pass (60).
+  if (!rep || rep.status === 'failed' || rep.correctness === 'FAIL') return null;
+  const asm = rep.asm_restore;
+  if (!asm || typeof asm !== 'object') {
+    if (!phaseIsAsm) return null;
+    return `asm:receipt_absent(${where} measured a phase2 candidate without running `
+      + 'asm_roundtrip.py restore; no build edge compiles a .s, so an unrestored tree links the '
+      + 'object compiled from the untouched source -- this number is the parent\'s)';
+  }
+  if (!Number.isInteger(asm.exit_code)) {
+    return `asm:no_exit_code(${JSON.stringify(asm.exit_code)})`;
+  }
+  if (asm.exit_code !== 0) {
+    return `asm:not_restored(${where}: restore exited ${asm.exit_code} -- 2 is its HOLE (no .s `
+      + 'found, or one carrying no provenance stamp to resolve) and 3 is a failed rebuild. Either '
+      + 'way the edited assembly is not in the binary, so this is an unbuilt candidate and not a '
+      + 'slow one)';
+  }
+  // Two arithmetic consequences the tool guarantees at exit 0, so a receipt that
+  // violates either was not produced by running it.
+  if (!Number.isFinite(asm.assembly_found) || asm.assembly_found < 1) {
+    return `asm:zero_found_with_exit_zero(${JSON.stringify(asm.assembly_found)}; the tool returns `
+      + '2, not 0, when it finds no assembly, so this receipt is not one it can have emitted)';
+  }
+  if (!Number.isFinite(asm.restored) || asm.restored < asm.assembly_found) {
+    return `asm:partial_restore(${JSON.stringify(asm.restored)} of ${asm.assembly_found} rebuilt; `
+      + 'the un-rebuilt one is still being linked from the source-compiled object)';
+  }
+  if (asm.reached_binary === false) {
+    return `asm:did_not_reach_binary(${where}: the ISA diff reports the code object byte-identical `
+      + 'to its parent. For a SOURCE candidate that is a remark; here the patch IS the machine '
+      + 'code, so identical means the restore did not land. A fault in our build path, not in the '
+      + 'candidate -- but the number is the parent\'s and must not be banked as the edit\'s)';
+  }
+  if (asm.edited === false) {
+    return `asm:unedited_assembly(${where}: the .s is identical to what this build emits unedited, `
+      + 'so the candidate is byte-identical to its parent. Record this as "no edit was made", '
+      + 'NEVER as "the edit had no effect" -- the second closes a direction nothing tried)';
+  }
+  return null;
+};
+
 // DEEP-MODE resume: restore cumulative speedup + insight/ledger history from the prior wave so this
 // continuation builds ON the cumulative best (canonical was already seeded from STATE_DIR/best by the
 // director) and does not re-explore dead directions. No-op on a fresh run (prior_state undefined).
@@ -2498,6 +2617,10 @@ if (setup.resumed && setup.prior_state) {
   if (Number.isFinite(ps.cumulative) && ps.cumulative > 0) priorCumulativeVsSeed = ps.cumulative;
   if (Array.isArray(ps.insights)) history.insights = ps.insights;
   if (Array.isArray(ps.ledger)) history.ledger = ps.ledger;
+  // Resumed with the rest of memory. A wave that seeded from a phase2 breakpoint inherits the
+  // banked `.s` in its canonical tree, so an engineer continuing from that assembly with none of
+  // the window verdicts behind it would re-run experiments the previous wave already paid for.
+  if (Array.isArray(ps.asm_ledger)) history.asm_ledger = ps.asm_ledger;
   if (ps.bottleneck_now) history.bottleneck_now = ps.bottleneck_now;
   if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) {
     log(`  [resume] NOT importing prior_state.best_per_case (${ps.best_per_case.length} rows): those are ` +
@@ -2672,6 +2795,10 @@ ${resolveScript}
             VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
             EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
             GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            // Same gate means the same inputs (see TASK_DIR above). A stored patch from a wave
+            // that ran phase2 carries a `.s`, and without this the warm-start arm would time the
+            // unpatched tree and adopt the result as a validated historical win.
+            ASM_ROUNDTRIP_HELPER: `${WORKFLOW_DIR}/scripts/asm_roundtrip.py`,
             ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
@@ -3008,9 +3135,17 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
           COMMANDMENT,
           ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
           ASM_ROUNDTRIP_HELPER: `${WORKFLOW_DIR}/scripts/asm_roundtrip.py`,
-          // The archive of the tree about to be edited. Empty is not fatal: the role re-emits the
-          // assembly with asm_roundtrip and localises on that instead, which is the same text.
+          // The archive of the tree about to be edited. Empty is not fatal, but the fallback is
+          // NOT a fresh `emit`: that regenerates the assembly from source, and once a phase2 round
+          // has banked, the canonical `.s` is the engineer's edited version while a fresh emit is
+          // the compiler's. Localising on the second produces windows that exist in a program
+          // nobody is about to edit -- and the engineer, told to re-locate by fingerprint, then
+          // finds whichever site in ITS assembly happens to match. `asm_roundtrip.py incumbent`
+          // names the banked `.s`; localise on that, and emit only when there is none.
           ISA_ARCHIVE: isaCanonicalArchive || '',
+          // The rounds already spent on each window. A keypoint that scores well but whose only
+          // edit kinds are already `confirmed` or `broke-correctness` is not a fresh opportunity.
+          ASM_LEDGER: history.asm_ledger,
           BOTTLENECK: (profileSummary && profileSummary.bottleneck) || '',
           TOP_KERNELS: (profileSummary && profileSummary.top_kernels) || [],
         }),
@@ -3257,10 +3392,21 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
       const isDeep = !isAsm && d.specialty === 'deep_explore';
       const readLine = isAsm
         ? `Then Read ${WORKFLOW_DIR}/roles/asm_engineer.md and follow it. You are editing the device ` +
-          `ASSEMBLY, not the source: emit it with asm_roundtrip.py, change ONLY the window a KEYPOINT ` +
-          `names, rebuild with asm_roundtrip.py, and measure. The source files are read-only to you ` +
+          `ASSEMBLY, not the source: change ONLY the window a KEYPOINT names, rebuild with ` +
+          `asm_roundtrip.py, and measure. The source files are read-only to you ` +
           `this round — an edit to them would be a phase-1 direction wearing a phase-2 label, and the ` +
-          `round would attribute a source result to the assembly phase.`
+          `round would attribute a source result to the assembly phase.\n` +
+          // The instruction that used to sit here was "emit it with asm_roundtrip.py", unconditional,
+          // and it is what kept this phase from compounding: `emit` regenerates the assembly FROM
+          // SOURCE, so every round threw away the edits the previous round banked and restarted from
+          // the compiler's output. The search could re-find one window's win forever and never stack
+          // two. The `.s` is the artifact under optimisation here exactly as the `.hip` is in phase1.
+          `START BY ASKING WHETHER YOU ARE CONTINUING: run \`python3 ${WORKFLOW_DIR}/scripts/asm_roundtrip.py ` +
+          `incumbent --source-root <your ws src dir>\` FIRST. A \`.s\` in your workspace is the ` +
+          `INCUMBENT — the accumulated result of every assembly round that banked before you — and it ` +
+          `is your starting point. Do NOT emit over it. \`emit\` is the cold-start path, for a tree ` +
+          `that carries no assembly, or one the helper reports \`superseded\` because a source round ` +
+          `has since edited the file it came from.`
         : isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and ALL knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
           // "ALL" is what makes this exclusion necessary: without it a KB-off run still sent the deep
@@ -3325,10 +3471,15 @@ ${cfg({
         // told "do not re-walk confirmed dead-ends" -- and the dead-end verdicts live HERE, not in
         // the insight blackboard, which holds transferable findings rather than closed directions.
         // So the one role most able to re-walk a dead end was the one asked to avoid dead ends it
-        // could not see. Every engineer gets it: a specialist can be handed a direction adjacent to
-        // a closed one, and an assembly engineer can pick a keypoint whose mechanism was already
-        // measured shut at source level.
-        LEDGER: history.ledger,
+        // could not see.
+        //
+        // In phase2 it is the ASSEMBLY ledger, and the swap is the point rather than a shortcut.
+        // The source rows close mechanisms measured at source level, and their `dead-end` verdict
+        // means "the compiler's own output was already the better program" -- which is exactly the
+        // proposition this phase exists to test, so importing it here would shut the door phase2
+        // was opened to walk through. The assembly rows close a window plus an edit kind, which is
+        // the unit an assembly engineer actually chooses.
+        ...(isAsm ? { ASM_LEDGER: history.asm_ledger } : { LEDGER: history.ledger }),
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
         ...KB_INPUTS,
@@ -3394,6 +3545,12 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
           TASK_DIR: KERNEL_PATH_ORIG,
           GPU_ID: d.gpu_id, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+          // Sent on EVERY round, not only in phase2. Whether the verifier needs it is decided by
+          // the PATCH -- an assembly patch can also arrive from a recovered on-disk artefact, or
+          // ride along in a warm-start candidate won in some earlier wave -- and a helper supplied
+          // only when the lane believes it is in the assembly phase is a helper that is absent
+          // during exactly the run whose measurement it was meant to keep honest.
+          ASM_ROUNDTRIP_HELPER: `${WORKFLOW_DIR}/scripts/asm_roundtrip.py`,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           ...(ISA_ENABLED ? {
@@ -3444,6 +3601,32 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   );
 
   const clean = results.filter(Boolean);
+  // The restore receipt, logged for every candidate that produced one and for
+  // every phase2 candidate that did not. Logged even though `asmRestoreReject`
+  // already refuses on it, because the refusal only appears for a candidate that
+  // got as far as the admission filter: one that failed correctness is refused
+  // earlier and its receipt would never be seen, and "correctness failed" on a
+  // restore that silently did nothing is a very different bug report from
+  // "correctness failed" on an assembly edit that really was built.
+  for (const r of clean) {
+    const id = r.d && r.d.id ? r.d.id : 'candidate';
+    const rec = r.ver && r.ver.asm_restore;
+    if (!rec || typeof rec !== 'object') {
+      if (roundPhase === PHASE_ASM) {
+        log(`  [asm] ${id}: no restore receipt -- a phase2 patch is a .s and no build edge `
+          + 'compiles one, so this measurement has no evidence it is of the candidate');
+      }
+      continue;
+    }
+    const bits = [`exit=${rec.exit_code}`,
+      `found=${rec.assembly_found}`, `restored=${rec.restored}`];
+    if (rec.edited === false) bits.push('UNEDITED-ASSEMBLY');
+    if (rec.reached_binary === false) bits.push('DID-NOT-REACH-BINARY');
+    if (Array.isArray(rec.source_files) && rec.source_files.length) {
+      bits.push(`units=[${rec.source_files.join(',')}]`);
+    }
+    log(`  [asm] ${id}: ${bits.join(' ')}`);
+  }
   // The ISA receipt is LOGGED for every candidate in both observe and gate mode;
   // only `gate` lets it change an outcome. Logging it under `observe` is the entire
   // point of that mode -- it is how you find out, on your own kernels and before
@@ -3555,9 +3738,14 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // would weaken the check finding (87) exists to keep, which is a bad trade for
     // one line of syntax.
     const isaReason = isaEvidenceReject(r.ver);
-    if (metricReason || isaReason) {
+    // And so is a phase2 candidate whose edited assembly never reached the
+    // binary. Held separately for the same reason `isaReason` is -- the chain
+    // above is pinned lexically -- but note this one is NOT mode-gated: see
+    // `asmRestoreReject`.
+    const asmReason = asmRestoreReject(r.ver, null, roundPhase === PHASE_ASM);
+    if (metricReason || isaReason || asmReason) {
       log(`  ${r.d && r.d.id ? r.d.id : 'candidate'} verified but not a candidate: `
-        + `${metricReason || isaReason}`);
+        + `${metricReason || isaReason || asmReason}`);
       return false;
     }
     return primSpeedup(r.ver) > CANDIDATE_FLOOR;
@@ -3603,6 +3791,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         GPU_ID: GPU_POOL, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
+        // See integrator.md 1b. A `.s` is a whole-file alternative rendering of one translation
+        // unit's machine code, not a diff against the source, so two of them for one unit do not
+        // combine -- and any arm that stacks one has to build through the round trip or it times
+        // the source-compiled program instead.
+        ASM_ROUNDTRIP_HELPER: `${WORKFLOW_DIR}/scripts/asm_roundtrip.py`,
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
           files: r.d.focus_files || [], patch: r.patch })),
@@ -3830,7 +4023,23 @@ merely sits UNDER some other repository's working tree, \`git apply\` prints \`S
 its own repo, use \`patch -p1 --forward\` and re-hash the files afterwards; judge by "is this directory
 its own repo?", never by "did the command return non-zero?".
 If BOTH \`git apply\` and \`git apply --3way\` fail, inspect the patch and apply it manually (edit the
-files to match the patch's intent), then \`add -A\` + commit. Before executing correctness, run
+files to match the patch's intent), then \`add -A\` + commit.
+
+**If the tree carries a \`.s\`, the correctness re-run below must build through the round trip.** No
+edge in \`build.ninja\` compiles a \`.s\`, so a plain rebuild here compiles the untouched \`.hip\` and
+certifies the program from before the assembly phase — a clean pass for a binary nobody is shipping.
+After the build and before correctness:
+\`\`\`bash
+python3 ${WORKFLOW_DIR}/scripts/asm_roundtrip.py incumbent --source-root <the canonical src dir>
+# continue_from_assembly: true  ->  build once, then:
+python3 ${WORKFLOW_DIR}/scripts/asm_roundtrip.py restore --source-root <the canonical src dir>
+# ...then re-run correctness; that second run is the one that counts.
+\`\`\`
+A row reporting \`superseded: true\` means this winner's own source edit replaced the assembly: DELETE
+that \`.s\`, \`git add -A\` again, and rebuild normally. Do not restore it — it would revert the very
+edit being committed. Report which of the two you did in \`note\`.
+
+Before executing correctness, run
 \`python3 ${WORKFLOW_DIR}/scripts/candidate_policy_scan.py\` over every candidate-owned source/build path
 and candidate ELF, exempting only separately frozen immutable baseline/oracle paths. A finding, inspection
 failure, or absent passing receipt means committed=false. The applied source is NOT guaranteed to match
@@ -3969,6 +4178,21 @@ matter how the rest of the run looked.`,
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
+      // phase2 only. The window rows the assembly engineers measured, forwarded VERBATIM so the
+      // planner files them rather than re-deriving them: it did not see the instruction stream and
+      // cannot reconstruct a fingerprint, and a row whose fingerprint was invented names a window
+      // the next round will fail to find. Present-but-empty is a real answer -- it says the round
+      // ran and measured nothing worth recording, which is different from a round that never got
+      // to measure -- so the key is sent whenever the round was phase2.
+      ...(roundPhase === PHASE_ASM ? {
+        ASM_LEDGER_ROWS: clean.flatMap(r => (r.eng && Array.isArray(r.eng.asm_ledger_rows)
+          ? r.eng.asm_ledger_rows.map(row => ({ ...row, direction: r.d.id })) : [])),
+        // Which arms continued from the banked assembly and which restarted from the compiler's
+        // output. A restart's speedup is against a different program, so a curve read without this
+        // shows a cliff wherever a supersession happened and no reason for it.
+        ASM_CONTINUATION: clean.map(r => ({ id: r.d.id,
+          continued_from: (r.eng && r.eng.continued_from) || 'unreported' })),
+      } : {}),
       // (127). STATE.json's `cumulative` is the LANE total vs the original seed, so it must be
       // written from CUMULATIVE_VS_SEED -- never from CUMULATIVE_SPEEDUP, which is wave-local and
       // would overwrite a 4.35x lane history with a 1.01x round number on the next resume.
@@ -3992,6 +4216,7 @@ matter how the rest of the run looked.`,
   if (mem) {
     if (mem.insights) history.insights = mem.insights;
     if (mem.ledger) history.ledger = history.ledger.concat(mem.ledger);
+    if (mem.asm_ledger) history.asm_ledger = history.asm_ledger.concat(mem.asm_ledger);
     if (mem.bottleneck_now) history.bottleneck_now = mem.bottleneck_now;
     if (mem.suggest_next) history.suggest_next = mem.suggest_next;
   }

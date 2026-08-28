@@ -180,8 +180,15 @@ MUTANTS = [
      "  if (receipt.mechanism_verdict === 'refuted') {",
      "  if (receipt.mechanism_verdict !== 'realized') {"),
     ("the greedy filter computes the ISA reason and discards it",
-     "    if (metricReason || isaReason) {",
-     "    if (metricReason) {"),
+     "    if (metricReason || isaReason || asmReason) {",
+     "    if (metricReason || asmReason) {"),
+    # The same probe for the gate that landed beside it. Dropping `asmReason` here is the
+    # regression that matters most in phase2: every other receipt on that path is about the
+    # candidate, and this is the only one about whether the candidate was BUILT -- so a filter
+    # that computes it and throws it away admits a number measured on the parent binary.
+    ("the greedy filter computes the assembly-restore reason and discards it",
+     "    if (metricReason || isaReason || asmReason) {",
+     "    if (metricReason || isaReason) {"),
     ("the ladder stops escalating on a stagnating lane",
      "  if (!(noImproveCount >= 1) && !priorRefuted) {",
      "  if (true) {"),

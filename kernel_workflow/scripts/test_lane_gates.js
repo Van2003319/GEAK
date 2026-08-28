@@ -312,6 +312,7 @@ console.log('\n# the post-build policy receipt gate, executed');
     grab(/const POLICY_SUMMARY_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'POLICY_SUMMARY_SCHEMA') +
     grab(/const HIP_TWIN_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'HIP_TWIN_SCHEMA') +
     grab(/const ISA_EVIDENCE_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'ISA_EVIDENCE_SCHEMA') +
+    grab(/const ASM_RESTORE_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'ASM_RESTORE_SCHEMA') +
     grab(/const VERIFY_SCHEMA = obj\(\{[\s\S]*?\}, \[[^\]]*\]\);\n/, 'VERIFY_SCHEMA');
   const schemas = new Function(`${schemaBlock}\nreturn { POLICY_SUMMARY_SCHEMA, VERIFY_SCHEMA };`)();
   const polSummary = schemas.POLICY_SUMMARY_SCHEMA;
@@ -326,6 +327,99 @@ console.log('\n# the post-build policy receipt gate, executed');
   ok(schemas.VERIFY_SCHEMA.properties.policy_pass !== undefined &&
      schemas.VERIFY_SCHEMA.required.includes('policy_pass'),
     'VERIFY_SCHEMA declares policy_pass rather than only listing it in `required`');
+  // Evaluated, not matched. `asmRestoreReject` refuses a phase2 candidate that returns no
+  // `asm_restore`, so an undeclared property would strip the receipt on its way in and turn every
+  // assembly round into a refusal for a receipt the agent did return.
+  ok(schemas.VERIFY_SCHEMA.properties.asm_restore !== undefined &&
+     schemas.VERIFY_SCHEMA.properties.asm_restore.properties.exit_code !== undefined,
+    'VERIFY_SCHEMA declares asm_restore, so the restore receipt survives into the gate');
+}
+
+console.log('\n# the assembly-restore gate, executed');
+{
+  // The gate for the failure that has NO symptom. `build.ninja` has one `cuda_compile` edge per
+  // translation unit and its input is the `.hip`; nothing in the graph compiles a `.s`. So an
+  // assembly patch applied to a clean tree and built normally leaves the assembly unread, compiles
+  // the untouched source, and times the PARENT -- while policy, twin-sync, the oracle digest and
+  // correctness all report a clean pass. Nothing about that result says "go look at the build",
+  // which is why this is a gate and not a log line.
+  const block = grab(/const asmRestoreReject = \(rep, label, phaseIsAsm\) => \{[\s\S]*?\n\};\n/,
+    'asmRestoreReject');
+  const g = new Function(`${block}\nreturn asmRestoreReject;`)();
+  const t = (asm) => ({ status: 'verified', correctness: 'pass', asm_restore: asm });
+  const good = { exit_code: 0, assembly_found: 1, restored: 1, edited: true };
+  // Third argument false = a source round; true = phase2. Absence means different things in each.
+  const r = (rep, phaseIsAsm) => g(rep, null, phaseIsAsm === undefined ? false : phaseIsAsm);
+
+  ok(r(t(good)) === null, 'a restored, edited assembly passes');
+  ok(r(t({ ...good, reached_binary: true })) === null,
+    'and the corroborating ISA read, when there was a parent to diff against, does not change it');
+
+  // Scope. A source candidate has no assembly and correctly reports no receipt; in phase2 every
+  // patch is a `.s`, because `asm_engineer.md` forbids editing source -- so there the absence is
+  // not ambiguous, it is a verifier that skipped the step.
+  ok(r({ status: 'verified', correctness: 'pass' }) === null,
+    'a source candidate is not held to a receipt about assembly it does not have');
+  ok(/asm:receipt_absent/.test(String(r({ status: 'verified', correctness: 'pass' }, true))),
+    'a phase2 candidate with no receipt is refused: its number is the parent\'s');
+
+  // THE case. Exit 2 is the tool's HOLE (no `.s` found, or one with no provenance to resolve) and
+  // exit 3 is a failed rebuild. Both mean the edited assembly is absent from the binary.
+  const hole = String(r(t({ ...good, exit_code: 2 }), true));
+  ok(/asm:not_restored/.test(hole) && /unbuilt candidate and not a/.test(hole),
+    'exit 2 is refused as an UNBUILT candidate, not as a slow one', hole);
+  ok(/asm:not_restored/.test(String(r(t({ ...good, exit_code: 3 }), true))),
+    'and so is a failed rebuild');
+  ok(/asm:no_exit_code/.test(String(r(t({ assembly_found: 1 }), true))) &&
+     /asm:no_exit_code/.test(String(r(t({ exit_code: '0', assembly_found: 1 }), true))),
+    'a receipt with no integer exit code cannot be read as any outcome');
+  // Two arithmetic consequences the tool guarantees at exit 0, so violating either means the
+  // receipt was written rather than run.
+  ok(/asm:zero_found_with_exit_zero/.test(String(r(t({ exit_code: 0, assembly_found: 0 }), true))),
+    'exit 0 having found no assembly is impossible: the tool returns 2 in that case');
+  ok(/asm:partial_restore/.test(String(r(t({ exit_code: 0, assembly_found: 2, restored: 1 })))),
+    'a partial restore is refused: the un-rebuilt unit still links the source-compiled object');
+  // The receipt that proves the restore landed, and the one place where an ISA read is decisive
+  // rather than advisory -- here the patch IS the machine code.
+  const missed = String(r(t({ ...good, reached_binary: false })));
+  ok(/asm:did_not_reach_binary/.test(missed) && /patch IS the machine/.test(missed),
+    'byte-identical codegen refuses an ASSEMBLY candidate, though it only remarks on a source one',
+    missed);
+  ok(r(t({ ...good, restored: 1, edited: true })) === null &&
+     /asm:unedited_assembly/.test(String(r(t({ ...good, edited: false })))),
+    'a pristine .s is refused, and the refusal says to record it as "no edit was made"');
+  ok(/NEVER as/.test(String(r(t({ ...good, edited: false })))),
+    'because "the edit had no effect" closes a direction nothing tried (87)');
+
+  ok(r(null) === null && r(undefined) === null,
+    'an absent report is not this gate\'s refusal to make');
+  ok(r({ status: 'failed', asm_restore: { exit_code: 2, assembly_found: 0 } }, true) === null &&
+     r({ correctness: 'FAIL', asm_restore: { exit_code: 2, assembly_found: 0 } }, true) === null,
+    'an honest failure is refused under its own name, not renamed into paperwork (60)');
+  const reasons = [r({ status: 'verified' }, true), r(t({ assembly_found: 1 })),
+    r(t({ ...good, exit_code: 3 })), r(t({ exit_code: 0, assembly_found: 0 })),
+    r(t({ exit_code: 0, assembly_found: 2, restored: 1 })),
+    r(t({ ...good, reached_binary: false })), r(t({ ...good, edited: false }))];
+  ok(new Set(reasons.map(x => String(x).split('(')[0])).size === reasons.length,
+    'the seven assembly refusals are seven distinguishable tokens', JSON.stringify(reasons));
+  ok(reasons.every(x => /^asm:/.test(String(x))),
+    'every one is namespaced, so a log line says which gate spoke');
+
+  // Wiring. A gate whose result is computed and discarded is a comment -- and unlike the ISA gate
+  // this one is NOT mode-conditional, because there is no setting under which timing the wrong
+  // binary is an acceptable answer.
+  ok(/const asmReason = asmRestoreReject\(r\.ver, null, roundPhase === PHASE_ASM\);/.test(src),
+    'the candidate admission path runs it, and tells it which phase this round is');
+  ok(/if \(metricReason \|\| isaReason \|\| asmReason\) \{/.test(src),
+    'and its refusal actually excludes the candidate');
+  ok(!/ISA_MODE|ISA_ENABLED/.test(block),
+    'it is not gated on isa_evidence: that knob is about explaining a measurement, and this gate '
+    + 'is about whether the measurement is of the candidate at all');
+  // Declared, or it is stripped from the verdict before the gate can read it.
+  ok(/asm_restore: ASM_RESTORE_SCHEMA/.test(src),
+    'the receipt is declared in the verify schema');
+  ok(/ASM_ROUNDTRIP_HELPER: `\$\{WORKFLOW_DIR\}\/scripts\/asm_roundtrip\.py`/.test(src),
+    'and the verifier is handed the helper it needs to produce one');
 }
 
 console.log('\n# the hipify twin-sync gate, executed');
@@ -761,8 +855,12 @@ console.log('\n# the ISA mechanism gate: language scope and what it may refuse, 
   ok(/model: EVIDENCE_MODEL/.test(src) && /requested_stage: ladderState\.requested \|\| null/.test(src),
     'the record is versioned and keeps request and reach in SEPARATE fields -- collapsing them is '
     + 'what let "we asked for deep evidence" read as "we have deep evidence" on a resumed lane');
+  // `asmReason` joined this `if` when the assembly-restore gate landed. It is held as its own
+  // `const` for the same reason `isaReason` is, so the pattern widens by one alternative rather
+  // than becoming a wildcard: a chain match like `metricReason \|\| .*` would keep passing after
+  // someone deleted `isaReason` from it, which is precisely the regression this pins.
   ok(/const isaReason = isaEvidenceReject\(r\.ver\);/.test(src) &&
-     /if \(metricReason \|\| isaReason\) \{/.test(src),
+     /if \(metricReason \|\| isaReason \|\| asmReason\) \{/.test(src),
     'the candidate admission path actually consults it, and does so WITHOUT joining '
     + 'the twin/policy chain above, whose exact text another check in this file pins');
   ok(/isa_evidence: ISA_EVIDENCE_SCHEMA/.test(src),
@@ -1201,13 +1299,37 @@ console.log('\n# the deep round closes a cycle: one rewrite, then restart or sto
 
 console.log('\n# memory: the ledger reaches engineers, and a new cycle re-checks what reopened');
 {
-  ok(/LEDGER: history\.ledger,/.test(src),
+  ok(/LEDGER: history\.ledger/.test(src),
     'engineers receive the LEDGER, not just INSIGHTS. The dead-end verdicts live in the ledger, ' +
     'so deep_engineer.md\'s standing instruction "do not re-walk confirmed dead-ends" was aimed at ' +
     'a role that could not see them');
-  ok(/INSIGHTS: history\.insights,[\s\S]{0,900}LEDGER: history\.ledger,/.test(src),
-    'both travel together on the same engineer input block, so a specialist, a deep engineer and ' +
-    'an assembly engineer all get the same memory');
+  ok(/INSIGHTS: history\.insights,[\s\S]{0,1400}LEDGER: history\.ledger/.test(src),
+    'and it travels with INSIGHTS on the same engineer input block, so no role gets half the memory');
+
+  // The assembly phase is handed a DIFFERENT ledger, and that is a contract rather than a
+  // convenience. A source `dead-end` records that the compiler's own output was already the better
+  // program -- the proposition phase2 exists to test -- so reading those rows as closures there
+  // shuts the door the phase was opened to walk through. The units differ too: a source row closes
+  // a mechanism, an assembly row closes a window plus an edit kind.
+  ok(/\.\.\.\(isAsm \? \{ ASM_LEDGER: history\.asm_ledger \} : \{ LEDGER: history\.ledger \}\)/.test(src),
+    'phase2 engineers get ASM_LEDGER and phase1 engineers get LEDGER, chosen in ONE expression so ' +
+    'neither can be handed both memories or neither');
+
+  // Stronger than the swap itself: a swap that hands over an array nothing ever fills is worse
+  // than the old behaviour, because the engineer reads an empty memory as "nothing was tried
+  // here" and re-runs experiments that were already paid for. All four points of the lifeline.
+  for (const [re, what] of [
+    [/const history = \{ insights: \[\], ledger: \[\], asm_ledger: \[\]/, 'created beside the source ledger'],
+    [/if \(Array\.isArray\(ps\.asm_ledger\)\) history\.asm_ledger = ps\.asm_ledger;/, 'restored on resume'],
+    [/history\.asm_ledger = history\.asm_ledger\.concat\(mem\.asm_ledger\)/, 'appended each round'],
+    [/asm_ledger: \{ type: 'array'/, 'declared in MEMORY_SCHEMA, or the planner\'s rows are stripped'],
+    [/asm_ledger_rows: \{ type: 'array'/, 'declared in ENG_SCHEMA, or the engineer\'s rows are stripped'],
+  ]) {
+    ok(re.test(src), `the assembly ledger is ${what}`);
+  }
+  ok(/ASM_LEDGER_ROWS: clean\.flatMap/.test(src) && /ASM_CONTINUATION: clean\.map/.test(src),
+    'and the round\'s window rows plus each arm\'s continuation reach the memory step, which is ' +
+    'what lets a restart be told apart from a round that simply found less');
 
   // The cycle boundary. What must NOT happen is an expiry on the insight blackboard.
   ok(/RECHECK_CLOSED_MECHANISMS/.test(src),

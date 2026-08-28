@@ -31,9 +31,35 @@ Every combined or hand-written result is a new candidate and must be independent
      git -c user.email=team@workflow -c user.name=team add -A && \
      git -c user.email=team@workflow -c user.name=team commit -q --allow-empty -m workspace_baseline || exit 1
    ```
+1b. **Assembly patches: check for a `.s` FIRST, and combine per translation unit.**
+
+   ```bash
+   git apply --numstat "$P" | awk '{print $NF}' | grep -E '\.s$' || echo NONE
+   ```
+
+   A `.s` is not a diff against the source — it is a **whole-file alternative rendering of one
+   translation unit's machine code**, so "combining" two of them is not defined:
+
+   - **Two `.s` for the SAME translation unit → not combinable.** Stack neither; keep the better one
+     alone and say so in `conclusion`. Textually merging two versions of one instruction stream
+     produces a schedule neither engineer measured and nobody can explain, and `restore` refuses two
+     assembly files for one unit outright.
+   - **A `.s` and a SOURCE patch touching the same translation unit → not combinable.** The `.s` was
+     emitted from the source *before* that patch, so applying both means rebuilding the old program
+     over the new one.
+   - **Different translation units → combinable normally**, and so is a `.s` for unit A beside a
+     source patch for unit B.
+
+   When you do stack a `.s`, **the build must go through the round trip.** No edge in `build.ninja`
+   compiles a `.s`: build once, then
+   `python3 $SKILL_DIR/scripts/asm_roundtrip.py restore --source-root <your ws src dir>`, then
+   re-run correctness and only then benchmark. Without it every arm you time is the source-compiled
+   program and the whole comparison is between identical binaries.
+
 2. Sort patches by verified speedup (best first). Check compatibility using
    `optimization_strategies.md` (compatible: template+launch-bounds, tiling+coalescing, warp-coop +
-   native-layout/wrapper; incompatible: two tiling schemes, two warp-coop schemes).
+   native-layout/wrapper; incompatible: two tiling schemes, two warp-coop schemes, and see 1b for
+   assembly).
 3. **Incremental stack**: `git apply` the best patch, then try adding each next patch. After each
    add: clear cache → correctness → benchmark (gpu_lock). Keep an add only if it stays correct and
    improves geomean.

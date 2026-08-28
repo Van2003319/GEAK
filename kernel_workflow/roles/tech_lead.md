@@ -205,6 +205,23 @@ direction may even be:**
 - `phase2_asm` — engineers edit the compiled **assembly** and the source is read-only to them. A
   source direction here cannot be executed; describe WHAT should get faster and let `KEYPOINTS`
   (also in your inputs) say where. Do not name `focus_files` — they mean nothing this round.
+
+  **Plan against `ASM_LEDGER`, not `HISTORY.ledger`.** The assembly phase keeps its own memory
+  because its unit is a *window plus an edit kind* rather than a mechanism: `relax_waitcnt` on the
+  MFMA drain and `relax_waitcnt` on the epilogue store are two experiments, and one mechanism row
+  would report a single verdict for both. The source ledger is also the wrong instrument in a
+  sharper way — its `dead-end` rows record that the compiler's own output was already the better
+  program, which is the proposition this phase exists to test, so reading them as closures here
+  shuts the door the phase was opened to walk through.
+
+  Two consequences for how you plan. A window carrying a `confirmed` row is already IN the
+  incumbent assembly your engineers will continue from — do not re-propose it; propose what it
+  exposed. And an assembly `dead-end` reopens far more readily than a source one: its
+  `reopens_when` is normally "if the schedule around this window changes", and the last accepted
+  edit was a schedule change, so a closure from three rounds ago may be live again.
+
+  The engineers CONTINUE from the banked `.s` rather than re-emitting it, so directions compound
+  the way source directions do. `ASM_CONTINUATION` in the memory step tells you when one did not.
 - `deep_explore` — one dedicated round that hands the next cycle a DIFFERENT ROUTE. If you do not
   return a `deep_explore` direction the round is promoted to one anyway, using your first direction
   as its brief, so make that direction the one you would most want a ground-up rewrite aimed at.
@@ -556,6 +573,45 @@ This distinction is the whole reason the field exists. In greedy search the ledg
 the run has, so a single row that reads "tried X, no effect" for an X that was never compiled closes
 that direction for the rest of the session.
 
+### The ASSEMBLY ledger — `ASM_LEDGER_ROWS`, present only on a phase2 round
+
+A phase2 round hands you `ASM_LEDGER_ROWS`: the window edits its engineers measured, already written
+by the engineers who made them. **File them into `asm_ledger` verbatim, and do not fold them into
+`ledger`.**
+
+Two different jobs, and mixing them costs in both directions. `ledger`'s unit is a **mechanism**
+measured at source level; `asm_ledger`'s unit is a **window plus an edit kind** — `relax_waitcnt` on
+the MFMA drain is a different experiment from `relax_waitcnt` on the epilogue store, and one row per
+mechanism would collapse every window it was ever tried in onto a single verdict. In the other
+direction, a source `dead-end` says the compiler's own output was already the better program, which
+is the precise proposition phase2 exists to test: handed to an assembly engineer as a closure it
+shuts the door the phase was opened to walk through. That is why phase2's engineers are given
+`ASM_LEDGER` and not `LEDGER`.
+
+**Do not re-derive a row.** You did not see the instruction stream. `fingerprint` is how the next
+round re-finds a window after every line below it has moved, and a fingerprint you invented names a
+window nobody will find. Copy them; add only the `direction` if it is missing.
+
+Two verdicts on these rows carry meaning the source ledger has no equivalent for:
+
+- **`broke-correctness`** — the edit produced a wrong kernel. Treat it as harder than `dead-end`:
+  re-deriving it costs a correctness run and risks banking a fast wrong kernel.
+- **`reopens_when` is usually live here.** An assembly window's closure is conditional on the
+  schedule around it, and the next accepted edit IS a schedule change — so unlike a source closure,
+  these are expected to reopen within the same phase. Write the condition concretely.
+
+`ASM_CONTINUATION` says, per direction, whether it built on the banked assembly (`incumbent`) or
+restarted from the compiler's output (`cold_emit` / `superseded_reemit`). Put a line in `insights`
+whenever a round restarted and say why: a restart's speedup is measured against a different program,
+so the curve has a discontinuity there that is not a result.
+
+**When a source or deep round wins, the assembly rows for the translation unit it edited are
+SUPERSEDED.** The windows they name are in an instruction stream the compiler will no longer emit.
+Mark those rows `lifecycle: "superseded"` rather than deleting them — the next cycle's first phase2
+round re-emits from the new source and needs to know which of its windows have a measured history
+against a program that no longer exists, and silently dropping them makes that round look like a
+cold start with no memory when in fact it has memory it must not trust.
+
 **DEEP-MODE persistence + sharing (do these ONLY if the named input is present; a normal run passes
 none of them, so skip this whole block then):**
 - `STATE_DIR` (+ `CANONICAL`, `CUMULATIVE_SPEEDUP`, `BEST_PER_CASE`): persist this wave's progress so a
@@ -574,8 +630,11 @@ none of them, so skip this whole block then):**
   mv "$TMP" "$STATE_DIR/best"
   ```
   Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_VS_SEED>, cumulative_frame:
-  "vs the original seed", wave_local_cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger,
+  "vs the original seed", wave_local_cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger, asm_ledger,
   bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full carried-forward state).
+  `asm_ledger` is `PRIOR_HISTORY.asm_ledger` plus anything this round filed — carry it even on a
+  source round, because `best/` carries the banked `.s` with it and a wave that resumes onto that
+  assembly with none of the window verdicts behind it re-runs experiments the last wave paid for.
   Do this EVERY round (even non-improving) so a kill mid-wave never loses the ledger; only refresh
   `best/` when the cumulative best actually advanced this wave.
 
@@ -606,10 +665,22 @@ Return JSON:
     {"direction": "r1_d0", "specialty": "...", "expected": 2.0, "actual": 3.4,
      "verdict": "confirmed|partial|dead_end", "lesson": "..."}
   ],
+  "asm_ledger": [
+    {"direction": "r7_d1", "kernel": "tall_bf16_gemm_kernel", "block": ".LBB0_12",
+     "ordinal_in_block": 3, "fingerprint": ["s_waitcnt", "v_mfma_f32_16x16x16bf16_1k"],
+     "edit": "relax_waitcnt", "expected": 1.03, "actual": 0.998,
+     "verdict": "confirmed|dead-end|not-realized|broke-correctness",
+     "resource_delta": {"vgpr": 0, "agpr": 0, "lds": 0, "scratch": 0},
+     "lesson": "...", "reopens_when": "..."}
+  ],
   "bottleneck_now": "memory|compute|latency|lds|overhead|...",
   "suggest_next": "one-line steer for next round (or 'consider stopping')"
 }
 ```
+
+`asm_ledger` is omitted entirely on a non-phase2 round — the key is only sent when `ASM_LEDGER_ROWS`
+was. On a phase2 round it is present even when empty, which says the round measured nothing worth
+recording and is a different statement from a round that never reached a measurement.
 
 ---
 

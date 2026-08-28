@@ -16,6 +16,8 @@ absolute per-case latencies. The script trusts only your numbers.
   `verified_geomean:0`, and do not treat it as an error.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
+- `ASM_ROUNDTRIP_HELPER` — `asm_roundtrip.py`, present when the lane can build an assembly
+  candidate. See step 2d: whether you NEED it is decided by the patch, not by this input.
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
   the oracle correctness + unweighted geomean, also re-measure and report the addendum's e2e-aligned
   weighted geomean and ENFORCE its hard gates (decode-no-regress, memory-footprint cap, cudagraph-safe);
@@ -43,7 +45,79 @@ absolute per-case latencies. The script trusts only your numbers.
 2. Read `COMMANDMENT.md` for the exact correctness + full-benchmark commands + parse hint.
 2b. **Mandatory policy gate before executing candidate code.** Run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` over every candidate-owned source, wrapper, build/link file, imported/generated snapshot, and any already-built candidate artifact. Pass only the frozen baseline/oracle paths through `--immutable`; never exempt a mixed candidate+oracle artifact. The candidate must not include, call, import, dynamically load, or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, MIOpen, or indirect PyTorch GEMM/linear APIs. HIP runtime/language APIs, MFMA/device intrinsics, inline AMDGCN assembly, and header-only rocWMMA are allowed only when the candidate artifact has no forbidden dependency. Write the canonical JSON to `$VERIFY_DIR/policy_prebuild.json`. Any finding, inspection error, missing path/receipt, or uninspectable artifact fails closed: return `status:"policy_failed"`, `policy_pass:false`, and execute neither correctness nor benchmark.
 2c. **Vector-cast alignment gate (finding 143).** Run `python3 $SKILL_DIR/scripts/lds_cast_alignment.py <candidate sources> --baseline <the frozen original source>` and write the `--json` output to `$VERIFY_DIR/cast_alignment.json`. This catches one specific, popular, and entirely silent mutation: widening a `global -> LDS` staging copy by casting the destination to `uint4*` when the array's row stride is not a multiple of 16. Every counting check passes — fewer instructions, fewer registers, unchanged LDS, no spills — and the compiler emits `ds_write_b128` because the cast *told* it the address was aligned. On gfx942 that does not fault; the address is truncated inside the 16-byte granule and the tile is silently wrong. Exit 1 (a hazard the baseline does not have) → `status:"policy_failed"`, `policy_pass:false`, do not run correctness or benchmark. Exit 2 (something did not parse) is also fail-closed: the verdict would have been a guess. Exit 0 is **not** a proof of alignment — the tool checks only strides fixed by the declaration and says so; the innermost index term depends on the loop and is not decidable statically. Note the baseline itself carries an inherited instance in the B tile, which is why this runs as a delta and not as an absolute check; do not "fix" the inherited one, it is outside the task's mutable surface.
-3. Run CORRECTNESS (cwd = your ws). If it fails → `status:"correctness_failed"`, no speedup. Then locate every ELF produced for the candidate (do not include a separately built immutable oracle ELF), rerun the scanner on source/build paths plus those ELFs, and write `$VERIFY_DIR/policy_postbuild.json`. A forbidden `DT_NEEDED`, imported symbol, binary string, dynamic loader, tool failure, or absent passing post-build receipt is `status:"policy_failed"`; do not benchmark.
+2d. **Assembly candidates: the build does NOT compile the patch. Route it through the round trip.**
+
+    Decide from the PATCH, every time, before you build anything:
+
+    ```bash
+    git apply --numstat "$PATCH" | awk '{print $NF}' | grep -E '\.s$' || echo NONE
+    ```
+
+    No `.s` → this is an ordinary source candidate; skip to step 3 and return `asm_restore` omitted.
+
+    **A `.s` in the patch changes what "rebuild" means, and getting this wrong is silent.**
+    `build.ninja` has one `cuda_compile` edge per translation unit and its input is the `.hip`.
+    **Nothing in the build graph compiles a `.s`.** So the ordinary path — apply the patch, build,
+    measure — applies the assembly file into the tree where nothing reads it, compiles the
+    *untouched* `.hip`, passes correctness, and times **the unpatched kernel**. The result is a
+    clean, self-consistent "the assembly edit did not help" for an edit that was never built. That
+    is finding (87) one layer down and worse: a source edit is at least in the file ninja compiles.
+
+    **Fail closed.** If the patch carries a `.s` and `ASM_ROUNDTRIP_HELPER` is absent or not a file,
+    return `status:"asm_unbuilt"`, `verified_geomean:0`, and **do not build, correctness-check or
+    benchmark**. You cannot produce this candidate's binary, and a number measured without it is not
+    a weaker result — it is a confident measurement of a different program.
+
+    **The build sequence, and correctness runs twice on purpose:**
+
+    1. Run the COMMANDMENT's correctness step once. You are not reading its verdict; you are making
+       the build exist. `asm_roundtrip.py` replays the device compile out of `build.ninja`, and
+       until torch's `load()` has run there is no `build.ninja` to read.
+    2. Restore the assembly into that build:
+
+       ```bash
+       python3 "$ASM_ROUNDTRIP_HELPER" restore --source-root <your ws src dir> \
+           > "$VERIFY_DIR/asm_restore.json"; echo "exit=$?"
+       ```
+
+       It finds each `.s`, reads the provenance stamp `emit` left in its first line to learn which
+       translation unit it came from, reassembles it, and writes the host object the build edge
+       names — so the next link picks it up with no further step. It resolves per file rather than
+       taking one `--source-file`, because this task tree holds the candidate **and** the immutable
+       oracle and rebuilding the wrong one produces a real object built from the wrong program.
+    3. **Run correctness AGAIN.** This is the run whose verdict you report. The first one validated
+       the unpatched kernel; reporting it would certify a binary you did not measure.
+    4. Only now do the post-build ELF scan in step 3, the twin check in 3c and the ISA capture in
+       3d. All three read the artifact, and before the restore the artifact is the wrong one.
+
+    **Exit codes.** `0` — every `.s` was rebuilt; proceed. `2` — a HOLE: no `.s` was found where it
+    scanned, or one carries no provenance stamp so its translation unit cannot be derived. `3` — a
+    rebuild step failed. **`2` and `3` are both `status:"asm_unbuilt"`, and neither is benchmarked**:
+    the candidate's device code is not in the binary, so there is nothing here to time. Quote the
+    tool's `holes` in `notes`; they name which of the two it was.
+
+    **Report `edited`, and do not round it.** The receipt says, per file, whether the assembly
+    differs from what this build emits unedited — the assembly phase's `hip_twin_sync`. `edited:
+    false` means the engineer submitted a pristine `.s`: the candidate is byte-identical to its
+    parent, and it must be **measured and reported anyway** (a verdict with no measurement behind it
+    is a malformed report), but transcribed honestly, because "measured, no gain" and "there was no
+    edit to measure" close a direction for very different reasons and only one of them is evidence.
+
+    Return the receipt as `asm_restore`, transcribed from the tool's JSON:
+
+    ```json
+    "asm_restore": {"exit_code": 0, "assembly_found": 1, "restored": 1, "edited": true,
+                    "source_files": ["custom_gemm.hip"], "receipt": "<VERIFY_DIR>/asm_restore.json",
+                    "notes": "the tool's holes, verbatim, when there were any"}
+    ```
+
+    `restored` is how many rows in `restored[]` carry an `object_path`; `edited` is `true` only when
+    **every** row is. Do not synthesize these — `exit_code:0` with `assembly_found:0` is a receipt
+    the tool cannot emit (it returns 2 when it finds nothing) and is refused as a fabrication.
+
+3. Run CORRECTNESS (cwd = your ws). **On an assembly candidate this is the SECOND run, after step
+   2d's restore — the first one measured the unpatched kernel and its verdict is discarded.** If it
+   fails → `status:"correctness_failed"`, no speedup. Then locate every ELF produced for the candidate (do not include a separately built immutable oracle ELF), rerun the scanner on source/build paths plus those ELFs, and write `$VERIFY_DIR/policy_postbuild.json`. A forbidden `DT_NEEDED`, imported symbol, binary string, dynamic loader, tool failure, or absent passing post-build receipt is `status:"policy_failed"`; do not benchmark.
    Then copy the `summary` block of `$VERIFY_DIR/policy_postbuild.json` **verbatim** into the return field
    `policy_postbuild` (finding (69)). It is not optional and it is not a paraphrase: the orchestrator refuses any
    report that claims `policy_pass:true` without it, and re-derives the verdict from its numbers rather than from
@@ -214,10 +288,24 @@ absolute per-case latencies. The script trusts only your numbers.
     the engineer for a gap on our side and manufactures the exact false negative this step exists to
     prevent. Reporting them as `realized` is worse.
 
+    **On an assembly candidate `unchanged_machine_code` is not advisory — it is the receipt that
+    step 2d worked.** For a source candidate the machine code is downstream of the patch and may
+    legitimately be identical, which is why that flag is normally a remark. For an assembly
+    candidate **the patch IS the machine code**: byte-identical to the parent means the restore did
+    not reach the binary and you are timing the unpatched kernel. Report it as
+    `asm_restore.reached_binary: false` alongside the ISA block and say so in `notes`. This is a
+    fault in OUR build path, not in the candidate — so it is not `correctness_failed` and not a
+    regression — but the number must not be banked as the assembly edit's result, and the lane
+    refuses it on that basis regardless of `ISA_MODE`. Set `reached_binary: true` only when the diff
+    reports the code object changed; when there is no parent archive to diff against, omit the field
+    rather than asserting either way.
+
     What this step does and does not cost the candidate:
     - It is **not** a correctness or policy gate. A missing helper, a missing tool, an
       `exit_code` of 2, or an `indeterminate` verdict never rejects a candidate — that evidence is about
-      us, not about it. Report it and continue to your normal verdict.
+      us, not about it. Report it and continue to your normal verdict. The one exception is the
+      assembly case immediately above, and it is an exception for a precise reason: there the flag
+      is not evidence about the mechanism, it is evidence about whether the candidate was built.
     - `checks` findings are **advisory**, including a nonzero `scratch_bytes` spill. Report them in
       `notes`; do not fail a candidate over them. A narrow load is correct for a genuine strided gather.
     - Only `refuted` matters to the lane, and only when it was launched with `isa_evidence=gate`. Even
@@ -340,6 +428,15 @@ absolute per-case latencies. The script trusts only your numbers.
    time it interleaved with the candidate arm — not before, not after, and never quoting a number
    from an earlier round.
 
+   **If the canonical tree carries a `.s`, the control arm must restore it too — step 2d's
+   sequence, in the control workspace.** Check with
+   `python3 "$ASM_ROUNDTRIP_HELPER" incumbent --source-root <control ws src dir>`; when it reports
+   `continue_from_assembly: true`, build, restore, and only then time. This is not symmetry for its
+   own sake. Once a phase2 round has banked, the incumbent IS the assembly version, and a control
+   built without the restore is the program from *before* that round — so the candidate is scored
+   against a predecessor the search already beat, and every assembly win in the tree gets counted a
+   second time on every later round. Say in `notes` which arms restored.
+
    This is the load-bearing measurement in your report, not a nicety. An unchanged tree measures
    **1.5–3% differently between invocations**, and per-round gains on this lane are ~1%. So a
    candidate timed in your session and an incumbent timed in some earlier round differ by more from
@@ -370,13 +467,16 @@ absolute per-case latencies. The script trusts only your numbers.
 ## Return JSON
 ```json
 {
-  "status": "verified|policy_failed|twin_drift|correctness_failed|apply_failed|regression",
+  "status": "verified|policy_failed|twin_drift|asm_unbuilt|correctness_failed|apply_failed|regression",
   "correctness": "pass|fail|not_run",
   "policy_pass": true,
   "policy_receipts": {"prebuild": "path/to/policy_prebuild.json", "postbuild": "path/to/policy_postbuild.json"},
   "policy_postbuild": {"schema": "...", "passed": true, "findings": 0, "advisory": 0,
     "inspected": 0, "files": 0, "elf": 0, "unreadable": 0},
   "hip_twin_sync": {"exit_code": 0, "pairs": 1, "drifted": 0, "checked": ["custom_gemm.hip"]},
+  "asm_restore": {"exit_code": 0, "assembly_found": 1, "restored": 1, "edited": true,
+                  "reached_binary": true, "source_files": ["custom_gemm.hip"],
+                  "receipt": "<VERIFY_DIR>/asm_restore.json"},
   "isa_evidence": {"exit_code": 0, "mechanism_verdict": "realized", "mechanism_claims": ["widen_global_load"],
                    "archive": "<ISA_ARCHIVE_DIR>", "unchanged_machine_code": false,
                    "claims_refuted": [], "claims_indeterminate": [], "high_findings": 0},
