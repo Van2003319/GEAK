@@ -42,28 +42,85 @@ SCHEMA_V1 = "geak.sol-card/v1"
 ACCEPTED_SCHEMAS = (SCHEMA, SCHEMA_V2, SCHEMA_V1)
 SUPPORTED_ARCH = "gfx90a"
 
-# Reference MI250X single-GCD figures. The in-repo CDNA2 card records 362.1
-# TFLOP/s BF16/FP16/INT8 and 90.5 TFLOP/s matrix FP32/FP64 per OAM (both GCDs),
-# hence the explicit half-OAM values here. INT8 is kept at the same documented
-# 362.1 TOPS rather than assuming a second undocumented doubling. These are
-# still physical reference peaks, not calibrated effective ceilings; callers
-# should pass measured calibration from the actual allocated GCD/device.
-REFERENCE_GFX90A_CARD: Mapping[str, object] = {
+# CDNA2 datasheet peaks, PER GCD, for the gfx90a parts this project runs on.
+#
+# WHY TWO CARDS. `rocminfo` answers `gfx90a` for MI210, MI250 and MI250X alike, so the arch
+# string cannot tell them apart -- and they are not the same part. From the AMD Instinct MI200
+# datasheet, per OAM:
+#
+#     MI250  (208 CU)  FP16/BF16 362.1 TF | FP32/FP64 matrix 90.5 TF | vector 45.3 TF | 3.2 TB/s
+#     MI250X (220 CU)  FP16/BF16 383.0 TF | FP32/FP64 matrix 95.7 TF | vector 47.9 TF | 3.2 TB/s
+#
+# The values below are half of those, because the allocated device is one GCD. A whole MI210 is
+# 104 CU and therefore numerically identical to one MI250 GCD, which is why one card serves both.
+# Until this split the module carried the MI250 figures under an "MI250X" label; on real MI250X
+# silicon that understates the compute ceiling by 5.8%.
+#
+# The vector entries are derived as matrix/2 rather than by halving the published 45.3/47.9,
+# which are the same quantity rounded to a tenth of a TFLOP: AMD's own single-GCD MI210 sheet
+# lists 22.6, and 45.25/2 is 22.625.
+#
+# WHY THE MATRIX/VECTOR SPLIT. On CDNA2 the matrix-core FP32/FP64 rate is exactly twice the
+# vector rate, and this table used to expose a single `fp32` key holding the matrix number. A
+# kernel that issues no MFMA was then scored against a ceiling twice what its units can retire,
+# which halves its apparent gap AND doubles the ridge point, so it can also flip `regime` from
+# memory_bound to compute_bound. There is no unambiguous `fp32`, so there is no `fp32` key.
+#
+# INT8 stays at the documented FP16 rate rather than assuming a second undocumented doubling
+# (CDNA2 lists INT4/INT8 at the same 362.1/383.0 as FP16/BF16). It is TOPS living in a dict
+# named `peak_flops`; the arithmetic only ever treats it as ops/s, so the units divide out.
+#
+# These are physical reference peaks, not calibrated effective ceilings -- callers should pass
+# `calibration` from the actually-profiled allocated device. No `attainment` key on either card,
+# deliberately and visibly ((89) item 2): nothing has been observed to reach a datasheet peak on
+# this part, so a compute-bound gfx90a card comes back `compute_ceiling_witnessed: False`.
+REFERENCE_MI250_GCD_CARD: Mapping[str, object] = {
     "arch": SUPPORTED_ARCH,
     "peak_flops": {
-        "bf16": 181.05e12, "fp16": 181.05e12, "fp32": 45.25e12,
-        "fp64": 45.25e12, "int8": 181.05e12,
+        "bf16": 181.05e12, "fp16": 181.05e12, "int8": 181.05e12,
+        "fp32_matrix": 45.25e12, "fp64_matrix": 45.25e12,
+        "fp32_vector": 22.625e12, "fp64_vector": 22.625e12,
     },
     "peak_bandwidth_bytes_s": 1.6e12,
-    "source": "reference MI250X single-GCD physical peaks derived from the in-repo "
-              "CDNA2 per-OAM card; not an effective measurement -- pass `calibration` "
+    "source": "reference CDNA2 datasheet peaks for ONE GCD of an MI250 (208 CU OAM), which is "
+              "also a whole MI210: 362.1 TFLOP/s FP16/BF16/INT8 and 90.5 TFLOP/s matrix "
+              "FP32/FP64 per OAM, halved. Not an effective measurement -- pass `calibration` "
               "from the actually-profiled allocated device",
-    # Finding (89) item 2. No `attainment` key, deliberately and visibly: nothing
-    # has ever been observed to reach these numbers on this part, because they
-    # are datasheet peaks. The absence is the honest state and it is what makes
-    # a compute-bound gfx90a card come back `compute_ceiling_witnessed: False`.
 }
-SUPPORTED_DTYPES: tuple[str, ...] = tuple(REFERENCE_GFX90A_CARD["peak_flops"])  # type: ignore[arg-type]
+REFERENCE_MI250X_GCD_CARD: Mapping[str, object] = {
+    "arch": SUPPORTED_ARCH,
+    "peak_flops": {
+        "bf16": 191.5e12, "fp16": 191.5e12, "int8": 191.5e12,
+        "fp32_matrix": 47.85e12, "fp64_matrix": 47.85e12,
+        "fp32_vector": 23.925e12, "fp64_vector": 23.925e12,
+    },
+    "peak_bandwidth_bytes_s": 1.6e12,
+    "source": "reference CDNA2 datasheet peaks for ONE GCD of an MI250X (220 CU OAM): "
+              "383.0 TFLOP/s FP16/BF16/INT8 and 95.7 TFLOP/s matrix FP32/FP64 per OAM, halved. "
+              "Not an effective measurement -- pass `calibration` from the actually-profiled "
+              "allocated device",
+}
+GFX90A_SKU_CARDS: Mapping[str, Mapping[str, object]] = {
+    "mi210": REFERENCE_MI250_GCD_CARD,
+    "mi250": REFERENCE_MI250_GCD_CARD,
+    "mi250x": REFERENCE_MI250X_GCD_CARD,
+}
+# The default when a caller names the arch but not the part, and it is the LOWER of the two on
+# purpose. A ceiling that is too low understates headroom, which is the safe direction for a
+# module whose named failure (89) is inflated headroom; and on real MI250X silicon a kernel that
+# actually exceeds the MI250 peak trips the (59) `sol_gap < 1` check, which says loudly that the
+# model is wrong. The reverse default would quietly hand every MI250 card 5.8% of headroom that
+# does not exist. Either way the resolved part is named in the card's `source`.
+DEFAULT_GFX90A_SKU = "mi250"
+REFERENCE_GFX90A_CARD: Mapping[str, object] = GFX90A_SKU_CARDS[DEFAULT_GFX90A_SKU]
+
+# The validator's dtype VOCABULARY, deliberately wider than the set a card can be built for.
+# `fp32`/`fp64` appear here and in no card: cards written before the matrix/vector split carry
+# them, and by the same reasoning that keeps v1 schema cards readable, such a card is old rather
+# than corrupt. Building a NEW card under either bare name is refused in `_resolve_peaks`.
+AMBIGUOUS_LEGACY_DTYPES: tuple[str, ...] = ("fp32", "fp64")
+SUPPORTED_DTYPES: tuple[str, ...] = (
+    tuple(REFERENCE_GFX90A_CARD["peak_flops"]) + AMBIGUOUS_LEGACY_DTYPES)  # type: ignore[operator]
 
 
 # Measured on gfx942/MI300X, machine H, under the kernel harness's own timing
@@ -152,6 +209,10 @@ THEORETICAL_GFX942_CARD: Mapping[str, object] = {
 # The two bases, kept apart so a caller has to say which one it is planning against. They are not
 # interchangeable and the difference is not small: on the eleven-shape BF16 suite the measured card
 # puts the suite at ~0.70 of achievable while the datasheet puts it at ~0.27 of physical.
+#
+# Both tables are keyed by ARCH ALONE, so their gfx90a entry is the `DEFAULT_GFX90A_SKU` card. A
+# consumer that knows the part should reach `GFX90A_SKU_CARDS` instead; one that does not gets
+# the conservative card and can read which part it got out of `source`.
 THEORETICAL_CARDS: Mapping[str, Mapping[str, object]] = {
     "gfx90a": REFERENCE_GFX90A_CARD,      # already a datasheet card; there is no measured gfx90a one
     "gfx942": THEORETICAL_GFX942_CARD,
@@ -241,20 +302,44 @@ def bandwidth_ceiling(footprint_bytes: float, table: Mapping[object, object]
 
 
 def _resolve_peaks(arch: str, dtype: str, calibration: Mapping[str, object] | None,
-                    footprint_bytes: float | None = None
+                    footprint_bytes: float | None = None, sku: str | None = None
                     ) -> tuple[float, float, str, dict[str, object]]:
+    if dtype in AMBIGUOUS_LEGACY_DTYPES:
+        # Refused ahead of everything else, including a calibration that offers the bare name:
+        # the defect is in the NAME, so no provenance can repair it. A caller who measured a
+        # rate knows which units retired it and can say so.
+        raise SOLCardError(
+            f"dtype {dtype!r} names no single peak on {arch}: matrix-core and vector throughput "
+            f"are different rates (on CDNA2 the matrix rate is exactly 2x the vector rate for "
+            f"both fp32 and fp64), and a ceiling 2x too high halves the reported sol_gap and "
+            f"doubles the ridge point, which can flip `regime` as well. Ask for "
+            f"{dtype}_matrix (the kernel issues MFMA) or {dtype}_vector (it does not). Cards "
+            f"already written under the bare name still validate.")
     if arch not in ARCH_CARDS:
         raise SOLCardError(f"unsupported arch {arch!r}: modeled arches are {SUPPORTED_ARCHES}")
     card = ARCH_CARDS[arch]
+    if sku is not None:
+        # MI210/MI250/MI250X all report `gfx90a`, so the arch string alone cannot pick between
+        # peaks that differ by 5.8%. Naming the part is the only way to resolve it, and naming
+        # one on an arch that has no such ambiguity is a mistake worth surfacing.
+        if arch != SUPPORTED_ARCH:
+            raise SOLCardError(
+                f"sku {sku!r} is only modeled for {SUPPORTED_ARCH}, where MI210/MI250/MI250X "
+                f"share one arch string; {arch!r} takes no sku")
+        if sku not in GFX90A_SKU_CARDS:
+            raise SOLCardError(
+                f"unknown {SUPPORTED_ARCH} sku {sku!r}: modeled skus are "
+                f"{tuple(GFX90A_SKU_CARDS)}")
+        card = GFX90A_SKU_CARDS[sku]
     peak_flops_table = dict(card["peak_flops"])  # type: ignore[arg-type]
     attainment_table = dict(card.get("attainment") or {})  # (89) item 2
     if dtype not in peak_flops_table and not (
             calibration and isinstance(calibration.get("peak_flops"), Mapping)
             and dtype in calibration["peak_flops"]):  # type: ignore[index]
         # Named per arch, not against a global dtype list: gfx942's card holds
-        # bf16 only because bf16 is all that was measured, and saying "fp32 is
-        # not supported" would be wrong -- it is unmeasured *here*, and a
-        # calibration may still supply it.
+        # bf16 only because bf16 is all that was measured, and saying
+        # "fp32_matrix is not supported" would be wrong -- it is unmeasured
+        # *here*, and a calibration may still supply it.
         raise SOLCardError(
             f"dtype {dtype!r} has no measured peak on {arch}: modeled dtypes are "
             f"{tuple(peak_flops_table)}; pass calibration.peak_flops[{dtype!r}] to supply one")
@@ -382,13 +467,18 @@ def _resolve_peaks(arch: str, dtype: str, calibration: Mapping[str, object] | No
 def build_sol_card(*, post_selection: bool, achieved_flops: float, achieved_bytes: float,
                     elapsed_s: float, dtype: str, arch: str = SUPPORTED_ARCH,
                     calibration: Mapping[str, object] | None = None,
-                    footprint_bytes: float | None = None) -> dict[str, object]:
+                    footprint_bytes: float | None = None,
+                    sku: str | None = None) -> dict[str, object]:
     """The roofline card for ONE already-selected candidate's ONE measurement.
 
     Raises SOLCardError if `post_selection` is not True, or if any input is
-    non-positive, or if `arch`/`dtype` is unsupported. There is intentionally
-    no batch/list form: this signature cannot be handed a set of candidates to
-    rank, only a single already-decided result to explain.
+    non-positive, or if `arch`/`dtype`/`sku` is unsupported. There is
+    intentionally no batch/list form: this signature cannot be handed a set of
+    candidates to rank, only a single already-decided result to explain.
+
+    `sku` disambiguates the gfx90a parts, which share an arch string and do not
+    share peaks; omitting it takes `DEFAULT_GFX90A_SKU`. Whichever card is used
+    names itself in the returned `source`.
     """
     if post_selection is not True:
         raise SOLCardError(
@@ -409,7 +499,7 @@ def build_sol_card(*, post_selection: bool, achieved_flops: float, achieved_byte
         # why the parameter exists and is not simply derived.
         footprint_bytes = achieved_bytes
     peak_flops, peak_bandwidth, source, resolution = _resolve_peaks(
-        arch, dtype, calibration, footprint_bytes)
+        arch, dtype, calibration, footprint_bytes, sku)
     achieved_flop_rate = achieved_flops / elapsed_s
     achieved_byte_rate = achieved_bytes / elapsed_s
     arithmetic_intensity = (achieved_flops / achieved_bytes) if achieved_bytes > 0 else float("inf")
@@ -582,6 +672,11 @@ def _parser():
     # the gfx942 card is `measured: True`. Silently picking the former on a
     # gfx942 box understates remaining headroom by ~3.3x.
     p.add_argument("--arch", required=True, choices=SUPPORTED_ARCHES)
+    # Optional because gfx942 has no such split, and because the default is the conservative
+    # gfx90a part rather than a coin flip between two that differ by 5.8%.
+    p.add_argument("--sku", default=None, choices=tuple(GFX90A_SKU_CARDS),
+                   help=f"which {SUPPORTED_ARCH} part; they share one arch string and do not "
+                        f"share peaks (default {DEFAULT_GFX90A_SKU})")
     return p
 
 
@@ -592,7 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         card = build_sol_card(post_selection=True, achieved_flops=args.achieved_flops,
                                achieved_bytes=args.achieved_bytes, elapsed_s=args.elapsed_s,
-                               dtype=args.dtype, arch=args.arch)
+                               dtype=args.dtype, arch=args.arch, sku=args.sku)
     except SOLCardError as exc:
         print(f"sol_card: {exc}", file=sys.stderr)
         return 2

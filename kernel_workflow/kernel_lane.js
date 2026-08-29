@@ -4705,16 +4705,6 @@ return {
   phases_entered: phaseLog,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
-  // null when the step was off, or the run earned nothing worth a card.
-  // Which condition actually ended the loop. RECORDED, not inferred: on the previous campaign this
-  // existed only in the driver's return value, which the caller sees after ALL its kernels finish —
-  // so a parent-process death erased it for every kernel already done, and the realised window had
-  // to be reconstructed from queue timestamps. It is the whole point of an enforced window that you
-  // can tell a run that used its budget from one that gave up.
-  stopped_by: deadlineHit ? 'deadline'
-    : (dispatched >= BUDGET) ? 'budget'
-    : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
-    : 'tech_lead_stop',
   deadline_hit: deadlineHit,
   forced_replans: forcedReplans,
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
@@ -4734,6 +4724,7 @@ return {
     }
     return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
   })(),
+  // null when the step was off, or the run earned nothing worth a card.
   learned_card: learned_card && learned_card.card_path
     ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
     : null,

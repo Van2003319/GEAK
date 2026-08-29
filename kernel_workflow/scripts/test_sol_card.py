@@ -126,10 +126,136 @@ class FormulaTest(unittest.TestCase):
         with self.assertRaises(QSC.SOLCardError):
             self.build(achieved_flops=0.0, achieved_bytes=0.0)
 
-    def test_every_supported_dtype_builds_a_card(self):
-        for dtype in QSC.SUPPORTED_DTYPES:
+    def test_every_dtype_the_card_models_builds_a_card(self):
+        # Driven by the card's own peaks rather than SUPPORTED_DTYPES, which is
+        # deliberately the wider set: it still has to admit the pre-split
+        # `fp32`/`fp64` spellings that no new card may be built under.
+        modeled = QSC.REFERENCE_GFX90A_CARD["peak_flops"]
+        self.assertTrue(set(modeled) < set(QSC.SUPPORTED_DTYPES))
+        for dtype in modeled:
             card = self.build(dtype=dtype)
             self.assertEqual(dtype, card["dtype"])
+
+
+class Gfx90aSkuTest(unittest.TestCase):
+    """MI210, MI250 and MI250X all answer `gfx90a`, and they do not share peaks.
+
+    The module used to carry the MI250 figures under an "MI250X" label. Per the AMD Instinct
+    MI200 datasheet the parts differ by 12 CU and hence by 5.8%: 362.1 vs 383.0 TFLOP/s
+    FP16/BF16 and 90.5 vs 95.7 TFLOP/s matrix FP32/FP64, per OAM. The arch string cannot
+    resolve that, so the part has to be nameable.
+    """
+
+    def build(self, **kw):
+        args = dict(post_selection=True, achieved_flops=1e12, achieved_bytes=1e9,
+                    elapsed_s=0.1, dtype="bf16", arch="gfx90a")
+        args.update(kw)
+        return QSC.build_sol_card(**args)
+
+    def test_each_part_gets_its_documented_per_gcd_peak(self):
+        # Half the per-OAM datasheet figure, because the allocated device is one GCD.
+        self.assertAlmostEqual(362.1e12 / 2, self.build(sku="mi250")["peak_flops"], delta=1e6)
+        self.assertAlmostEqual(383.0e12 / 2, self.build(sku="mi250x")["peak_flops"], delta=1e6)
+
+    def test_a_whole_mi210_is_numerically_one_mi250_gcd(self):
+        # 104 CU either way, so this is one card under two names rather than a copy that can
+        # drift away from the card it was copied from.
+        self.assertIs(QSC.GFX90A_SKU_CARDS["mi210"], QSC.GFX90A_SKU_CARDS["mi250"])
+
+    def test_the_parts_differ_by_the_cu_ratio_and_share_a_bandwidth(self):
+        mi250, mi250x = self.build(sku="mi250"), self.build(sku="mi250x")
+        self.assertAlmostEqual(220 / 208, mi250x["peak_flops"] / mi250["peak_flops"], places=3)
+        # Both OAMs are 3.2 TB/s, so per GCD the HBM ceiling really is the same number. The
+        # split is a compute split only, and inventing a bandwidth difference to match would
+        # be exactly the fabricated ceiling this module refuses elsewhere.
+        self.assertEqual(mi250["peak_bandwidth_bytes_s"], mi250x["peak_bandwidth_bytes_s"])
+
+    def test_omitting_the_sku_takes_the_lower_peak_rather_than_guessing(self):
+        # Too low understates headroom, the safe direction for (89); and on real MI250X
+        # silicon a kernel that passes the MI250 peak trips (59)'s sol_gap < 1 loudly rather
+        # than quietly reporting 5.8% of room that is not there.
+        self.assertEqual(self.build(sku=QSC.DEFAULT_GFX90A_SKU)["peak_flops"],
+                         self.build()["peak_flops"])
+        self.assertLess(self.build()["peak_flops"], self.build(sku="mi250x")["peak_flops"])
+
+    def test_the_resolved_part_is_named_in_the_source(self):
+        # `source` is the only place the choice is recorded -- a `sku` field would be a schema
+        # bump, and (92) says a v3 consumer must not be handed fields it does not know to read.
+        # So the string has to carry it, and a card must not be traceable to the wrong part.
+        self.assertIn("MI250X", self.build(sku="mi250x")["source"])
+        self.assertIn("MI250", self.build(sku="mi250")["source"])
+        self.assertNotIn("MI250X", self.build(sku="mi250")["source"])
+
+    def test_an_unknown_sku_is_refused(self):
+        with self.assertRaises(QSC.SOLCardError) as cm:
+            self.build(sku="mi300x")
+        self.assertIn("mi300x", str(cm.exception))
+
+    def test_an_sku_on_an_arch_without_the_ambiguity_is_refused(self):
+        # Ignoring it would leave a caller believing a part had been selected on gfx942.
+        with self.assertRaises(QSC.SOLCardError) as cm:
+            self.build(arch="gfx942", sku="mi250x", achieved_bytes=float(128 << 20))
+        self.assertIn("gfx942", str(cm.exception))
+
+    def test_a_card_from_any_modeled_part_validates(self):
+        for sku in QSC.GFX90A_SKU_CARDS:
+            with self.subTest(sku=sku):
+                self.assertEqual([], QSC.validate_sol_card(self.build(sku=sku)))
+
+
+class MatrixVectorPeakSplitTest(unittest.TestCase):
+    """A single `fp32` key held the MATRIX rate, which is 2x the vector rate on CDNA2.
+
+    A kernel issuing no MFMA was therefore scored against a ceiling twice what its units can
+    retire. The halved `sol_gap` is the obvious half of the damage; the other half is that
+    `ridge_point` is peak_flops/peak_bandwidth and doubles with it, so a shape whose intensity
+    falls between the two ridge points is reported compute_bound when it is memory_bound.
+    """
+
+    def build(self, **kw):
+        args = dict(post_selection=True, achieved_flops=1e12, achieved_bytes=1e9,
+                    elapsed_s=0.1, dtype="fp32_matrix", arch="gfx90a")
+        args.update(kw)
+        return QSC.build_sol_card(**args)
+
+    def test_the_matrix_rate_is_twice_the_vector_rate(self):
+        for dtype in ("fp32", "fp64"):
+            with self.subTest(dtype=dtype):
+                self.assertAlmostEqual(2.0, self.build(dtype=f"{dtype}_matrix")["peak_flops"]
+                                            / self.build(dtype=f"{dtype}_vector")["peak_flops"])
+
+    def test_the_ridge_point_moves_with_the_peak_so_the_regime_can_flip(self):
+        matrix, vector = self.build(), self.build(dtype="fp32_vector")
+        self.assertAlmostEqual(2.0, matrix["ridge_point"] / vector["ridge_point"])
+        # One kernel, one measurement, an intensity sitting between the two ridge points.
+        flops = (matrix["ridge_point"] + vector["ridge_point"]) / 2 * 1e9
+        self.assertEqual("memory_bound", self.build(achieved_flops=flops)["regime"])
+        self.assertEqual("compute_bound",
+                         self.build(dtype="fp32_vector", achieved_flops=flops)["regime"])
+
+    def test_the_bare_names_carry_no_peak_and_are_refused_with_the_split_named(self):
+        for dtype in QSC.AMBIGUOUS_LEGACY_DTYPES:
+            with self.subTest(dtype=dtype):
+                self.assertNotIn(dtype, QSC.REFERENCE_GFX90A_CARD["peak_flops"])
+                with self.assertRaises(QSC.SOLCardError) as cm:
+                    self.build(dtype=dtype)
+                # A refusal that does not say what to ask for instead is a dead end.
+                self.assertIn(f"{dtype}_matrix", str(cm.exception))
+                self.assertIn(f"{dtype}_vector", str(cm.exception))
+
+    def test_a_calibration_cannot_reintroduce_the_bare_name(self):
+        # The defect is in the NAME, so provenance cannot repair it: a measured `fp32` rate is
+        # still a number whose reader cannot tell which units retired it.
+        with self.assertRaises(QSC.SOLCardError):
+            self.build(dtype="fp32",
+                       calibration={"measured": True, "peak_flops": {"fp32": 40e12},
+                                    "peak_bandwidth_bytes_s": 1.6e12, "source": "unit test"})
+
+    def test_a_card_written_before_the_split_still_validates(self):
+        # Same reasoning that keeps v1 schema cards readable: an archived card is old, not
+        # corrupt, and rejecting it would make it look like the latter.
+        self.assertIn("fp32", QSC.SUPPORTED_DTYPES)
+        self.assertEqual([], QSC.validate_sol_card(dict(self.build(), dtype="fp32")))
 
 
 class CalibrationTest(unittest.TestCase):
@@ -383,6 +509,15 @@ class CliTest(unittest.TestCase):
         run2 = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         self.assertEqual(run1.stdout, run2.stdout)
         card = json.loads(run1.stdout)
+        self.assertEqual([], QSC.validate_sol_card(card))
+
+    def test_cli_can_name_the_gfx90a_part(self):
+        argv = [sys.executable, str(SCRIPT), "--achieved-flops", "1e12", "--achieved-bytes", "1e9",
+                "--elapsed-s", "0.1", "--dtype", "bf16", "--arch", "gfx90a", "--sku", "mi250x"]
+        run = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             check=True)
+        card = json.loads(run.stdout)
+        self.assertEqual(383.0e12 / 2, card["peak_flops"])
         self.assertEqual([], QSC.validate_sol_card(card))
 
     def test_cli_reports_errors_on_stderr_and_fails_closed(self):

@@ -79,7 +79,12 @@ ROI_GAP_PIVOT = 5.0
 # than compute- or memory-bound. Matches atrex-bench's `_RIDGE_BAND`.
 RIDGE_BAND = 0.05
 
-BYTES_PER_ELEM = {"bf16": 2, "fp16": 2, "fp32": 4, "fp8_e4m3": 1, "fp8_e5m2": 1}
+# `fp32_matrix`/`fp32_vector` (and the fp64 pair) are the names `sol_card` splits fp32/fp64 into,
+# because matrix-core and vector throughput are different ceilings. The distinction is about
+# FLOP rate, not element width, so both spellings weigh the same here; bare `fp32` stays for
+# free-form specs, which never consult a card's peaks.
+BYTES_PER_ELEM = {"bf16": 2, "fp16": 2, "fp32": 4, "fp8_e4m3": 1, "fp8_e5m2": 1,
+                  "fp32_matrix": 4, "fp32_vector": 4, "fp64_matrix": 8, "fp64_vector": 8}
 
 
 # --------------------------------------------------------------------------
