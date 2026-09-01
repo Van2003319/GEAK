@@ -42,6 +42,10 @@ program that no longer exists, and the helper says so rather than leaving you to
 - `ASM_LEDGER` — **the assembly phase's own memory**, one row per window edit any previous phase2
   round measured. This is the ledger you are held to, and it is not the source ledger. See
   "The assembly ledger" below; you both read it and produce the next row of it.
+- `KERNEL_KNOWLEDGE_DIR`, `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the AMD
+  `perf_knowledge/` base. **This is where the catalogue of assembly edits lives**; see "Assembly
+  knowledge" below. Distinct from `ASM_LEDGER`: the base says what is worth trying and under what
+  precondition, the ledger says what has already been tried in THIS tree's windows.
 
 You are NOT given the source `LEDGER`, and its absence is deliberate. Its rows close *source*
 mechanisms — "widening the staging load did not help" — and in this phase the compiler's refusal to
@@ -52,6 +56,51 @@ different questions and the vocabulary does not transfer.
 `KEYPOINTS` may be empty. That is not permission to edit anywhere: it means localisation failed, so
 work from the bottleneck and say in `notes` that the edit was not keypoint-guided — a round that was
 not a local search must not read as one.
+
+## Assembly knowledge (REFERENCE ONLY — read it, it is not optional prose)
+
+When `KERNEL_KNOWLEDGE_DIR` is non-empty it points at the AMD `perf_knowledge/` base, which carries a
+language page set written for **exactly this activity** — editing assembly the compiler already
+emitted, as opposed to authoring assembly. Read it BEFORE choosing an edit. The gate is only
+`KERNEL_KNOWLEDGE_DIR`; unlike the operator cards, these pages apply whatever `KK_OPERATOR` is.
+
+Read in this order — they are ordered by how much each one saves you:
+
+1. `KERNEL_KNOWLEDGE_DIR/languages/asm_mfma/editing_compiled_asm.md` — **the three pre-flight gates.**
+   Dynamic share bounds the prize; the memory roofline closes the issue axis; occupancy decides whether
+   intra-wave scheduling is a currency at all. Most windows die here, on paper, for zero GPU time. A
+   round that skipped these and then measured a null spent its budget learning what arithmetic would
+   have told it.
+2. `.../languages/asm_mfma/edit_patterns.md` — **the edit catalogue, indexed by the same stall signals
+   your `KEYPOINTS` carry** (`drain`, `mfma_starved`, `narrow`, `nop_cycles`, `overhead`). Look up your
+   window's dominant signal and read the entry's **discriminator** — the precondition that separates a
+   win from a null — before you touch anything. Several entries are measured losses; those save you a
+   round each.
+3. `.../languages/asm_mfma/hazards_and_waitcnt.md` — **the rules you personally own.** The hazard
+   recogniser runs in the backend's pre-emit pass, not in the assembler, so reassembling your edited
+   `.s` re-derives NO `s_nop` and NO wait count. Waitcnt relaxation legality, the MFMA wait-state
+   tables, and the real widening-alignment thresholds are here.
+4. `.../languages/asm_mfma/asm_edit_verify.md` — the receipt chain and the control arms. Read it before
+   you report a number under ~3%.
+5. `.../isa_signals/symptom_index.md` → `.../isa_signals/rule_cards/` — machine-checkable ISA signals.
+   Useful for reading a window; note their "Required source condition" sections describe **source**
+   fixes you cannot apply this round, so take their Signal and Mechanism and ignore their prescription.
+6. `.../isa_signals/learned_rules.md` — unreviewed lane-distilled rules, several from previous phase2
+   rounds. Lower authority than a rule card; read it last and treat entries as leads.
+7. `KK_REFS` — any specific card paths the TechLead picked for this direction.
+
+**Contract (do not violate — this is what guarantees the base can only help, never hurt):**
+- *Facts and preconditions, not decisions.* The base may be stale, incomplete or wrong. It only **adds**
+  candidates and tells you what to check; it never narrows your options and never overrides your
+  reading of the window in front of you.
+- *ADD-only.* No page may foreclose an edit. A measured-loss entry is "this cost 1.6% on a body with
+  these properties — check whether yours differs", never "do not do this".
+- *Your measurement is the judge.* A pattern the catalogue calls a win still has to clear the floor on
+  this body, and `verify` re-measures it regardless.
+- *Ratios only are meaningful.* Percentages in the base were measured on other bodies and other
+  sessions. Use them to rank what to try, never as a target to report against.
+- If `KERNEL_KNOWLEDGE_DIR` is empty, skip this section entirely — the round proceeds exactly as it did
+  before the base existed.
 
 ## Rules (NON-NEGOTIABLE)
 
@@ -114,17 +163,33 @@ not a local search must not read as one.
    or removes an instruction whose result is consumed later in that span is a correctness bug the
    assembler will not catch for you.
 
-5. **Edit, inside the window.** What is worth trying, in rough order of how often it pays:
-   - **Relax a wait.** `s_waitcnt vmcnt(0)` where `vmcnt(1)` or `vmcnt(2)` suffices lets the last
-     loads stay in flight. The counter must still cover every operand actually read next.
-   - **Hoist a load above the work that does not need it**, so the latency overlaps.
-   - **Remove a redundant `s_nop`** the backend inserted for a hazard that your reordering removed.
-     Do not remove one whose hazard is still there; on CDNA these are correctness, not padding.
-   - **Drop an `v_accvgpr_read`/`write` pair** that round-trips a value through an AGPR for no
-     reason, when the consumer can read the VGPR directly.
-   - **Widen an access** (`dword` -> `dwordx4`) only when alignment is provable from the addressing
-     already in the window. This one is the easiest to get silently wrong.
-   - **Re-order independent VALU** to fill an issue slot between dependent MFMA.
+5. **Edit, inside the window.** **The catalogue is
+   `$KERNEL_KNOWLEDGE_DIR/languages/asm_mfma/edit_patterns.md`, indexed by the same signal names your
+   keypoint's `evidence` block carries. Look your signal up there and read the entry's discriminator.**
+   What follows is an orientation list, not the authority, and it is ordered by **measured** win rate
+   rather than by folklore:
+
+   - **Sink the next-stage load group to the earliest legal seam** (signal `mfma_starved`) — the
+     largest measured win. Discriminator: supplied occupancy above ~2 WG/CU.
+   - **Relax a full drain** (signal `drain`) — pays only where the loads it guards **share a
+     destination register range**; that is the register allocator's serialisation surfacing as a wait.
+     If the destinations are already distinct the count is exact and there is nothing to recover, and
+     one pending `flat_*` closes the question entirely.
+   - **Re-order independent VALU** to fill an issue slot between dependent MFMA — measured 0 for 5 so
+     far, and **permuting the MFMA themselves risks correctness**: breaking an exact vDst/SrcC match
+     raises the required wait states from 0 to 9 or 17 and nothing re-inserts them.
+   - **Widen an access** — `global_load_dwordx4` needs only 4-byte alignment, but on an LDS *store*
+     path widening has now measured as a loss twice, and widening shifts every downstream `vmcnt(N)`.
+   - **Rename a destination to remove a hazard**, taking its `s_nop` with it. This is the only
+     legitimate form of "delete an `s_nop`": every `s_nop` in compiler output is correctness-required,
+     because the padding knob defaults to off.
+   - **Fold per-store address arithmetic into the 13-bit immediate** where the offsets are provably
+     constant-separated.
+
+   Two entries you may have heard and should not spend a round on without reading the catalogue first:
+   deleting a "redundant" `s_nop` (there is no default-build instance) and removing an
+   `accvgpr_read`/`write` round trip (two compiler flags recover most of it, and if `accvgpr_moves`
+   is already 0 there is nothing to remove).
 
 6. **Rebuild and measure.**
    `python3 $ASM_ROUNDTRIP_HELPER rebuild --source-root <src dir> --source-file <X.hip> --asm <X.s>`
@@ -197,6 +262,19 @@ How to read the verdicts — they do NOT mean what the source ledger's mean:
 **Locate a row by `fingerprint`, never by line number** — the same rule as a KEYPOINT, and for the
 same reason: every edit since that row was written moved the lines below it.
 
+**Two fields exist so the rows can be COUNTED, not just re-found.** A fingerprint identifies one site
+in one compiled artifact and is worthless the moment the source moves; what survives is the window's
+*shape*.
+
+- **`window_evidence`** — copy the `evidence` block of the KEYPOINT you worked, verbatim. If the
+  window was not keypoint-guided, census it yourself over the steady-state extent. This is the only
+  field that lets anyone ask "does this edit pay on windows shaped like this one" across kernels, and
+  a row without it can only ever be a query result.
+- **`experiment_group`** — when two rows are genuinely ONE experiment, give them the same id. A
+  destination rotation and the `vmcnt` constants fitted to it are one pipeline even when the localiser
+  named them as two sites. Without this the same result gets counted twice and every rate built on it
+  is wrong.
+
 **The row you owe.** Report the fields in `worker_result.asm_ledger_rows`, one per window edit you
 MEASURED — including the ones that lost, which are most of the value. Do not summarise several
 edits into one row; the unit is the experiment, and a merged row describes a window nobody tried.
@@ -243,6 +321,9 @@ gate cannot bank an incidental gain elsewhere as your mechanism.
       "actual": 0.998,
       "verdict": "confirmed | dead-end | not-realized | broke-correctness",
       "resource_delta": {"vgpr": 0, "agpr": 0, "lds": 0, "scratch": 0},
+      "window_evidence": {"drain": 4, "nop_cycles": 0, "mfma_starved": 0, "narrow": 0,
+                          "overhead": 0, "instructions": 24, "mfma": 0},
+      "experiment_group": "null, or an id you share with the other rows that are ONE experiment",
       "lesson": "one line: what this window's behaviour actually is",
       "reopens_when": "on a dead-end: the concrete condition that would make it worth retrying"
     }

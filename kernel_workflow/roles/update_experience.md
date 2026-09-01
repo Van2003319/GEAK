@@ -58,13 +58,66 @@ do not "find" a nearby `learned/` folder.
    say so, and say when a direction's standalone contribution was never isolated rather than inventing a
    split. One direction only → omit `stack:`.
 
+## A card from a phase2 (assembly) round — the abstraction level IS the work
+
+If `HISTORY.asm_ledger` is non-empty, the lane edited machine code and its findings are eligible for a
+card on exactly the same terms as a source finding. They are also the easiest findings to write
+*unusably*, and the lint is what tells you so: it rejects a card that **names a specific kernel in
+`key` or the body**, or that carries an **eval-dir path or patch filename**. An assembly row is
+natively `.LBB34_90` + `ordinal_in_block: 36` + a `fingerprint` — every one of those is exactly the
+kind of run-memorising detail the lint refuses, and correctly, because the next run's compiler will
+not emit that block.
+
+**So the distillation is a lift, from a window INSTANCE to a window SHAPE.** Do it field by field:
+
+| an `asm_ledger` row carries | what goes on the card |
+|---|---|
+| `kernel` (mangled symbol) | the `kernels:` **header** field — greppable, and the one place a symbol is allowed |
+| `block`, `ordinal_in_block`, `fingerprint` | **nothing.** These identify a site in one compiled artifact; they do not survive a recompile |
+| `edit` (closed-vocabulary id) | the `lever` — but say it in words, e.g. "relax a full memory drain" |
+| `window_evidence` / the census in `lesson` | **the discriminator**, and this is the load-bearing part: the window *properties* under which the edit paid |
+| `expected` vs `actual` | `effect:` as a ratio; never the µs behind it |
+| `verdict: confirmed` | the `lever` + `effect` |
+| `verdict: dead-end` + `reopens_when` | a **`caution:`** — "also verify X", with the condition it held under |
+| `verdict: broke-correctness` | a **`pitfall:`** in `symptom → root cause → fix` form. These are the highest-value lines a phase2 round can produce |
+| `resource_delta` | mention only if non-zero; a resource-neutral edit is worth saying so |
+
+**The `key` must name the mechanism and its discriminator, not the site.** Good:
+`"relaxing a full memory drain on gfx942/CDNA3 hand-edited assembly, where the guarded loads share a
+destination register range"`. Bad: `"relax_waitcnt on .LBB34_90"` — a site, and the lint will refuse
+it. Also bad: `"dense_gemm · gfx942 · prefill"` — a bare triple, refused for the usual reason.
+
+**Confidence, applied to assembly evidence:** one window, one body → ★. Reproduced on a second window
+or a second body in the same kernel → ★★. Reproduced on a **different kernel** → ★★★ (and that is the
+`confirms_blind` the README requires for three stars). A single window's win with no evidence it
+generalises is a ★ card at best, and often nothing at all.
+
+**When to write NOTHING from a phase2 round** — the common case, and it is not a failure:
+- the win was one window with no second instance, and the `lesson` names no property that would let
+  anyone find a comparable window;
+- every row is a null and none of them names a *transferable* reason (a null explained only by "this
+  body's bottleneck is elsewhere" is an `EVAL_DIR` fact, not a principle);
+- the edit is already covered by a card, in which case MERGE — widen its `effect`, append the
+  `source`, and add the new discriminator to it.
+
+**A null CAN earn a card when the reason generalises.** "Intra-wave schedule edits are null at ≥4
+waves/SIMD because another resident wave covers the drain" is a reusable principle backed by several
+independent measurements, and it belongs on a card as a `caution:` even though every arm lost. That is
+the phase2 equivalent of the README's "a surprising negative → a CONDITIONED caution".
+
+**Keywords:** reuse the existing assembly cluster before coining — `instruction-schedule`,
+`assembly-inspection`, `isa-diff` are already in the vocabulary from a prior phase2 proposal. Read
+`INDEX.md`'s keyword appendix as usual.
+
 ## Inputs
 `SCOPE` (`lane` | `bakeoff`), `LEARNED_DIR` (the sink you PROPOSE into — never write it directly),
 `SKILL_DIR` (the owning workflow; `${SKILL_DIR}/scripts/kb.py` is the tool), `EVAL_DIR` (this run's episodic record),
 `REPORT_PATH` (the final report), `WINNER` (the winning candidate + its verified speedup; on a lane run
 it also carries `kernel`/`language`/`gfx`/`kernel_class`/`bottleneck`), `HISTORY` (lane only: the
 per-round ledger, insights, and each round's directions/results/winner/cumulative — this is what lets
-you decompose a stacked win and find the pitfalls), `PROFILE` (lane only: the final profile summary —
+you decompose a stacked win and find the pitfalls; **it also carries `HISTORY.asm_ledger` when the
+lane reached phase2, and that is a first-class source for a card — see "A card from a phase2 round"
+below**), `PROFILE` (lane only: the final profile summary —
 bottleneck class and key metrics for the `roofline:` line; convert anything absolute in it into a
 fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (bake-off only), and
 `PERF_KNOWLEDGE_DIR` (the read-only reference base; may be empty).
@@ -86,6 +139,12 @@ fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (b
    a card describing the same lever on the same `(kernel_class, gfx, regime)` in different words IS the
    same card, and filing a near-twin next to it is the main way this folder degrades. When in doubt,
    MERGE into the existing card rather than create.
+2b. **If `HISTORY.asm_ledger` is non-empty, walk every row before deciding the transaction.** Do not
+   skip this because the source ledger already handed you a candidate: a lane that reached phase2
+   measured a second, disjoint population of experiments, and its `broke-correctness` and
+   explained-null rows are often the most reusable thing the run produced. Follow the lift table in
+   "A card from a phase2 round" above. A phase2 lane that files a source card and silently drops
+   thirty measured window edits has thrown away the expensive half of its own evidence.
 3. Decide the transaction:
    - **Nothing reusable** (win was a one-off / already covered by an equal-or-stronger card): do nothing;
      return `{"action":"skipped","card_path":"","key":"...","note":"why"}`.

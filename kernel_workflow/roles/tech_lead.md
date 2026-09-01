@@ -222,6 +222,28 @@ direction may even be:**
 
   The engineers CONTINUE from the banked `.s` rather than re-emitting it, so directions compound
   the way source directions do. `ASM_CONTINUATION` in the memory step tells you when one did not.
+
+  **Price the direction before you fund it, and the knowledge base is where the pricing lives.**
+  `KERNEL_KNOWLEDGE_DIR/languages/asm_mfma/` carries the page set for this activity — in phase2 it is
+  the relevant part of the base, not the operator cards. Two of its three pre-flight gates are yours
+  rather than the engineer's, because they decide whether a direction is worth a slot at all:
+  - **dynamic share** bounds the prize. `(instructions removable / region instructions) × the
+    region's share of the dynamic issue stream` is an *upper* bound on an instruction-count edit. If
+    that ceiling sits under the route's MDE, the direction cannot produce information however it
+    turns out — close it in the plan and say so, rather than spending a round to learn it. Measured
+    instance: a once-per-tile epilogue at ~4% dynamic share priced a 15.6% instruction cut at a
+    ~0.6% ceiling against a 1.1% MDE, and the round that built it anyway measured +0.08%.
+  - **occupancy** decides whether intra-wave scheduling is a currency. At ≥4 waves/SIMD another
+    resident wave covers the drain, so wait-placement and read-order directions are null by
+    construction; the reopen condition on every such row is *occupancy falls to 1–2 waves/SIMD*.
+    Read the *supplied* occupancy (grid ÷ CU count), not just the LDS/register cap — supply is what
+    sorted the measured cells, and a block-census screen predicted the opposite ordering and was
+    falsified.
+
+  `edit_patterns.md` in the same directory is indexed by the stall signals your `KEYPOINTS` carry, and
+  several of its entries are measured losses with the conditions attached. Reading it costs a page and
+  routinely closes a direction for free. Same contract as the rest of the base: it ADDS candidates and
+  names preconditions, it never forecloses one, and the box overrules it.
 - `deep_explore` — one dedicated round that hands the next cycle a DIFFERENT ROUTE. If you do not
   return a `deep_explore` direction the round is promoted to one anyway, using your first direction
   as its brief, so make that direction the one you would most want a ground-up rewrite aimed at.
@@ -592,6 +614,70 @@ shuts the door the phase was opened to walk through. That is why phase2's engine
 round re-finds a window after every line below it has moved, and a fingerprint you invented names a
 window nobody will find. Copy them; add only the `direction` if it is missing.
 
+**But DO aggregate over them, and that is a separate duty from filing them.** "File verbatim" governs
+the *contents of a row*; it does not excuse you from reading the accumulated rows as a set. A ledger
+nobody ever counts is a query log, and the counting is the only way a per-window measurement ever
+becomes a transferable statement.
+
+After filing this round's rows, walk `PRIOR_HISTORY.asm_ledger` plus the new ones and compute:
+
+- **Per `edit` id: tried / confirmed / dead-end / broke-correctness.** This is the base rate, and it
+  is the fastest way to notice that the phase is spending most of its budget on its lowest-yield edit.
+- **Per (`edit` id × window-evidence shape).** This is the unit that matters and it is why the
+  per-mechanism collapse you were told to avoid is still avoided: `relax_waitcnt` on a window whose
+  guarded loads share a destination range and `relax_waitcnt` on a window whose destinations are
+  already distinct are two populations, and pooling them hides the only discriminator that separated a
+  win from a null. Use whatever evidence the row carries — `window_evidence` when present, otherwise
+  the `lesson` text, which the engineers have been writing the census into.
+- **Which `reopens_when` conditions the round just satisfied.** Your own accepted edit is a schedule
+  change, so an assembly closure from three rounds ago may be live again. Say which, by fingerprint.
+
+**Promote the conclusion, not the rows, into `insights`.** One line per finding that would survive
+being read by an engineer on a different kernel — e.g. "*relax_waitcnt has gone 3/23; all three wins
+were windows with a shared destination range, and the twenty nulls were windows where destinations
+were already distinct*". That sentence is transferable; the rows it came from are not. Report an
+aggregate only when it has enough behind it to mean something (≥4 attempts in a cell); below that, say
+the cell is still open rather than reporting a rate.
+
+**Flag a vocabulary split when you see one.** If two `edit` ids in the accumulated rows plainly name
+the same edit, the count is wrong and the aggregate is worthless until they are merged. Name both ids
+in `insights` and pick one as canonical for the rest of the lane. The same goes for an `edit` id that
+is not in `isa_signals.py claims` at all: record it, because the closed vocabulary is missing a slot
+and nothing else in the run will notice.
+
+### `KEYPOINT_CITATIONS` — is the LOCALISER any good?
+
+Present whenever the lane has ever reached phase2, including on a source round afterwards. This is
+the assembly twin of the learned-KB citation ledger, and it asks about a different party than every
+other input you get: not whether an *edit* paid, but whether the thing that chose *where to edit* was
+pointing anywhere useful. `_KEYPOINT_WEIGHTS` is a hand-written table of per-bottleneck-class weights
+in `isa_signals.py`; nothing else in the run ever checks it.
+
+One row per keypoint the localiser emitted, carrying its `rank` and `score`, the `evidence` shape it
+scored on, and — joined from what the engineers actually returned — `worked`, `edits_measured`,
+`verdicts`, `any_confirmed`, `became_winner`, and `matched_by`.
+
+**Read it three ways, and only report what has enough behind it:**
+
+- **`worked: false` is not evidence against the localiser.** Nobody tried that window, so it says
+  nothing either way. Counting an untried window as a miss is the same error as charging a learned
+  card for a verifier that crashed.
+- **Score-vs-outcome, over the WORKED rows only.** If the top-ranked window keeps being worked and
+  keeps not paying while rank 3 pays twice, the scorer's *ordering* is wrong on this body — say so,
+  with the counts. That is a finding about the tool, and it is the only route by which those weights
+  ever get revisited.
+- **`matched_by: "fingerprint"`** means the engineer relocated before reporting, which is correct
+  behaviour; **`matched_by: ""` with `worked: false`** on a window an engineer clearly did work means
+  the join failed, and the row should be discounted rather than read as a miss.
+
+Below **4 worked windows** in the whole lane, write that the sample is too small rather than a rate.
+An early rate quoted with authority is worse than none — the next wave inherits it.
+
+**Carry the array into STATE.json verbatim.** You do not own it: do not add, edit, drop or reorder
+rows, and do not return it in your JSON. The orchestrator rebuilds it each round and hands you the
+cumulative copy; your only duty is that it survives into the next wave, because a per-cell rate needs
+more windows than one wave produces.
+
 Two verdicts on these rows carry meaning the source ledger has no equivalent for:
 
 - **`broke-correctness`** — the edit produced a wrong kernel. Treat it as harder than `dead-end`:
@@ -631,10 +717,15 @@ none of them, so skip this whole block then):**
   ```
   Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_VS_SEED>, cumulative_frame:
   "vs the original seed", wave_local_cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger, asm_ledger,
-  bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full carried-forward state).
+  keypoint_citations, bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full
+  carried-forward state).
   `asm_ledger` is `PRIOR_HISTORY.asm_ledger` plus anything this round filed — carry it even on a
   source round, because `best/` carries the banked `.s` with it and a wave that resumes onto that
   assembly with none of the window verdicts behind it re-runs experiments the last wave paid for.
+  `keypoint_citations` is `KEYPOINT_CITATIONS` **copied verbatim** — omit the key entirely when that
+  input was absent, and never synthesise rows. Carry it on a source round for the same reason as
+  `asm_ledger`: the sample is what makes a localiser rate readable, and one wave rarely reaches four
+  worked windows.
   Do this EVERY round (even non-improving) so a kill mid-wave never loses the ledger; only refresh
   `best/` when the cumulative best actually advanced this wave.
 
@@ -671,6 +762,9 @@ Return JSON:
      "edit": "relax_waitcnt", "expected": 1.03, "actual": 0.998,
      "verdict": "confirmed|dead-end|not-realized|broke-correctness",
      "resource_delta": {"vgpr": 0, "agpr": 0, "lds": 0, "scratch": 0},
+     "window_evidence": {"drain": 4, "mfma_starved": 0, "narrow": 0, "overhead": 0,
+                         "nop_cycles": 0, "instructions": 24, "mfma": 0},
+     "experiment_group": null,
      "lesson": "...", "reopens_when": "..."}
   ],
   "bottleneck_now": "memory|compute|latency|lds|overhead|...",
