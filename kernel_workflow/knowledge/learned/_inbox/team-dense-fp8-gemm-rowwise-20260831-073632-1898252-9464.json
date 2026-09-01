@@ -1,0 +1,64 @@
+{
+  "run_id": "team_dense_fp8_gemm_rowwise_20260831_073632_1898252_9464",
+  "date": "2026-08-31",
+  "kernel_names": [
+    "dense_fp8_gemm_rowwise"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "sink-the-next-global-load-to-the-earliest-legal-seam-in-hand",
+      "title": "Sink the next global load to the earliest legal seam in hand-edited assembly",
+      "description": "In hand-edited assembly, hoist a block-head LDS-read burst above the K-guard so the next global load issues a slot earlier: +7.8% on the targeted route",
+      "keywords": [
+        "instruction-schedule",
+        "assembly-inspection",
+        "isa-diff",
+        "latency-bound",
+        "k-loop",
+        "fp8",
+        "mfma",
+        "dense-gemm",
+        "raw-hip",
+        "bit-exact",
+        "prefill",
+        "gfx942"
+      ],
+      "kernels": [
+        "fp8_gemm_tiled_kernel"
+      ],
+      "platforms": [
+        "gfx942"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "prefill",
+      "key": "rowwise-scaled fp8 (e4m3 fnuz) dense GEMM with a bf16 epilogue, hand-edited phase-2 assembly on gfx942/CDNA3, raw HIP against a vendor-library oracle",
+      "layer": "learned",
+      "levers": [
+        "compute.instruction-schedule",
+        "mem.software-prefetch"
+      ],
+      "cost": "L3",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "+7.8% and +3.75% on the two large-M prefill routes it targeted (M=512,N=11008,K=4096 and M=1024,N=4096,K=11008); 1.1764x final oracle-relative geomean over the 11-case mix, decode cases untouched by these hunks",
+      "roofline": "latency-bound (issue-slot wait at the head of the loop block) before and after — no bound-class shift; ~0.35 of achievable fp8 MFMA peak vs an oracle at ~0.36 in the same session; minimum traffic puts it far from the memory roof",
+      "verified_on": "2026-08-31",
+      "last_seen": "2026-08-31",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "lever": "when a tiled MFMA main loop is issue-bound at the block head, take ownership of the emitted assembly and sink the next K-stage's global-load group to the earliest legal seam: hoist the head LDS-read burst above the K-guard branch so the loads enter the issue queue one guard-evaluation earlier",
+      "apply": "pure reorder inside one main-loop block per tile shape; de-alias by remapping each load's address temp onto the low pair of that same load's destination quad, so the edit costs zero registers, zero LDS and no occupancy; the assembly becomes the artifact the build installs",
+      "stack": "total 1.1764x oracle-relative geomean (director-verified) = the same lever applied to three tile shapes' main loops\n- 1. 64x128x128 tile — +3.75% on its declared large-M route (round 3, verified)\n- 2. 32x64x256 tile — suite-geomean movement only, null on all four per-route instruments (round 4, verified but unproven; standalone contribution never isolated)\n- 3. 128x64x64 tile — +7.8% drift-corrected, n=20 interleaved paired A/B, 20/20 replicates positive (round 5, verified) — the strongest of the three\n- note: attribution is incremental in landing order, not independent; per-application effect decayed monotonically (3.75 / 3.00 / 0.91 percent of remaining headroom), the signature of a finite resource",
+      "verify": "disassemble the code object out of the live shared library and confirm the hunk is actually resident before trusting a timing; then judge on the declared route with a same-session interleaved paired A/B against a zero-signal control route set, and hash the output for bit-exactness",
+      "pitfall": "a rebuild scored the same as the incumbent with compile and correctness both green → the edited assembly is not in the build graph and re-entered only through an installed object file, so the timed binary held none of the edit → confirm the hunk in the code object extracted from the live library, not in the source tree\n- pitfall: the unchanged tree scored 1.188 and 1.173 within one round → the oracle denominator itself drifts across sessions, so an absolute oracle-relative geomean is uninterpretable alone → interleave A and B in one session and drift-correct against a route set the edit cannot touch\n- pitfall: a real +4.4% single-route win was discarded because the 11-case suite geomean moved only ~0.4% → a per-tile-shape edit is diluted about tenfold by a multi-shape mix, below session drift → judge on the route the direction declared and keep the suite geomean as a tripwire\n- pitfall: a tolerance-based parity gate passed a reorder that turned a class of NaN into +Inf → a tolerance comparison cannot see a value swap it treats as out-of-range on both sides → gate a pure reorder on a bit-identical output hash instead",
+      "caution": "also verify where the block's guard already sits: on a tile whose K-guard was already after the head LDS burst the same hoist measured ~0.999 and the register remap was pure cost; also verify that source-level attempts at the same reordering are not being re-scheduled away by the backend before concluding the seam does nothing",
+      "source": "run team_dense_fp8_gemm_rowwise_20260831_073632_1898252_9464 (2026-08-31); rounds 3/4/5 verifier records and the final director validation"
+    }
+  ]
+}

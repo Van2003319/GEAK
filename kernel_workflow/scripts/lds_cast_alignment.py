@@ -93,6 +93,19 @@ ELEM_SIZE = {
     # the size rather than guessing it; the arena still gets the same
     # innermost-index caveat every other array gets.
     "char": 1, "int8_t": 1, "uint8_t": 1, "std::byte": 1, "std::int8_t": 1,
+    # fp8: 1 byte by definition of the encoding (E4M3/E5M2, FNUZ or OCP), so this
+    # resolves the size rather than guessing it -- same standing as `char` above.
+    # Omitting it made the scan exit 2 on the UNPATCHED dense_fp8_gemm_rowwise
+    # baseline, which cost three consecutive rounds of verifiers hand-building a
+    # "castprobe" with int8_t substituted into the two __shared__ F8 declarations
+    # just to get exit 0. `F8` is the alias those kernels use for it.
+    "F8": 1, "float8_fnuz_t": 1, "rocwmma::float8_fnuz_t": 1,
+    "float8_t": 1, "rocwmma::float8_t": 1,
+    "bfloat8_fnuz_t": 1, "rocwmma::bfloat8_fnuz_t": 1,
+    "bfloat8_t": 1, "rocwmma::bfloat8_t": 1,
+    "__hip_fp8_e4m3_fnuz": 1, "__hip_fp8_e5m2_fnuz": 1,
+    "__hip_fp8_e4m3": 1, "__hip_fp8_e5m2": 1,
+    "c10::Float8_e4m3fnuz": 1, "Float8_e4m3fnuz": 1,
 }
 
 # sizeof for the scalar bases a vector typedef can be built on. Same closed-table
@@ -104,6 +117,8 @@ SIZEOF = {
     "int": 4, "unsigned": 4, "unsigned int": 4, "int32_t": 4, "uint32_t": 4,
     "float": 4,
     "long": 8, "unsigned long": 8, "int64_t": 8, "uint64_t": 8, "double": 8,
+    "F8": 1, "float8_fnuz_t": 1, "rocwmma::float8_fnuz_t": 1,
+    "bfloat8_fnuz_t": 1, "rocwmma::bfloat8_fnuz_t": 1,
 }
 
 # A vector typedef declared IN THE FILE BEING SCANNED, in either of the two

@@ -143,3 +143,236 @@ why the pool is six and not eight.
 ## Waves
 
 _(append one entry per wave)_
+
+### Wave `fp8_rowwise_20260827` — launched 2026-08-27
+
+- `lane_args.py --check` → exit 0 (13 arguments, 8 protocol values pinned and matching).
+- Launched from the `--print` rendering verbatim, no hand-edited keys.
+- Run ID `wf_a4e4c667-23d`; transcript under
+  `~/.claude/projects/-home-yxh-GEAK-asmopt/fced9c0f-.../workflows/wf_a4e4c667-23d`.
+- Config as launched: `mode=optimize`, `budget=120`, `min_improve=0.005`,
+  `candidate_floor=0.37` (seed sits at 0.437, so the floor is genuinely below the seed and
+  candidates stay visible), `isa_evidence=observe`, `ir_diagnostics=on`,
+  `incremental_analyze=true`, `agent_timeout_ms=7200000`, `gpu_ids=2,3,4,5,6,7`,
+  `state_dir=exp/state_fp8_rowwise_20260827`.
+- Result: _pending — appended below on completion._
+
+### Wave `fp8_rowwise_20260827` (relaunch) — 2026-08-27
+
+The entry above records run `wf_a4e4c667-23d` as pending; that run belongs to an earlier session
+and cannot be resumed from here (`resumeFromRunId` is same-session only). Relaunched from the same
+lane file rather than adopting a run whose state I cannot inspect.
+
+- `lane_args.py --check kernel_workflow/lanes/fp8_rowwise_20260827.json` → exit 0
+  (13 arguments, all accepted; 8 protocol values pinned and matching).
+- Invoked verbatim from the `--print` rendering — no key added, removed, or retyped.
+- Run ID `wf_db33bc0d-067`; transcript under
+  `~/.claude/projects/-home-yxh-GEAK-asmopt/fe256d15-.../workflows/wf_db33bc0d-067`.
+- Config identical to the entry above (`mode=optimize`, `budget=120`, `min_improve=0.005`,
+  `candidate_floor=0.37`, `isa_evidence=observe`, `ir_diagnostics=on`,
+  `incremental_analyze=true`, `agent_timeout_ms=7200000`, `gpu_ids=2,3,4,5,6,7`,
+  `state_dir=exp/state_fp8_rowwise_20260827`).
+- Task string carries both standing rules: `oracle_wrapper.py` is the immutable denominator and is
+  to be exempted with `--immutable` in every `candidate_policy_scan.py` run; rocBLAS / hipBLAS /
+  hipBLASLt / Tensile / Composable Kernel / MIOpen / aiter are forbidden in candidates, rocWMMA
+  (header-only) is allowed.
+- Result: _pending — appended below on completion._
+
+### Wave `fp8_rowwise_20260827` (relaunch #2) — ran 2026-08-31, 07:36 → 16:24 UTC
+
+Preceding entries record `wf_a4e4c667-23d` and `wf_db33bc0d-067` as pending; both belong to
+earlier sessions and `resumeFromRunId` is same-session only, so this is a fresh launch against the
+same `state_dir` — which is what carried the incumbent forward (the lane resumed from
+`STATE_DIR/best` at 1.1706, baseline commit `6e88438`, not from the 0.434 seed).
+
+- `lane_args.py --check kernel_workflow/lanes/fp8_rowwise_20260827.json` → **exit 0**
+  (14 arguments, all accepted by the entry points; 8 protocol values pinned and matching).
+- Invoked verbatim from the `--print` rendering — no key added, removed, or retyped.
+- Run ID `wf_2b4968aa-863`; transcript under
+  `~/.claude/projects/-home-yxh-GEAK-asmopt/59e90b6c-.../workflows/wf_2b4968aa-863`.
+- Config as launched: `mode=optimize`, `budget=120`, `min_improve=0.005`, `candidate_floor=0.37`,
+  `isa_evidence=observe`, `ir_diagnostics=on`, `incremental_analyze=true`,
+  `agent_timeout_ms=7200000`, `gpu_ids=2,3,4,5,6,7`,
+  `state_dir=exp/state_fp8_rowwise_20260827`.
+
+#### Result — completed, validation `accepted` / trust `verified`
+
+| field | value |
+|---|---|
+| director-verified geomean (headline) | **1.1764** |
+| tech-lead reported geomean | 1.1831 |
+| arithmetic mean of per-case speedups | 1.2028 (tech lead: 1.2083) |
+| correctness | pass, bit-exact |
+| timing basis | device (`rocprofv3` dispatch timing) |
+| rounds / budget | 8 rounds, 15 of 120 dispatches used |
+| `stopped_by` | `deep_explore_failed` (not the clock — `deadline_hit=false`) |
+| wall clock | 8h 49m, 70 agents, 0 errors |
+| eval dir | `exp/team_dense_fp8_gemm_rowwise_20260831_073632_1898252_9464/dense_fp8_gemm_rowwise` |
+
+The headline is the **director's** 1.1764, not the tech lead's 1.1831 — the two were measured in
+different sessions and the director's is the independently re-timed one. Within-wave gain over the
+1.1706 incumbent is therefore about +0.5%, and against the original 0.434 seed the cumulative
+program stands at roughly 2.71x.
+
+**Phase ladder:** `phase1_source` (r1) → `phase2_asm` (r3) → `deep_explore` (r8), each entered
+because the TechLead's own stop gate fired (floor attacked, no compute case far above it, last
+verified gain under ~3%). One cycle, zero forced replans.
+
+**What actually paid.** Three wins banked, all three phase-2 assembly instruction-scheduling edits
+inside per-tile-shape MFMA main loops; the shipped artifact of this wave is a single file,
+`src/custom_fp8_gemm_hip.s`. No `.hip`/`.py`/`.cpp` source was touched, so the build routes through
+`asm_roundtrip.py` restore.
+
+| round | engineer | edit | banked as |
+|---|---|---|---|
+| 3 | `r3_d0` | hoist head `ds_read2_b64` burst above the K-guard in `.LBB3_346` (64x128x128); target +3.75% on `prefill_m1024_down` | `5606655` |
+| 4 | `r4_d2` | 7±7 lines inside the 32x64x256 instantiation; correct and resource-neutral but **measured null** on the suite | `912b46d` |
+| 5 | `r5_d0` | re-bank of round 4's dropped `.LBB2_464` sink (128x64x64); +7.77% on `prefill_m512_up`, 20/20 paired positive | `9cec716` |
+
+Rounds 1, 2, 6, 7 banked nothing; round 8's `deep_explore` shipped no patch and closed the wave.
+
+**Per-case, as validated (µs, oracle → ours):**
+
+| route | shape | speedup |
+|---|---|---|
+| `decode_m2_square` | 2×4096×4096 | 1.931 |
+| `decode_m8_up` | 8×11008×4096 | 1.141 |
+| `decode_m16_square` | 16×4096×4096 | 1.462 |
+| `decode_m32_down` | 32×4096×11008 | 1.051 |
+| `decode_m64_square` | 64×8192×8192 | 1.196 |
+| `decode_m96_up` | 96×11008×4096 | 1.234 |
+| `prefill_m128_square` | 128×4096×4096 | 1.389 |
+| `prefill_m256_down` | 256×4096×11008 | 1.010 |
+| `prefill_m512_up` | 512×11008×4096 | **0.968** |
+| `prefill_m1024_down` | 1024×4096×11008 | **0.953** |
+| `prefill_m2048_square` | 2048×4096×4096 | 1.049 |
+
+The two large-M prefill routes remain the only sub-parity cases and are where the remaining
+headroom is.
+
+**Bottleneck:** `latency` at wave start and at wave end — issue-slot latency at the head of the
+K-loop body, not bandwidth and not occupancy. Every funded bandwidth-, occupancy-, and
+tiling-shaped direction measured null or negative. That the bottleneck refused to shift under all
+remaining cheap levers is what closed the wave.
+
+**Compliance receipts:**
+
+- `oracle_wrapper.py` unmodified — clean in `git status`, sha256
+  `1059f13d2dfb7183b576cb9e655d0a47b0078896a1a1c037bbbc753cc96036d0`; the lane's own
+  `oracle_digest` was constant at `161ef808…8239e` across every verify agent in all 8 rounds.
+- `final_patch.diff` touches exactly one file (`src/custom_fp8_gemm_hip.s`) and contains zero
+  occurrences of rocBLAS / hipBLAS / hipBLASLt / Tensile / Composable Kernel / MIOpen / aiter.
+
+**Caveat carried forward:** rocprof-compute / omniperf are not installed on this host, so SoL, L1
+and L2 fields are *absent* from the round metrics, not zero. Any future roofline argument must
+install the missing profiler first rather than read absence as a value.
+
+**Knowledge captured:** one new learned card,
+`kernel_workflow/knowledge/learned/sink-the-next-global-load-to-the-earliest-legal-seam-in-hand-dense-gemm-gfx942-prefill.md`;
+KB artifact written as `dense_fp8_gemm_rowwise__triton__gfx942` (champion, speedup 1.1764).
+Direction entropy was low — 4 distinct directions over 14 issued (0.286).
+
+### Wave `fp8_rowwise_20260827` (relaunch #3) — ran 2026-08-31, 16:26 → 20:27 UTC
+
+Same `state_dir`, so the lane resumed from the previous wave's incumbent (1.1831 tech-lead frame /
+1.1764 director frame) rather than from the 0.434 seed. Unattended launch.
+
+- `lane_args.py --check kernel_workflow/lanes/fp8_rowwise_20260827.json` → **exit 0**
+  (14 arguments, all accepted by the entry points; 8 protocol values pinned and matching).
+- Invoked verbatim from the `--print` rendering — no key added, removed, or retyped.
+- Run ID `wf_4436a030-e17`; transcript under
+  `~/.claude/projects/-home-yxh-GEAK-asmopt/f7af746e-.../workflows/wf_4436a030-e17`.
+- Config as launched: identical to relaunch #2 (`mode=optimize`, `budget=120`,
+  `min_improve=0.005`, `candidate_floor=0.37`, `isa_evidence=observe`, `ir_diagnostics=on`,
+  `incremental_analyze=true`, `agent_timeout_ms=7200000`, `gpu_ids=2,3,4,5,6,7`,
+  `state_dir=exp/state_fp8_rowwise_20260827`).
+
+#### Result — completed, **nothing banked**, validation `flagged`
+
+| field | value |
+|---|---|
+| banked this wave | **none** — `IMPROVED=false`, `WINNER=null`, wave-local gain 1.0000 |
+| director-verified geomean vs oracle | 1.1636 (arithmetic 1.1866) |
+| tech-lead oracle-relative claim | 1.17653 |
+| correctness | pass |
+| timing basis | device (`GEAK_TIMING_RECEIPT all_primed=true`) |
+| rounds / budget | 5 rounds, **8 of 120** dispatches used |
+| `stopped_by` | `deep_explore_failed` (`deadline_hit=false`) |
+| wall clock | 4h 01m, 33 agents, 0 errors |
+| eval dir | `exp/team_dense_fp8_gemm_rowwise_20260831_162656_914334_984/dense_fp8_gemm_rowwise` |
+
+Seven engineer directions over three funded rounds (r1 ×3 source→asm, r3 ×3 asm, r5 ×1
+`deep_explore`); every one measured null or negative. The phase ladder advanced twice on the
+TechLead's stop gate (`phase1_source` → `phase2_asm` at r3, → `deep_explore` at r5) and the run
+ended the way the ladder says it should: a `deep_explore` round that banks nothing. Budget was
+never the binding constraint — 112 dispatches went unspent.
+
+Only 4 distinct directions over 7 issued (entropy 0.571): the search is repeating itself.
+
+#### The one measured win this wave declined to bank
+
+`r5_d0` built a new **128×64×128 (2×1)** rung for the long-K M≥256 corner, guarded by
+`blocks(128,64) >= 200 && k > kShortK(6144) && k % 128 == 0`. Engineer measured +2.3% on
+`prefill_m1024_down` (n=10/arm, 10/10 paired positive, t=6.36); the verifier independently
+reproduced **+3.0%** at n=6/arm with **non-overlapping sample sets** (cand 129.98–132.72 µs vs ctrl
+133.06–137.86 µs). Bit-exact on all 11 shapes, all gates green.
+
+It was filed `regression` because the suite metric cannot see it: the guard fires on exactly one of
+eleven shapes, so +3.0% there is **+0.27%** on an unweighted 11-case geomean against a measured
+session spread of 0.85–1.0% ptp. The `verified_geomean` 0.9973 sits under a stored baseline table
+the same-session *control* also could not reach (0.9966) — the ninth recurrence of oracle-denominator
+drift on this lane. Precedent says re-bank: the last time this pattern occurred (w5r4 `r4_d0`), the
+re-measurement came back **larger**, +4.4% → +7.8%, and it banked.
+
+Patch is staged and re-checked (`git apply --check` rc=0 against the current canonical):
+`exp/state_fp8_rowwise_20260827/pending_w6r5_prefill_m1024_down.diff`. Carry-forward scepticism:
+the constant `200` is unexplained and fires on one suite shape, so the *guard* reads shape-fitted
+even though the *mechanism* is supported by counters and non-overlapping latency distributions.
+
+#### Deliverable defect found by the director, and fixed
+
+The director flagged the wave `flagged` — not for correctness or policy (both clean), but because
+`final_patch.diff` shipped only `src/*` and omitted `gemm_wrapper.py`. Applying it to
+`KERNEL_PATH_ORIG` therefore reproduced a tree ~1.2% slower than the tree that was actually
+measured (director A/B: patch-as-delivered 1.1602 mean vs patch+wrapper 1.1742, B>A in both
+adjacent pairs, gap concentrated in decode). That accounts for essentially all of the 1.5%
+shortfall between 1.1636 and the tech lead's 1.17653, and for the apparent regression against
+relaunch #2's 1.1764 — **the program did not get slower; the patch got thinner.**
+
+Regenerated `final_patch.diff` post-run (original preserved as `final_patch.diff.director_flagged.bak`).
+Verified against a pristine copy of `KERNEL_PATH_ORIG`: `git apply -p1 --check` rc=0, apply rc=0,
+and the resulting tree reproduces the measured workspace exactly —
+`src/custom_fp8_gemm_hip.s` md5 `218ef54bfe8c307d0e07f3a478aad284`, `gemm_wrapper.py` identical,
+`oracle_wrapper.py` untouched. `kernel_loader.py` is byte-identical to the original and correctly
+absent from the patch. The 1.1636 headline is *not* re-measured after this fix — it should be
+re-timed at the top of the next wave, and is expected to land near 1.176.
+
+#### Tool defect found (round 4)
+
+`isa_signals.py keypoint` truncates a kernel span at its **first** `s_endpgm`. Every tiled
+instantiation has an early-exit `s_endpgm` ~29 lines in, so `windows_scored` was 1 — the kernarg
+prologue — on every hot kernel. Worked around with a line-count-preserving scratch copy
+(`windows_scored` 1 → 192, top window then agreed with the COMMANDMENT's named main loop).
+**PHASE=keypoint is blind on this lane's hot kernels until this is fixed.**
+
+#### Compliance receipts
+
+- `oracle_wrapper.py` unmodified — clean in `git status`, sha256
+  `1059f13d…c96036d0`, unchanged from the previous wave; lane `oracle_digest` constant at
+  `161ef808…8239e` across every verify agent in all 5 rounds.
+- All **5** `candidate_policy_scan.py` receipts list `oracle_wrapper.py` under `immutable`, and all
+  5 report **0 findings, 0 advisory**.
+- Regenerated `final_patch.diff` contains **zero** occurrences of rocBLAS / hipBLAS / hipBLASLt /
+  Tensile / Composable Kernel / MIOpen / aiter.
+- Knowledge: 2 learned cards cited (neither verified, neither became a winner); KB artifact written
+  as `dense_fp8_gemm_rowwise__triton__gfx942`, exp `20260831_202712_1e5ceb`.
+
+#### What the next wave should do first
+
+1. **Re-bank `r5_d0`** from `pending_w6r5_prefill_m1024_down.diff`, judged on its declared route at
+   n≥8/arm interleaved, with the suite as a tripwire only — not as the gate.
+2. Fix the suite-metric blindness that dropped it, or the lane will keep discarding real per-route
+   wins: a +3% on 1-of-11 is arithmetically unresolvable against 0.85–1.0% suite noise.
+3. Fix `isa_signals.py keypoint`'s `s_endpgm` truncation.
+4. Break the direction repetition — 4 distinct of 7 issued, and the schedule level (earliest-legal-seam
+   sink family) is closed on all five reachable loops.

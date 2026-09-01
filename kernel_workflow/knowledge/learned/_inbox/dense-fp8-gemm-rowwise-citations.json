@@ -1,0 +1,85 @@
+{
+  "run_id": "dense_fp8_gemm_rowwise-citations",
+  "date": "2026-08-31",
+  "kernel_names": [
+    "dense_fp8_gemm_rowwise"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "invert-the-xcd-round-robin-with-a-chunk-interleaved-workgrou-moe-grouped-gemm-gfx950-mixed.md",
+      "round": 1,
+      "direction": "r1_d0",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "a-hand-written-loop-has-to-out-schedule-not-out-structure-th-dense-gemm-gfx950-both.md",
+      "round": 3,
+      "direction": "r3_d1",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "a-fixed-order-a-a-control-measures-order-bias-and-then-hides-method-gfx950-n-a.md",
+      "round": 4,
+      "direction": "r4_d0",
+      "specialty": "memory",
+      "cited_then_verified": 1.0065,
+      "became_winner": false
+    },
+    {
+      "card": "per-rep-geomean-plus-a-two-sided-negative-control-method-gfx950-n-a.md",
+      "round": 4,
+      "direction": "r4_d0",
+      "specialty": "memory",
+      "cited_then_verified": 1.0065,
+      "became_winner": false
+    },
+    {
+      "card": "choose-the-non-temporal-hint-per-operand-not-per-kernel-attention-decode-gfx950-decode.md",
+      "round": 5,
+      "direction": "r5_d2",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "ask-whether-the-traffic-is-removable-before-you-tune-how-it--attention-decode-gfx950-decode.md",
+      "round": 5,
+      "direction": "r5_d2",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "buy-prefetch-depth-with-a-global-to-lds-dma-on-bandwidth-bou-attention-decode-gfx950-decode.md",
+      "round": 6,
+      "direction": "r6_d1",
+      "specialty": "memory",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "four-axes-that-stayed-closed-on-a-latency-floored-paged-deco-attention-decode-gfx950-decode.md",
+      "round": 6,
+      "direction": "r6_d1",
+      "specialty": "memory",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "six-axes-that-stayed-closed-on-a-graph-replay-timed-sparse-p-attention-gfx950-prefill.md",
+      "round": 6,
+      "direction": "r6_d1",
+      "specialty": "memory",
+      "cited_then_verified": 0,
+      "became_winner": false
+    }
+  ]
+}

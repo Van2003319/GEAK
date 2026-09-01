@@ -1,0 +1,29 @@
+{
+  "run_id": "dense_fp8_gemm_rowwise-citations",
+  "date": "2026-08-31",
+  "kernel_names": [
+    "dense_fp8_gemm_rowwise"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "gluon-register-staged-wide-k-mfma-for-fp16-dense-gemm-dense-gemm-gfx950-compute-bound.md",
+      "round": 1,
+      "direction": "r1_d2",
+      "specialty": "compute",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "a-hand-written-loop-has-to-out-schedule-not-out-structure-th-dense-gemm-gfx950-both.md",
+      "round": 3,
+      "direction": "r3_d2",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    }
+  ]
+}

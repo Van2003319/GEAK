@@ -131,3 +131,172 @@ an entry as equal in authority to a card.
 - **Evidence**: (a) round 3 (lane 15), `…/round_3/engineer_0/isa_reverify/`; (b) round 3,
   `…/round_3/engineer_1/worker_result.json` + whole-tree `-Rpass-analysis` diff in
   `…/round_3/engineer_1/verify/`.
+
+<!-- source run: dense_bf16_gemm_fused, gfx942, lane wave-6 rounds 1-9 (phase2_asm from round 5), 2026-08-31 -->
+<!-- archive root: /home/yxh/GEAK_asmopt/exp/team_dense_bf16_gemm_fused_20260831_073702_587519_1211/dense_bf16_gemm_fused -->
+
+## A full memory drain is only worth relaxing when DESTINATION REUSE caused it
+
+- **Signal**: `waits.drain_ratio == 1.0`, `waits.relaxed == 0` — the confirm condition of
+  [all_memory_waits_drain](rule_cards/all_memory_waits_drain.md) — **plus** the discriminator this run
+  added: read the destination operands of the loads the drain guards. The rule fires only when N loads
+  in the chain write the **same** register quad (the allocator's serialization surfacing as a wait).
+- **Change**: give the loads distinct destinations first (rotate depth-4, or add a second staging set),
+  then and only then replace `vmcnt(0)` with a staircase. A counter edit alone on a reused destination
+  is a no-op or a correctness break.
+- **Outcome**: **realized and confirmed** where destinations were reused — 16 serial
+  `global_load_dwordx4` on one quad → 4 quads + `vmcnt(3)`, **+2.44%** on the route, zero resource
+  change; and a second-destination-set depth-2 staging on another body, in-loop `vmcnt(0)` 2→0,
+  **−2.69%** on its route, reproduced five times. **Realized and null** every time destinations were
+  already distinct: four separate bodies, all bit-exact, all resource-free, all inside their route MDE
+  (+0.24%, +0.37%, −0.03%, −0.13%).
+- **Applies when**: gfx9xx, the drained loads share a destination register range, and the consumer is
+  in the same block. The check costs one `grep` over the window and is strictly cheaper than a build.
+- **Does NOT apply when**: the loads already have distinct destinations and the drain sits in the
+  shadow of ≥8 MFMA — then the wait is already covered and relaxing it buys nothing. Also does not
+  apply where the body is at the memory roofline (see the roofline entry below) or where the wait is a
+  **pre-barrier** drain protecting another wave group's panel re-entry, which is a data race to relax,
+  not a conservatism.
+- **Evidence**: wave-6 rounds 1 and 5, `…/round_5/engineer_2/` (patch, `runs/`, `objs/`) for the win;
+  null counterparts in `…/round_5/engineer_1/arm1.s`+`arm2.s` and `…/round_7/engineer_1/armA_reduce8.s`.
+
+## ANTI-SIGNAL — moving VMEM across an `s_barrier` re-synchronises waves and costs ~1-1.6%
+
+- **Signal**: a mainloop with **two or more `s_barrier` per K stage** and symmetric waves, where a VMEM
+  issue or its `s_waitcnt` sits between the barriers with visible slack. Every latency heuristic
+  (`waits.drain_ratio`, low cover before the consumer) says to hoist it earlier.
+- **Change**: hoist the wait above the first barrier; or split the load into its own block so the issue
+  crosses the barrier; or stage it a full iteration early past both barriers.
+- **Outcome**: **realized and a regression, on three structurally unrelated kernels.** Wait-hoist
+  **+1.007%** (t=+3.24); issue-hoist **+1.580%** (t=+7.71, 16/16 legs, two dies within 0.01%);
+  both together an **exact null** (−0.087%, dies opposite in sign) — the cancellation proving each is a
+  real, oppositely-directed shift rather than noise. On a second kernel a full-iteration prefetch across
+  the barrier cost **+0.38%**, same sign on both dies. All arms bit-exact, all resource-neutral.
+- **Applies when**: the barriers are what *staggers* the waves' LDS-write and L2 traffic. Released
+  together, the four waves issue as one burst and the LDS write port / L2 serialises them; released
+  behind their own VMEM returns they pipeline. Treat barrier count per stage as scheduling structure,
+  not just synchronisation, before funding any placement move.
+- **Does NOT apply when**: the stage has a single barrier, the CTA is one wave, or the panel is
+  double-buffered so the second barrier is gone. Nor does it forbid *depth* changes that keep issue
+  order relative to the barriers unchanged.
+- **Evidence**: wave-6 round 7 `…/round_7/engineer_2/armA.s`,`armC.s`,`runs/`,`runs2/`; independent
+  replication wave-6 round 8 `…/round_8/engineer_0/candidate_skinny_depth2.s`, `…/round_8/engineer_0/runs/`.
+
+## ANTI-SIGNAL — `narrow_lds_access` on a producer store path: widening to `ds_write_b128` lost
+
+- **Signal**: `lds_access_bytes.max < 16` with many LDS ops — the confirm condition of
+  [narrow_lds_access](rule_cards/narrow_lds_access.md), here six `ds_write2_b64 … offset1:1` writing
+  contiguous 16 B-aligned pairs, i.e. a textbook widening candidate.
+- **Change**: convert each pair to a single `ds_write_b128` (alignment proven legal by a correctness
+  PASS on the built binary).
+- **Outcome**: **realized and a regression** — **+3.26%** on the anchor and **+0.96%** on a relaxed-wait
+  variant of the same body, with resource deltas 0/0/0/0.
+- **Applies when**: the LDS *store* side of a producer that shares its cycle window with a consumer's
+  `ds_read2_b64` traffic. The split 8-byte pair spreads bank pressure across cycles that one 16 B/lane
+  access collides on; instruction count is not the metric on this path.
+- **Does NOT apply when**: the narrow access is on the **read** side, or nothing else is contending for
+  LDS in the same window — the card's original regime. This entry bounds the card on stores; it does
+  not retire it.
+- **Evidence**: wave-6 round 8, `…/round_8/engineer_1/` (`work/`, `runs/`, `verify/`).
+
+## ANTI-SIGNAL — a scratch spill can be load-bearing; check what counts its reloads before deleting it
+
+- **Signal**: `resources.scratch_bytes > 0` with a nonzero `vgpr_spill_count` — the confirm condition of
+  [spill_to_scratch](rule_cards/spill_to_scratch.md).
+- **Change**: two things must be checked before an arm exists. (1) **Price it**: the reloads executed
+  per output tile against the mainloop's dynamic instruction count. Here 13 scratch ops against ~16.7k
+  mainloop instructions is a **0.07% dynamic share**, so deleting the spill *entirely* was worth ~0.1%
+  against a 1.1% route MDE — the direction was unfundable before it was built. (2) **Trace the
+  counter**: a downstream `s_waitcnt vmcnt(N)` may be counting the *reloads*, not global loads.
+- **Outcome**: **realized and a regression, −0.97%** from a pure re-encode (26 scratch ops → 14 by
+  coalescing 12 `dwordx2` into `dwordx4`/`x3`), with every nameplate resource unchanged; six swizzled
+  wide scratch reads drain more slowly than twelve narrow ones, and a downstream `vmcnt` must retire
+  all of them. Separately, **removing** the spill silently turned that entry `vmcnt` into a no-op, left
+  a pointer register consumed as garbage, and produced `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`.
+- **Applies when**: any gfx9xx body where the spill sites and their reload block are separated by a
+  large scheduled region, and the block after the reloads opens with a `s_waitcnt vmcnt(N>0)`.
+- **Does NOT apply when**: the spill is inside the hot loop (then the dynamic share is large and the
+  card's direction is live), or the register file has genuine free headroom — full elimination here
+  needed 23 free VGPRs against a census showing 0, under a VGPR cap that was a *launch* requirement
+  rather than an occupancy preference.
+- **Evidence**: wave-6 round 6, `…/round_6/engineer_1/` (`cand.s`, `base_r5d2.s`, `logs/`, `runs/`);
+  the fault signature at wave-6 round 4, `…/round_4/engineer_1/`.
+
+## ANTI-SIGNAL — at or above the DRAM roofline, MLP and non-temporal edits are null by construction
+
+- **Signal**: a body flagged latency-exposed by wait counters (here ~85% `wait_any`) with the purest
+  possible destination-reuse pattern — 4 `global_load_dwordx4` into one quad, four serialised
+  `vmcnt(0)`, one load in flight.
+- **Change**: **compute effective bytes/second for the dispatch first** (bytes moved ÷ kernel time from
+  `rocprofv3`). If it is at or above HBM peak, the stream is being served from LLC/Infinity Cache and
+  the wait share is bandwidth *queueing*, not per-wave latency exposure.
+- **Outcome**: 101.4 MB in 14.9 µs = **6.81 TB/s effective, above HBM peak**. Rotating to four distinct
+  destinations with a 3/2/1/0 staircase (bit-exact, occupancy-free) measured **−0.47% on the kernel
+  itself**, inside the control's own leg spread. Adding per-operand `nt` hints produced a **real ISA
+  delta** (nt-tagged loads 116→124 on the linked `.so`) and an **exact null** (−0.03%): a non-temporal
+  hint can only ask the cache to discard what it is already hitting in.
+- **Applies when**: split-K reduce kernels, epilogue passes, and any consumer reading a plane a producer
+  wrote microseconds earlier in the same dispatch chain — architecturally single-touch *within* the
+  kernel, but a re-touched tile at the LLC level.
+- **Does NOT apply when**: the effective rate is well under HBM peak — a sibling body at **2.28 TB/s
+  (43% of peak)** genuinely did have latency headroom, and the destination check was the right one to
+  run there (it lost for a different reason: see the barrier entry).
+- **Evidence**: wave-6 round 7, `…/round_7/engineer_1/armA_reduce8.s`, `armB_reduce8_4.s`, `runs/`.
+
+## COMPILER PRECONDITION — source load placement and `sched_barrier` cannot control cross-backedge rotation
+
+- **Signal**: an in-loop `s_waitcnt vmcnt(0)` that the source says should be covered, where the emitted
+  schedule shows exactly **one** load hoisted above the back edge.
+- **Change**: the AMDGPU backend's machine-sink / loop-rotation hoists one load across the back edge
+  regardless of where the source issues it; splitting the MFMA body to place the load between halves
+  only relocates **which** stream pays. `__builtin_amdgcn_sched_barrier(0)` is a *within-region* fence
+  and cannot stop it. The cover budget per stage is set by the **barrier structure**, not by source
+  placement.
+- **Outcome**: **refuted** — the split variant read −0.27% against −3.12% for the unsplit arm in the
+  same interleaved frame, and a second split variant **disassembled identically** to the first.
+- **Applies when**: any HIP mainloop being software-pipelined from the source side on gfx9xx; use it as
+  a reason to do the pipelining **in assembly** (or to change the barrier structure) rather than to
+  spend arms on source-side placement.
+- **Does NOT apply when**: the loop is fully unrolled (no back edge to rotate across), or the edit
+  changes the number of barriers per stage — that does move the budget.
+- **Evidence**: wave-6 round 2, `…/round_2/engineer_0/`; the barrier-structure half separately refuted
+  at wave-6 round 3, `…/round_3/engineer_0/`.
+
+## COMPILER PRECONDITION — the VGPR high-water mark is owned by the loop; epilogue edits cannot free depth
+
+- **Signal**: `resources.vgpr_count` at or just under a granulation step (here 126 of a 128 cap) on a
+  body where a deeper pipeline needs ≥10 more registers, with an epilogue full of foldable address
+  vectors that looks like the cheap source of them.
+- **Change**: before funding the "enabler", **census which block owns the peak**. Map the peak index to
+  its defining block and count how many of the allocated registers the loop touches.
+- **Outcome**: **refuted for zero GPU time.** Folding 20 `v_lshl_add_u64` epilogue address vectors into
+  the stores' 13-bit immediates worked exactly as described (epilogue 282→261, bit-exact, correctness
+  PASS) and freed **zero** registers: `next_free_vgpr` 126→126, because the peak was an MFMA operand set
+  *inside* the loop while the epilogue's own peak was 32 registers lower. The loop touched 122 of 126
+  indices — there was no 10-register hole anywhere in the body. Timed anyway: **−0.011%**, dies opposite
+  in sign, a true zero on the third measurement of the same fold.
+- **Applies when**: any register-pressure "enabler" argument on a gfx9xx kernel; the census is a symbol
+  scan and costs no build.
+- **Does NOT apply when**: the peak genuinely lives in the epilogue, or the body is not VGPR-pinned. And
+  do **not** buy the depth by raising `next_free_vgpr` past the granule — 126 granulates to 128
+  regs/lane = 4 waves/SIMD here, 136 would give 3.
+- **Evidence**: wave-6 round 6, `…/round_6/engineer_0/` (`asm_store/`, `runs/`, `per_case.json`).
+
+## Charge a pipelining arm for its STRUCTURE with a control that realises no extra distance
+
+- **Signal**: a depth-2 (or deeper) staging arm on a mainloop that requires a **2× unroll** to alternate
+  staging parity — visible in the ISA as a duplicated MFMA tail, an extra branch pair, and +8 VGPR.
+- **Change**: build a **structure-only control**: the same unroll and the same extra destination quads,
+  with every loop-head wait left at `vmcnt(0)` so **no additional distance is realised**. The delta
+  between control and parent is the structural tax; the delta between arm and control is what the
+  distance is actually worth.
+- **Outcome**: the depth-2 arm lost 2.2%/4.3% on two dies; the structure-only control lost **1.9%/1.2%**
+  — i.e. the unroll was essentially the whole loss and the extra distance was worth **zero**. Without the
+  control the round would have concluded "prefetch distance does not help here", which is the wrong
+  lesson: the correct one is that any future pipelining scheme on this body must avoid paying for a 2×
+  unroll (e.g. by reusing an already-dead quad for the alternate parity).
+- **Applies when**: any register-staged pipelining arm whose parity alternation forces an unroll — this
+  is the standard shape of depth-2 staging in hand-written assembly and in Gluon-style source pipelines.
+- **Does NOT apply when**: the parity is handled by existing double-buffered addressing so the unroll is
+  not introduced by the arm; then arm-vs-parent is already the clean comparison.
+- **Evidence**: wave-6 round 8, `…/round_8/engineer_2/` (`work/`, `runs/`, `verify/`).
