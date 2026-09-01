@@ -78,6 +78,10 @@ const KNOWN_ARGS = new Set([
   // be simulated from outside. Apostrophes are avoided inside this block on purpose -- the extractor
   // in scripts/lane_args.py reads it with a quote-delimited regex.
   'deadline_epoch', 'no_stop_s', 'max_forced_replans',
+  // Ladder ENTRY override. Was an env var read via process.env, which cannot work: a workflow
+  // script has no `process`, so the read threw at init and killed the lane before its first
+  // agent. An argument is the only channel that crosses into the sandbox.
+  'start_phase',
   // Dispatcher-owned, forwarded verbatim, unused by the worker.
   'backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script',
 ]);
@@ -135,9 +139,24 @@ const MIN_IMPROVE = (() => {
 // at 1.0 its recovery phase is invisible -- no patch saved, no verify, `winner` null every round. The
 // COMMIT gate is separate and still requires beating `cumulative` by MIN_IMPROVE, so a sub-baseline
 // candidate can be TRACKED but never BANKED.
+// The screen is one sentence: a candidate is worth measuring if it runs at least
+// CANDIDATE_FLOOR times as fast as the version we already have. It is compared against
+// `vsIncumbent()` below, which the orchestrator computes from raw milliseconds, NOT against the
+// engineer's own `speedup_geomean`.
+//
+// That distinction is the whole fix. `speedup_geomean` has no denominator pinned by the schema:
+// on dense_fp8_gemm_rowwise the engineers report against the oracle (~1.19), on
+// dense_bf16_gemm_fused's phase2 rounds they report against an in-session control arm (~1.003).
+// The floor used to be an absolute compared against that field, so it meant different things on
+// the two lanes and went stale whenever one of them climbed. Set to 1.2 on 2026-08-27 against a
+// bf16 incumbent reading 1.5804 vs rocBLAS, it survived the lane's switch to control arms and
+// then silently compared 1.003 against 1.2 forever: 28 of 40 patch-bearing engineer slots over
+// seven waves were never verified at all. Comparing raw times removes the ambiguity at the source
+// -- there is nothing left to mis-set, and no cold-start special case, because at a cold start the
+// incumbent IS the cold seed and a candidate near it scores ~1.0 here.
 const CANDIDATE_FLOOR = (() => {
-  const v = parseFloat(A.candidate_floor != null ? A.candidate_floor : 1.0);
-  return Number.isFinite(v) && v > 0 ? v : 1.0;
+  const v = parseFloat(A.candidate_floor != null ? A.candidate_floor : 0.8);
+  return Number.isFinite(v) && v > 0 ? v : 0.8;
 })();
 // Rendered into the Optimize prompt, where `${1.0}` would stringify to "1" and silently reword a
 // prompt that has always said "geomean>1.0". Keeps the default run byte-identical.
@@ -1919,6 +1938,30 @@ const bench = await agentT(
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
 const BASELINE_PER_CASE = bench.baseline_per_case;
+// "How fast is this candidate compared to the version we already have", as an unweighted geomean
+// over the routes both sides reported. Both halves are absolute milliseconds: the incumbent's from
+// THIS wave's baseline run (measured on CANONICAL at the top of the run) and the candidate's from
+// its own per_case. So the answer does not depend on which denominator the reporter chose for its
+// `speedup` field, which is the ambiguity that made an absolute floor unsettable.
+//
+// Cross-invocation drift on an unchanged tree is 1.5-3% on this box. That matters to the COMMIT
+// gate, which is why routeGate insists on a same-session control arm; it does not matter here,
+// where the bar carries 20% of slack. Returns null when no route lines up, and the callers treat
+// null as PASS: a screen that cannot see is not entitled to refuse.
+const INCUMBENT_MS = new Map((BASELINE_PER_CASE || [])
+  .map(r => [String((r && (r.name || r.test_case_id)) || ''), Number(r && r.optimized_ms)])
+  .filter(([k, v]) => k && Number.isFinite(v) && v > 0));
+const vsIncumbent = (o) => {
+  const rows = (o && Array.isArray(o.per_case)) ? o.per_case : [];
+  const ratios = [];
+  for (const c of rows) {
+    const inc = INCUMBENT_MS.get(String((c && (c.name || c.test_case_id)) || ''));
+    const cand = Number(c && c.optimized_ms);
+    if (Number.isFinite(inc) && inc > 0 && Number.isFinite(cand) && cand > 0) ratios.push(inc / cand);
+  }
+  if (!ratios.length) return null;
+  return Math.exp(ratios.reduce((a, v) => a + Math.log(v), 0) / ratios.length);
+};
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
@@ -2080,7 +2123,44 @@ let bestSeen = 0;            // best verified geomean of any candidate, committe
 // it -- a phase that started life already one round from its own exhaustion would get less search
 // than the one it replaced, which is backwards.
 let phaseStall = 0;
-let searchPhase = PHASE_SOURCE;
+// The ladder's ENTRY state. Normally phase1_source; `GEAK_START_PHASE` can move it.
+//
+// Added 2026-08-31. The ladder escalates on `phaseStall >= MAX_NO_IMPROVE`, i.e. it INFERS that a
+// phase is exhausted from four stalled rounds. That inference is right when nothing better is
+// available, and wasteful when the lane has already proved the same thing by argument -- the fp8
+// lane's steady state sits at its instruction floor while running 1.68-3.37 waves/SIMD, so the
+// remaining loss is scheduling, which source cannot express, and its own suggest_next names phase2
+// as the next seat. Four stalled rounds would be the expensive way to rediscover that.
+//
+// Only the ENTRY moves. `advancePhase`, `phaseStall` and MAX_NO_IMPROVE are untouched, so once
+// entered, phase2 is judged by the same rules as if the ladder had walked there.
+//
+// An unrecognised value falls back to phase1_source rather than throwing, matching how
+// `isa_evidence` handles a bad mode -- but unlike that one it cannot silently mean "off", because
+// the fallback IS the normal path.
+// Read the ENTRY override from the lane argument first.
+//
+// This was `process.env.GEAK_START_PHASE` when it was added on 2026-08-31, and that could never
+// have worked from a workflow run: workflow scripts execute in a sandbox with no Node globals, so
+// the read threw `ReferenceError: process is not defined` at script init -- before the first agent,
+// taking the whole lane down. Measured on asmopt_bf16_20260827, which lost a 51-minute wave to it.
+// The override file was VISIBLE and the launcher exported the variable, so from the outside the
+// feature looked wired up; it was the sandbox boundary that ate it.
+//
+// `run_lane.sh` still exports GEAK_START_PHASE, so the env stays as a fallback for any non-sandbox
+// invocation, behind a typeof guard that cannot throw.
+const START_PHASE_ENV = (typeof process !== 'undefined' && process && process.env)
+  ? String(process.env.GEAK_START_PHASE || '')
+  : '';
+const START_PHASE_RAW = String(
+  A.start_phase != null && String(A.start_phase).trim() !== '' ? A.start_phase : START_PHASE_ENV,
+).trim().toLowerCase();
+const START_PHASE_SRC = (A.start_phase != null && String(A.start_phase).trim() !== '')
+  ? 'start_phase'
+  : 'GEAK_START_PHASE';
+const START_PHASE = PHASE_ORDER.includes(START_PHASE_RAW) ? START_PHASE_RAW : PHASE_SOURCE;
+const START_PHASE_FORCED = START_PHASE !== PHASE_SOURCE;
+let searchPhase = START_PHASE;
 // How many times the ladder has come back around to the source phase. Each cycle after the first
 // runs on a tree a deep round rewrote, so "round 12" alone does not say what was being searched.
 let cycle = 1;
@@ -2088,7 +2168,15 @@ let cycle = 1;
 // that ran out of phases and a lane that ran out of budget look identical in a report that only
 // says "stopped".
 let stopReason = '';
-const phaseLog = [{ phase: PHASE_SOURCE, entered_round: 1, cycle: 1, reason: 'start' }];
+const phaseLog = [{
+  phase: START_PHASE, entered_round: 1, cycle: 1,
+  // The reason string has to say the entry was forced. Recording 'start' while running phase2
+  // would make the run's own history contradict the run.
+  reason: START_PHASE_FORCED
+    ? `start FORCED via ${START_PHASE_SRC}=${START_PHASE_RAW} (ladder entry moved; `
+      + `phase1_source was skipped, not exhausted)`
+    : 'start',
+}];
 
 // Hand the search to the next state. Used from BOTH triggers -- the planner reporting the level
 // finished, and the stall backstop -- so the two cannot drift into doing different things.
@@ -2129,6 +2217,18 @@ const history = { insights: [], ledger: [], asm_ledger: [], rounds: [], bottlene
 // the round loop). Fed to update_experience and returned to the caller: a driver aggregating these
 // is how anyone notices the KB has been cited fifty times and never once carried a round.
 const citations = [];
+// The phase2 twin, and it answers the one question nothing else in this lane asks: **is the keypoint
+// localiser any good?** `_KEYPOINT_WEIGHTS` in `isa_signals.py` is a hand-written table of
+// per-bottleneck-class weights, so every phase2 round is planned on a static hypothesis about where
+// time goes that no measurement has ever been joined against. One row per keypoint the localiser
+// emitted, joined against what the engineers actually measured in that window.
+//
+// Unlike `citations` this join is INFERRED rather than declared, and that is sound here for a reason
+// that does not hold there: an assembly ledger row carries the window identity (kernel + block +
+// ordinal + fingerprint), so which keypoint an edit landed on is reconstructible from the output. A
+// learned card is not -- nothing downstream can tell which card the planner read -- which is why that
+// one has to be self-reported and this one does not.
+const keypointCitations = [];
 
 // Finding (69). The post-build policy receipt, checked rather than assumed.
 // See POLICY_SUMMARY_SCHEMA for why this is a summary and not the file.
@@ -2621,6 +2721,10 @@ if (setup.resumed && setup.prior_state) {
   // banked `.s` in its canonical tree, so an engineer continuing from that assembly with none of
   // the window verdicts behind it would re-run experiments the previous wave already paid for.
   if (Array.isArray(ps.asm_ledger)) history.asm_ledger = ps.asm_ledger;
+  // Carried for the same reason as `asm_ledger`, and it matters more: a per-cell rate needs several
+  // attempts behind it and one wave rarely supplies them. Without this the efficacy question resets
+  // every wave and can never be answered -- which is the state the lane was in before this existed.
+  if (Array.isArray(ps.keypoint_citations)) keypointCitations.push(...ps.keypoint_citations);
   if (ps.bottleneck_now) history.bottleneck_now = ps.bottleneck_now;
   if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) {
     log(`  [resume] NOT importing prior_state.best_per_case (${ps.best_per_case.length} rows): those are ` +
@@ -2959,6 +3063,11 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
   // `committedThisRound` is "the canonical tree actually moved". They came apart twice in wave 2 and
   // the history said only the first.
   let committedThisRound = false;
+  // The keypoints this round was planned on, captured HERE rather than read off `profileSummary` at
+  // the efficacy join below. A committed round REPLACES `profileSummary` wholesale with a fresh
+  // reprofile, and the keypoints go with it -- so a join that read the live variable would see zero
+  // keypoints on exactly the rounds that improved, i.e. it would be blind to every success.
+  let roundKeypoints = [];
   const remaining = BUDGET - dispatched;
   phase('Optimize');
 
@@ -3152,6 +3261,7 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
       { phase: 'Optimize', label: `profile_engineer:keypoint r${round}`, schema: PROFILE_SCHEMA });
     const found = located && Array.isArray(located.keypoints) ? located.keypoints : [];
     profileSummary = { ...(profileSummary || {}), keypoints: found };
+    roundKeypoints = found;
     if (found.length) {
       log(`  [phase2] ${found.length} keypoint(s) localised: `
         + found.map(k => `${k.kernel || '?'}@${k.block || '?'}+${k.ordinal_in_block}`
@@ -3509,8 +3619,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // cannot stat the file from the workflow sandbox, so the "is there actually a patch" decision is
       // delegated to verify, which returns apply_failed on an absent/empty patch — dropped by the
       // `verified` filter below, i.e. the same outcome as skipping, but with no false loss.
-      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR);
+      // ...and never when the engineer says it saved a patch. `patch_file` is its own statement
+      // that a diff is on disk (ENG_SCHEMA); the workflow sandbox cannot stat the file. A self
+      // report is not entitled to suppress an independent measurement, and reading one as if it
+      // were a measurement is what cost this lane 28 of 40 patch-bearing slots.
+      const claimsPatch = !!(eng && typeof eng.patch_file === 'string' && eng.patch_file.trim());
+      // Raw-milliseconds ratio against the incumbent, not the engineer's own `speedup_geomean`.
+      // null (nothing lined up) reads as PASS.
+      const engVsInc = vsIncumbent(eng);
+      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !claimsPatch
+        && engVsInc !== null && !(engVsInc > CANDIDATE_FLOOR);
       if (trustworthyBelowBaseline) {
+        log(`Round ${round} dir ${d.id}: skipping verify -- self-measured `
+          + `${engVsInc.toFixed(4)}x the incumbent, under the ${CANDIDATE_FLOOR} screen, and no `
+          + 'patch_file was claimed.');
         return { d, eng, ver: null };
       }
       const recovered = !eng || eng.status === 'failed';
@@ -3748,7 +3870,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         + `${metricReason || isaReason || asmReason}`);
       return false;
     }
-    return primSpeedup(r.ver) > CANDIDATE_FLOOR;
+    // Same screen, same currency: milliseconds against the incumbent, so admission cannot be
+    // decided by a denominator the schema never pinned. null (nothing lined up) reads as PASS;
+    // the real decision is judgeCandidate -> routeGate immediately below.
+    const verVsInc = vsIncumbent(r.ver);
+    return verVsInc === null ? true : verVsInc > CANDIDATE_FLOOR;
   });
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -4162,6 +4288,69 @@ matter how the rest of the run looked.`,
     advancePhase(escalationReason(false, phaseStall, MAX_NO_IMPROVE), round);
   }
 
+  // --- did the localiser point at windows that paid? -----------------------
+  // The keypoint score is a HYPOTHESIS -- static stall proxies read off the instruction stream, not a
+  // measurement -- and this is the only place in the lane where it can be checked. Join every keypoint
+  // the localiser emitted against the rows the engineers returned for that window, so "the scorer
+  // ranked this window first on four rounds and nothing there ever paid" becomes a number instead of
+  // an impression.
+  //
+  // Placed BEFORE the memory step on purpose. `citations` can sit after it because the learned KB is
+  // only settled at the end of the lane; this one has to reach `update_memory`, because that is the
+  // step that writes STATE.json and therefore the only route by which a rate survives into the next
+  // wave.
+  if (roundPhase === PHASE_ASM && roundKeypoints.length) {
+    const rows = clean.flatMap(r => (r.eng && Array.isArray(r.eng.asm_ledger_rows)
+      ? r.eng.asm_ledger_rows.map(row => ({ row, dir: r.d.id })) : []));
+    const fpHead = (f) => (Array.isArray(f) ? f.slice(0, 3).join('|') : '');
+    roundKeypoints.forEach((k, i) => {
+      // Exact (kernel, block, ordinal) first, then a fingerprint-head fallback. The engineer is told
+      // to RE-LOCATE by fingerprint after its own first edit moves every line below it, so reporting a
+      // different ordinal for the same window is correct behaviour rather than an error -- and without
+      // the fallback every relocated window would read as untried and the scorer would look worse
+      // than it is. Which matcher fired is recorded, so a reader can discount a weak join.
+      let matchedBy = '';
+      let hit = rows.filter(x => x.row.kernel === k.kernel && x.row.block === k.block
+        && x.row.ordinal_in_block === k.ordinal_in_block);
+      if (hit.length) {
+        matchedBy = 'exact';
+      } else if (fpHead(k.fingerprint)) {
+        hit = rows.filter(x => x.row.kernel === k.kernel
+          && fpHead(x.row.fingerprint) === fpHead(k.fingerprint));
+        if (hit.length) matchedBy = 'fingerprint';
+      }
+      const verdicts = hit.map(x => String(x.row.verdict || ''));
+      keypointCitations.push({
+        round, kernel: k.kernel || '', block: k.block || '',
+        ordinal_in_block: k.ordinal_in_block,
+        // Rank AND score. A scorer can be right about the ORDER and wrong about the MAGNITUDE; those
+        // are separate defects with separate fixes, and a single number hides which one it has.
+        rank: i + 1, score: k.score,
+        // The five stall proxies the window scored on. This is the join key for any cross-kernel
+        // aggregation -- a fingerprint dies at the next recompile, an evidence SHAPE does not.
+        evidence: k.evidence || null,
+        // `worked: false` is NOT evidence against the localiser: nobody tried the window, so it says
+        // nothing either way. Same three-state discipline `citations` uses -- a loss and an absence of
+        // evidence must never land in the same bucket.
+        worked: hit.length > 0, matched_by: matchedBy,
+        edits_measured: hit.length, verdicts,
+        any_confirmed: verdicts.includes('confirmed'),
+        broke_correctness: verdicts.includes('broke-correctness'),
+        // The same standing test as `citations`: winner AND improved. A round winner that did not beat
+        // the incumbent advanced nothing, and crediting the window it came from would let the scorer
+        // bank a confirmation for a flat round.
+        became_winner: !!(winner && improved && hit.some(x => x.dir === winner.id)),
+      });
+    });
+    const thisRound = keypointCitations.filter(x => x.round === round);
+    const laneWorked = keypointCitations.filter(x => x.worked);
+    log(`  [phase2] keypoint efficacy r${round}: ${thisRound.filter(x => x.worked).length}/`
+      + `${thisRound.length} keypoint(s) worked, `
+      + `${thisRound.filter(x => x.any_confirmed).length} produced a confirmed edit. Lane to date: `
+      + `${laneWorked.filter(x => x.any_confirmed).length}/${laneWorked.length} worked window(s) paid`
+      + `${laneWorked.length < 4 ? ' (too few to read as a rate yet)' : ''}.`);
+  }
+
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
     roleAgent('tech_lead', 'update_memory',
@@ -4193,6 +4382,17 @@ matter how the rest of the run looked.`,
         ASM_CONTINUATION: clean.map(r => ({ id: r.d.id,
           continued_from: (r.eng && r.eng.continued_from) || 'unreported' })),
       } : {}),
+      // The localiser-efficacy join, lane-cumulative and INCLUDING this round. Two duties attach to
+      // it and they are different: say something about the SCORER in `insights` once there is enough
+      // behind it, and carry the array into STATE.json verbatim so the next wave inherits the sample.
+      // The orchestrator owns the array -- do not edit rows, and do not return it.
+      //
+      // Gated on NON-EMPTY rather than on `roundPhase`, and that is the whole point of the placement:
+      // a phase1 round that followed a phase2 one would otherwise be handed no copy of the array and
+      // would write a STATE.json without it, silently discarding every window the assembly rounds
+      // measured. `asm_ledger` avoids the same trap only because it rides inside `PRIOR_HISTORY`. On a
+      // lane that never reaches phase2 the key is absent and the prompt is byte-identical to before.
+      ...(keypointCitations.length ? { KEYPOINT_CITATIONS: keypointCitations } : {}),
       // (127). STATE.json's `cumulative` is the LANE total vs the original seed, so it must be
       // written from CUMULATIVE_VS_SEED -- never from CUMULATIVE_SPEEDUP, which is wave-local and
       // would overwrite a 4.35x lane history with a 1.01x round number on the next resume.
@@ -4545,6 +4745,10 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimar
           // The comment that used to sit here said the curator merges them, which stopped being
           // true when that arithmetic moved into code.
           CITATIONS: citations,
+          // phase2's twin, same contract: CONTEXT ONLY. It is here because a localiser that has
+          // pointed at ten windows and paid on none is itself a finding worth a `caution:` on the
+          // relevant card, and this agent is the only one that writes cards.
+          KEYPOINT_CITATIONS: keypointCitations,
           PROFILE: profileSummary,
           REPORT_PATH: report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
         }),
@@ -4710,6 +4914,11 @@ return {
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
   // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
   learned_citations: citations,
+  // phase2's twin: did the keypoint localiser point at windows that paid? Empty on a lane that never
+  // reached phase2, which is itself the honest answer rather than a missing field. A driver
+  // aggregating these across lanes is how `_KEYPOINT_WEIGHTS` stops being a table nothing ever
+  // checked -- one lane can rarely supply enough windows to read a rate.
+  keypoint_citations: keypointCitations,
   // Rounds where the planner overran the KB budget. A KB that binds every round is one that has taken
   // over planning, which is the regression this budget exists to catch.
   kb_cap_bound_rounds: kbCapBound,

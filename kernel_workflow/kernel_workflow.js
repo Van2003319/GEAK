@@ -61,6 +61,10 @@ const KNOWN_ARGS = new Set([
   'kb_mode', 'kb_store_dir', 'kb_remote', 'kb_framework_version',
   'held_out', 'box_quiet', 'sol_shapes',
   'deadline_epoch', 'no_stop_s', 'max_forced_replans',
+  // Ladder ENTRY override, forwarded to the worker. Must be admitted here too: the optimize
+  // path forwards {...A} verbatim, so an argument the worker accepts and the dispatcher does
+  // not is refused before it ever reaches the worker.
+  'start_phase',
 ]);
 {
   const unknown = Object.keys(A).filter(k => !KNOWN_ARGS.has(k));
