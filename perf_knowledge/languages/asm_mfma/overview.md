@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp8_e4m3, fp8_e5m2, fp6_e2m3, fp6_e3m2, fp4_e2m1, int8]
 regimes: [both]
 status: sota
-updated: 2026-06-08
+updated: 2026-09-01
 sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
@@ -20,10 +20,19 @@ This is the foundation under CK / ck_tile / rocWMMA / Triton / TileLang. The **f
 the AITER library's hot paths — are **hand-written assembly** by a handful of experts; everything else is
 a tradeoff of editability vs that ceiling (HipKittens, arXiv 2511.08083). You reach this level for: the
 last 10–20% over a library, a fused op no template expresses, or to diagnose why a higher-level kernel
-underperforms. The three sub-levels: **MFMA intrinsics** (`__builtin_amdgcn_mfma_*`, scheduler-friendly,
-the default), **inline `asm volatile`** (hand-scheduled micro-loops), and **raw `.s`** (peak
-micro-kernels). See [mfma_intrinsics.md](mfma_intrinsics.md), [raw_asm.md](raw_asm.md),
+underperforms. The three **authoring** sub-levels: **MFMA intrinsics** (`__builtin_amdgcn_mfma_*`,
+scheduler-friendly, the default), **inline `asm volatile`** (hand-scheduled micro-loops), and **raw
+`.s`** (peak micro-kernels). See [mfma_intrinsics.md](mfma_intrinsics.md), [raw_asm.md](raw_asm.md),
 [register_alloc.md](register_alloc.md), [pitfalls.md](pitfalls.md).
+
+A fourth activity is not authoring at all: **editing the assembly the compiler already emitted** and
+reassembling around the edit. It has a different economics (a handful of moved instructions, no
+maintenance of a hand-written kernel), a different failure mode (the edit is real and changes nothing
+because it was not the binding term), and a measured base rate near 13%. See
+[editing_compiled_asm.md](editing_compiled_asm.md) for the pre-flight gates,
+[edit_patterns.md](edit_patterns.md) for the catalogue,
+[hazards_and_waitcnt.md](hazards_and_waitcnt.md) for the ISA rules you become responsible for once
+the compiler is out of the loop, and [asm_edit_verify.md](asm_edit_verify.md) for the receipt chain.
 
 ## Core concepts — the CDNA3 execution model (MI300X)
 | Unit | count/size | notes |
@@ -53,6 +62,7 @@ for the async load queue (HipKittens). CDNA memory ops are **asynchronous**; ove
 | `__builtin_amdgcn_*` intrinsics | MFMA, `ds_*` perms, `buffer_load`, sched barriers, ballot/permute | — (the default; scheduler-friendly) |
 | inline `asm volatile` | a tight hand-scheduled micro-loop, latency probes, forcing an encoding | **MFMA** (breaks SchedGroupMask pipelining); anything the compiler schedules well |
 | full hand-written `.s` | a peak micro-kernel where you out-schedule LLVM (AITER's fastest paths) | maintainability; rarely worth it for production |
+| **editing the compiler's `.s`** | the last few percent after source rewriting stalls: an instruction schedule the backend chose, a wait it inserted conservatively, a register assignment that costs a move | anything the source can still express; bodies at the memory roof or above ~4 waves/SIMD (see [editing_compiled_asm.md](editing_compiled_asm.md) Gates 2–3) |
 
 **Verdict:** hand-asm pays only when you can prove via disassembly the compiler's schedule is suboptimal
 *and* the kernel is hot enough to amortize the maintenance. For MFMA loops, use intrinsics +

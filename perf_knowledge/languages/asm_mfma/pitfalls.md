@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
 regimes: [both]
 status: sota
-updated: 2026-06-08
+updated: 2026-09-01
 sources:
   - https://github.com/ROCm/HIP/issues/3333
   - https://github.com/llvm/llvm-project/issues/131954
@@ -18,7 +18,8 @@ sources:
 ## TL;DR
 The low level bites in predictable ways: MFMA in asm defeats the SW pipeliner; inline-asm clobber bugs;
 32×32 MFMA clocking lower than 16×16; LDS bank conflicts; spurious accumulator spills; fp8 encoding
-mismatch; and `s_waitcnt` off-by-ones. Most are diagnosable from the disassembly.
+mismatch; and `s_waitcnt` off-by-ones. Most are diagnosable from the disassembly. Post-compilation
+**editing** adds a separate class in which nothing breaks and nothing improves — item 11.
 
 ## The pitfalls
 1. **MFMA in inline asm → no SW pipelining.** `SchedGroupMask` only sees *intrinsic* MFMA. Hand-writing
@@ -59,6 +60,15 @@ mismatch; and `s_waitcnt` off-by-ones. Most are diagnosable from the disassembly
 10. **Wave specialization** (producer/consumer waves) **underperforms on CDNA3/4** — AMD's static register
     allocation means producer waves hold registers without computing (HipKittens: ~80% of peak BF16 GEMM
     on MI355X). Use ping-pong / interleave scheduling instead.
+11. **Editing compiled `.s` has its own pitfall set, and it is mostly about attribution.** The edits
+    are usually bit-exact and resource-free, so they fail by measuring nothing rather than by
+    breaking. Three that bite hardest: an `s_nop` the hazard recogniser inserted is **correctness,
+    not padding**, and is only removable if the reordering that created the hazard is gone; deleting
+    a branch-condition producer needs a scan bounded at the previous `s_or_b64 exec`, never by
+    instruction count (the one correctness break in 63 measured edits); and moving VMEM issue across
+    an `s_barrier` re-synchronises the waves' L2 requests into a burst and costs 1–1.6%. Full set in
+    [edit_patterns.md](edit_patterns.md); the pre-flight gates that avoid most of them are in
+    [editing_compiled_asm.md](editing_compiled_asm.md).
 
 ## Verify
 ```bash

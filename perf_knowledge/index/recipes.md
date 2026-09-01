@@ -49,10 +49,18 @@ This ordering is structural and does not age; the specific winners do, so always
   [[profiling/engagement_verification.md]] (e.g. `AITER_LOG_TUNED_CONFIG=1` → "is tuned on cu_num").
 - **Measurement discipline** — warmup, repeats, noise band, same-session A/B, parity check:
   [[profiling/benchmarking_methodology.md]], [[profiling/common_pitfalls.md]].
+- **Assembly-edit receipt chain** — did the edited `.s` reach the timed binary, is it a pure reorder,
+  is the number the edit or the box (blast-radius arm, permutation control, common-mode channel):
+  [[languages/asm_mfma/asm_edit_verify.md]].
 
 ## Durable knob dictionaries (the search space, by authoring language)
 - Triton/Gluon: [[languages/triton_amd/knobs.md]], [[languages/gluon/programming_model.md]]
 - HIP/CK/asm: [[languages/hip_cpp/patterns.md]], [[languages/composable_kernel/ck_tile.md]], [[languages/asm_mfma/overview.md]]
+- Editing already-compiled `.s` (a different activity from authoring): pre-flight gates
+  [[languages/asm_mfma/editing_compiled_asm.md]], edit catalogue indexed by stall signal
+  [[languages/asm_mfma/edit_patterns.md]], and the ISA rules you own once the compiler is out of the
+  loop — waitcnt legality, hazard NOP tables, widening alignment —
+  [[languages/asm_mfma/hazards_and_waitcnt.md]]
 - FlyDSL / TileLang / HipKittens: [[languages/flydsl/overview.md]], [[languages/tilelang/overview.md]], [[languages/hipkittens/primitives.md]]
 
 ## Sources

@@ -4,7 +4,7 @@ kind: reference
 updated: 2026-06-09
 ---
 
-# Sources index — 503 unique URLs across 656 docs
+# Sources index — 510 unique URLs across 676 docs
 
 Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources.py`). Each doc keeps its own inline `## Sources`.
 
@@ -58,6 +58,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://arxiv.org/abs/2512.23236
 - https://arxiv.org/abs/2602.05885
 - https://arxiv.org/abs/2603.29010
+- https://arxiv.org/abs/2608.20711
 - https://arxiv.org/html/2407.13853v3
 - https://arxiv.org/html/2504.16214v1
 - https://arxiv.org/html/2508.18224v1
@@ -269,11 +270,14 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/iree-org/iree/issues/23765
 - https://github.com/linkedin/Liger-Kernel
 - https://github.com/linkedin/Liger-Kernel/releases/tag/v0.4.0
+- https://github.com/llvm/llvm-project
 - https://github.com/llvm/llvm-project/issues/131954
 - https://github.com/llvm/llvm-project/pull/116309
 - https://github.com/llvm/llvm-project/pull/116680
 - https://github.com/llvm/llvm-project/pull/116723
 - https://github.com/llvm/llvm-project/pull/117047
+- https://github.com/llvm/llvm-project/pull/156943
+- https://github.com/llvm/llvm-project/pull/197267
 - https://github.com/meta-pytorch/BackendBench
 - https://github.com/meta-pytorch/BackendBench/blob/main/docs/correctness.md
 - https://github.com/meta-pytorch/KernelAgent
@@ -310,6 +314,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/state-spaces/mamba
 - https://github.com/thunlp/TritonBench
 - https://github.com/tile-ai/tilelang
+- https://github.com/triton-lang/triton
 - https://github.com/triton-lang/triton/blob/main/python/triton/runtime/autotuner.py
 - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
 - https://github.com/triton-lang/triton/issues/1846
@@ -522,11 +527,13 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/mxfp4-mxfp6-quantization/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/mxfp4-online-rotation/README.html
+- https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-triton-kernel.html
 - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-with-composable-kernel.html
 - https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/profilers/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/rocm7.2/README.html
+- https://rocm.blogs.amd.com/software-tools-optimization/scheduling_memory_ops_gfx942/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/triton-kernel-ai/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/vllm-omni/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
