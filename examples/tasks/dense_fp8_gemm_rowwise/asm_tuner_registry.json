@@ -1,30 +1,30 @@
 {
   "configs": [
     {
-      "artifact": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/release.json",
+      "artifact": ".geak_tuner/releases/47b6393ac882c3f41d3dc1657716a47b304e5278648bcb86080356e7d8a52b08/release.json",
       "artifact_set": [
         {
           "kind": "artifact",
-          "path": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/artifacts/227dcfa1b9d0d9c652bf44055bb6713016134923ec6171c90ee35a9cc2cb97bf.so",
-          "sha256": "227dcfa1b9d0d9c652bf44055bb6713016134923ec6171c90ee35a9cc2cb97bf"
+          "path": ".geak_tuner/releases/47b6393ac882c3f41d3dc1657716a47b304e5278648bcb86080356e7d8a52b08/artifacts/2538bfdbee3c302ac837722cada9e905d07b03950e8f5a73b0340bde781b9105.so",
+          "sha256": "2538bfdbee3c302ac837722cada9e905d07b03950e8f5a73b0340bde781b9105"
         },
         {
           "kind": "compile_manifest",
-          "path": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/manifests/e44536e65c375d82fdad6bd0b6d85db60acb83b792fa0c56e29c41606e30819a.json",
-          "sha256": "e44536e65c375d82fdad6bd0b6d85db60acb83b792fa0c56e29c41606e30819a"
+          "path": ".geak_tuner/releases/47b6393ac882c3f41d3dc1657716a47b304e5278648bcb86080356e7d8a52b08/manifests/141ad40ab73a9c7fa0bfd7b88583347be16152fb4e511beba897ce4db2f92729.json",
+          "sha256": "141ad40ab73a9c7fa0bfd7b88583347be16152fb4e511beba897ce4db2f92729"
         },
         {
           "kind": "source",
-          "path": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "path": ".geak_tuner/releases/47b6393ac882c3f41d3dc1657716a47b304e5278648bcb86080356e7d8a52b08/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
           "sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f"
         }
       ],
-      "artifact_sha256": "6add098492087077a646c9d9f5db38c1909e7e1b03682eabb91fc15a308840cd",
+      "artifact_sha256": "9594b0aa4e8a990bed2e6d346b901445a075c7c7b017edfd3610eebf8d95fd0e",
       "build_receipt": {
-        "artifact_set_sha256": "779908099d68eba1756a14c1b9ae1a03a620cc077aef624f1e703c1821565a97",
+        "artifact_set_sha256": "7b757b6d1c0f31fa306e15e18f8d7f3964e7d60e27e8f8ef857f5687400e1469",
         "oracle_manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
         "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-        "release_id": "4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da",
+        "release_id": "47b6393ac882c3f41d3dc1657716a47b304e5278648bcb86080356e7d8a52b08",
         "schema": "geak.asm-materialized-release/v1",
         "score_metric": {
           "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
@@ -35,11 +35,11 @@
           "unit": "ms/call",
           "version": 1
         },
-        "search_id": "3a17ed80d1dd708917da77064907c5f2dbe23ca4afa0c21cef45577327c6b84c",
-        "source_digest": "abb98732cf4c6df066976f7a103e50a00b7a23bdda5b010fa3ef79cb3728b6e0",
-        "table_digest": "f2fc30621727876b36840f1acaf97dafb0d994abd3340e2d7aae0429b425490f",
+        "search_id": "0478234150995db134307c59d5154083b5d944981006a133ba10ac7803e677cc",
+        "source_digest": "2f60906d612934f13cf0b79a4f70d0e47bd033ecb4c6ab6f336e528b52d5187b",
+        "table_digest": "fbde8adf8ad6eb2e66e6cce53668106bb51be509dad7de6c172fac54f3fbffa1",
         "task": "dense_fp8_gemm_rowwise",
-        "task_digest": "44a33c61c960feb6e27b89dde0e5429c7354b5ace9110d6b36e84fddd9dee194"
+        "task_digest": "07c237bd70cb316dc61fcffbbae131a7e317495857e2dbe1b53b85d6410112e9"
       },
       "config": {
         "adapter": "fp8_rowwise",
@@ -51,7 +51,7 @@
         "oracle_manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
         "priority": 0,
         "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-        "release_id": "4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da",
+        "release_id": "47b6393ac882c3f41d3dc1657716a47b304e5278648bcb86080356e7d8a52b08",
         "score_metric": {
           "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
           "id": "sustained_throughput",
@@ -65,14 +65,14 @@
         "score_metric_id": "sustained_throughput",
         "score_metric_inner": 16,
         "task": "dense_fp8_gemm_rowwise",
-        "task_digest": "44a33c61c960feb6e27b89dde0e5429c7354b5ace9110d6b36e84fddd9dee194",
+        "task_digest": "07c237bd70cb316dc61fcffbbae131a7e317495857e2dbe1b53b85d6410112e9",
         "variant": "generated-successive-halving"
       },
-      "created_unix_ns": 1788388399175561103,
-      "id": "cfg-1deacec99433fea0d13f",
+      "created_unix_ns": 1788392062186994904,
+      "id": "cfg-56e53473087e82634af1",
       "mechanism": "canonical protocol-v2 paired search",
       "precompiled": true,
-      "published_unix_ns": 1788388401487401502,
+      "published_unix_ns": 1788392064702278615,
       "status": "ready"
     }
   ],
@@ -85,7 +85,7 @@
         "source": 1
       },
       "schema": "geak.asm-artifact-set/v1",
-      "sha256": "779908099d68eba1756a14c1b9ae1a03a620cc077aef624f1e703c1821565a97"
+      "sha256": "7b757b6d1c0f31fa306e15e18f8d7f3964e7d60e27e8f8ef857f5687400e1469"
     },
     "oracle_manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
     "protocol": {
@@ -95,11 +95,11 @@
     },
     "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
     "registry": "asm_tuner_registry.json",
-    "registry_id": "cfg-1deacec99433fea0d13f",
-    "release_id": "4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da",
+    "registry_id": "cfg-56e53473087e82634af1",
+    "release_id": "47b6393ac882c3f41d3dc1657716a47b304e5278648bcb86080356e7d8a52b08",
     "runtime_table": "asm_tuner_runtime_table.json",
     "runtime_table_path_base": "task_root",
-    "runtime_table_sha256": "067795238b87ef84d4b903fd1197b52550b7c15e3745204734630e9b37aaccd6",
+    "runtime_table_sha256": "f0d4aace939ec7df157766bcc3f2ef033901d438777b892d842ba7c88bea8d24",
     "schema": "geak.asm-launch-contract/v1",
     "score_metric": {
       "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
@@ -116,19 +116,19 @@
     "selection": {
       "path": "asm_tuner_selection.json",
       "path_base": "task_root",
-      "sha256": "62e17d064927dc92878d256fc3d7d2926b2a614108096961cf5944b26bbb7b66"
+      "sha256": "121ec381c79c1f16d724df098291e80146492b5ce8907e7bb142191095b6e22d"
     },
-    "source_digest": "abb98732cf4c6df066976f7a103e50a00b7a23bdda5b010fa3ef79cb3728b6e0",
+    "source_digest": "2f60906d612934f13cf0b79a4f70d0e47bd033ecb4c6ab6f336e528b52d5187b",
     "task": "dense_fp8_gemm_rowwise",
-    "task_digest": "44a33c61c960feb6e27b89dde0e5429c7354b5ace9110d6b36e84fddd9dee194",
+    "task_digest": "07c237bd70cb316dc61fcffbbae131a7e317495857e2dbe1b53b85d6410112e9",
     "task_manifest": {
       "path": "asm_tuner/manifests/tasks/dense_fp8_gemm_rowwise.json",
-      "sha256": "5192fc51bae4da1c72b9cf8663f97e531541a0fb7c3af696ef524d589add653b"
+      "sha256": "072b741dc649e7128f8e47f2a358996629e5712887224099118f7aa688b4c6bb"
     },
     "task_runtime_loader": {
       "path": "examples/tasks/dense_fp8_gemm_rowwise/geak_tuner_runtime.py",
       "runtime_table": "asm_tuner_runtime_table.json",
-      "sha256": "0f4c0b757833e490e0bd3e05f0837297024e6ce6eb82067414f4689a921fe476"
+      "sha256": "1f8989ddd7bb4e5bd23814a13bb5cd7471cece10213058bdf8fb65e3a3397f33"
     },
     "workflow_consumer": {
       "path": "kernel_workflow/kernel_lane.js",
@@ -137,5 +137,5 @@
   },
   "schema": "geak.config-search/v2",
   "schema_version": 2,
-  "updated_unix_ns": 1788388401488229473
+  "updated_unix_ns": 1788392064703155835
 }
