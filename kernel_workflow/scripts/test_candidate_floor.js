@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 // Regression guard for CANDIDATE_FLOOR (no GPU, no model needed).
 //
-// The round loop had `1.0` hard-coded in three places: the Optimize prompt that tells an engineer when
-// to save best_patch.diff, the `trustworthyBelowBaseline` harvest shortcut, and the `verified` filter.
-// Right for an ordinary optimization, but it makes a transcription (plain Triton -> Gluon/TileLang/HIP)
-// inexpressible: it lands below the comparator by construction, so at 1.0 no patch is saved, no verify
-// runs, and the loop stalls on a run that is working as designed. The floor is now a caller knob like
-// `budget` / `min_improve` / `deep_cost`. Under test: the default is 1.0 (so existing runs are
-// unchanged), all three sites read it, and the COMMIT gate is untouched.
+// The round loop once hard-coded `1.0` in candidate admission. That made a transcription (plain Triton
+// -> Gluon/TileLang/HIP) inexpressible: it lands below the comparator by construction, so no verify ran
+// and the loop stalled on a run that was working as designed. The incumbent-relative floor is now a
+// caller knob, defaulting to 0.8. Artifact execution is separately journal-gated: there is deliberately
+// no filesystem-harvest shortcut left to tune. Under test: parsing/fallback, prompt, verified admission,
+// registered-only recovery, and the untouched COMMIT gate.
 //
 // Run:  node kernel_workflow/scripts/test_candidate_floor.js
 'use strict';
@@ -59,9 +58,9 @@ function txt(A) {
     'return CANDIDATE_FLOOR_TXT;')(A);
 }
 
-console.log('\n# the default is the historical behavior');
+console.log('\n# the current default admits recovery measurements');
 const o = knobs({});
-ok(o.CANDIDATE_FLOOR === 1.0, 'CANDIDATE_FLOOR defaults to 1.0', o.CANDIDATE_FLOOR);
+ok(o.CANDIDATE_FLOOR === 0.8, 'CANDIDATE_FLOOR defaults to 0.8', o.CANDIDATE_FLOOR);
 ok(o.BUDGET === 6, 'BUDGET default 6 is untouched', o.BUDGET);
 // 2 -> 4 WITH the phase ladder, not independently of it. The old default was sized for a counter
 // whose only outcome was ending the wave; it now ends a PHASE, and two flat rounds is not evidence
@@ -76,11 +75,11 @@ ok(o.PROGRESS_DELTA === o.MIN_IMPROVE,
 console.log('\n# it is a caller knob, like the ones next to it');
 ok(knobs({ candidate_floor: 0.5 }).CANDIDATE_FLOOR === 0.5, 'an explicit floor wins');
 ok(knobs({ candidate_floor: '0.5' }).CANDIDATE_FLOOR === 0.5, 'and parses from a CLI string');
-ok(knobs({ candidate_floor: 'nonsense' }).CANDIDATE_FLOOR === 1.0,
-   'garbage falls back to 1.0 rather than to NaN');
-ok(knobs({ candidate_floor: 0 }).CANDIDATE_FLOOR === 1.0,
+ok(knobs({ candidate_floor: 'nonsense' }).CANDIDATE_FLOOR === 0.8,
+   'garbage falls back to 0.8 rather than to NaN');
+ok(knobs({ candidate_floor: 0 }).CANDIDATE_FLOOR === 0.8,
    'and so does a floor of 0, which would admit a broken kernel');
-ok(knobs({ candidate_floor: -1 }).CANDIDATE_FLOOR === 1.0, 'and a negative floor');
+ok(knobs({ candidate_floor: -1 }).CANDIDATE_FLOOR === 0.8, 'and a negative floor');
 ok(knobs({ progress_delta: -0.05 }).PROGRESS_DELTA === -0.05, 'an explicit progress_delta wins');
 ok(knobs({ progress_delta: 'nonsense' }).PROGRESS_DELTA === o.MIN_IMPROVE,
    'and garbage falls back to MIN_IMPROVE');
@@ -90,8 +89,10 @@ console.log('\n# nothing was left behind on a hard-coded 1.0');
 // a 0.7x patch that the `verified` filter then drops, which looks exactly like the stall it removes.
 ok(/Save best_patch\.diff[^\n]*geomean>\$\{CANDIDATE_FLOOR_TXT\}/.test(src),
    'the Optimize prompt tells the engineer to save above CANDIDATE_FLOOR');
-ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup\(eng\) > CANDIDATE_FLOOR\)/.test(src),
-   'the harvest shortcut suppresses against CANDIDATE_FLOOR');
+ok(/if \(!\(journal && journal\.registered && journal\.entry\)\)/.test(src)
+   && /Only atomically receipted bytes may cross the execution boundary/.test(src)
+   && !/trustworthyBelowBaseline/.test(src),
+   'candidate floor has no unregistered filesystem-harvest shortcut');
 // This clause used to be pinned as ONE line, `says(...correctness, 'pass') && primSpeedup(r.ver) >
 // CANDIDATE_FLOOR`. The filter has since grown a metric/oracle/policy/twin arm and spans a block, so
 // that pin stopped matching -- and nobody saw it, because this file was runnable only under node and
@@ -99,13 +100,13 @@ ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup
 // three clauses: the correctness gate is in the filter, the admission compares against the knob, and
 // no site admits against a hard-coded literal.
 ok(/if \(!\(r\.ver && r\.ver\.policy_pass === true &&\n\s*says\(r\.ver\.status, 'verified'\) && says\(r\.ver\.correctness, 'pass'\)\)\) return false;/.test(src) &&
-   /return primSpeedup\(r\.ver\) > CANDIDATE_FLOOR;/.test(src) &&
+   /const verVsInc = vsIncumbent\(r\.ver\);[\s\S]{0,100}verVsInc > CANDIDATE_FLOOR;/.test(src) &&
    !/primSpeedup\(r\.ver\) > [0-9]/.test(src),
    'the verified filter admits against CANDIDATE_FLOOR, behind the correctness gate');
 
-// `${1.0}` stringifies to "1", which would silently reword a prompt that has always said
-// "geomean>1.0". The default run must render byte-identically.
-ok(txt({}) === '1.0', 'the default renders as "1.0" in the prompt, exactly as before', txt({}));
+// Integer overrides still retain one decimal place; the non-integer default renders faithfully.
+ok(txt({}) === '0.8', 'the default renders as "0.8" in the prompt', txt({}));
+ok(txt({ candidate_floor: 1 }) === '1.0', 'an integer override retains one decimal place', txt({ candidate_floor: 1 }));
 ok(txt({ candidate_floor: 0.5 }) === '0.5', 'and a lowered floor renders faithfully', txt({ candidate_floor: 0.5 }));
 ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({ candidate_floor: 0.55 }));
 
@@ -190,7 +191,7 @@ function legacy({ budget, deepCost, maxNoImprove }, traj) {
   return { rounds: round, commits, final: +cumulative.toFixed(4), log };
 }
 
-console.log('\n# at the defaults the loop is EXHAUSTIVELY equivalent to the pre-knob one');
+console.log('\n# an explicit historical floor remains equivalent to the pre-knob loop');
 // The `bestSeen > 0` guard is what makes this hold: without it a first-round winner in (1.0, 1.02]
 // makes `suiteProgress` trivially true (bestSeen is 0), resetting a stall counter main would advance.
 // This replay models the SUITE arm only; `routeProgress` needs a band table, and the equivalence
@@ -199,7 +200,7 @@ console.log('\n# at the defaults the loop is EXHAUSTIVELY equivalent to the pre-
 {
   const VALS = [0.0, 0.5, 0.99, 1.0, 1.005, 1.01, 1.02, 1.021, 1.05, 1.1, 1.3];
   const cfg = { budget: o.BUDGET, deepCost: 1, maxNoImprove: o.MAX_NO_IMPROVE,
-                floor: o.CANDIDATE_FLOOR, minImprove: o.MIN_IMPROVE, progressDelta: o.PROGRESS_DELTA };
+                floor: 1.0, minImprove: o.MIN_IMPROVE, progressDelta: o.PROGRESS_DELTA };
   let n = 0, diverged = 0, example = null;
   for (const a of VALS) for (const b of VALS) for (const c of VALS) for (const d of VALS) {
     const t = [a, b, c, d]; n++;
@@ -207,7 +208,7 @@ console.log('\n# at the defaults the loop is EXHAUSTIVELY equivalent to the pre-
       diverged++; if (!example) example = t;
     }
   }
-  ok(diverged === 0, `all ${n} default-knob trajectories replay identically to the pre-knob loop`,
+  ok(diverged === 0, `all ${n} explicit-1.0 trajectories replay identically to the pre-knob loop`,
      example ? `first divergence ${JSON.stringify(example)}` : null);
 }
 
@@ -269,5 +270,5 @@ console.log('\n# the Optimize prompt is built inline, so it must append the expe
 
 console.log(failures
   ? `\nFAIL: ${failures} check(s) failed.`
-  : '\nPASS: CANDIDATE_FLOOR defaults to 1.0; a lowered floor tracks but never banks.');
+  : '\nPASS: CANDIDATE_FLOOR defaults to 0.8; recovery tracks but never banks sub-baseline work.');
 process.exit(failures ? 1 : 0);

@@ -118,10 +118,11 @@ class ResumeKeepsTheFramesApart(unittest.TestCase):
         self.assertIn("vs-seed frame:", SOURCE,
                       "which frame was chosen, and why, must be logged; a silent choice here is how "
                       "this survived two waves and two different repairs")
-        self.assertIn("VS_SEED_FRAME:", SOURCE,
-                      "the frame must travel with the number to update_memory: STATE.cumulative is "
-                      "written from it and read back as PRIOR next wave, so a further multiplication "
-                      "compounds once per wave")
+        self.assertIn("cumulative_frame: 'vs the original seed'", SOURCE,
+                      "the frame must travel with the number to workflow_state.py: STATE.cumulative "
+                      "is read back as PRIOR next wave, so an unlabelled value can compound once per wave")
+        self.assertIn("workflow_state:persist", SOURCE,
+                      "the versioned helper, not update_memory, must own STATE.json")
 
     def test_stale_per_case_rows_are_not_imported(self):
         body = resume_block()
@@ -175,22 +176,23 @@ class CommitAdvancesOnlyWhenTheTreeMoved(unittest.TestCase):
 
 class BothFramesAreLabelledWhereAgentsReadThem(unittest.TestCase):
     def test_planner_and_report_get_the_vs_seed_number(self):
-        self.assertEqual(SOURCE.count("CUMULATIVE_VS_SEED: cumulativeVsSeed()"), 3, (
-            "all three agent sites that receive CUMULATIVE_SPEEDUP -- planner, update_memory and "
-            "report -- must also receive the vs-seed total, or the one that lacks it will infer it"))
+        self.assertEqual(SOURCE.count("CUMULATIVE_VS_SEED: cumulativeVsSeed()"), 2, (
+            "planner and report both need the labelled vs-seed total; update_memory no longer writes "
+            "state, and the state helper receives `cumulative: cumulativeVsSeed()` directly"))
+        self.assertIn("cumulative: cumulativeVsSeed()", SOURCE)
 
     def test_the_wave_local_frame_is_spelled_out(self):
         self.assertIn("CUMULATIVE_SPEEDUP_FRAME", SOURCE,
                       "an unlabelled speedup is read in whichever frame the reader expects; that is "
                       "the whole mechanism of this finding")
 
-    def test_tech_lead_writes_state_from_the_vs_seed_number(self):
+    def test_versioned_helper_writes_state_from_the_vs_seed_number(self):
         text = TECH_LEAD.read_text(encoding="utf-8")
-        self.assertIn("cumulative: <CUMULATIVE_VS_SEED>", text, (
-            "STATE.json's `cumulative` is read back by the NEXT wave as the lane total. Writing the "
-            "wave-local number there truncates a 4.35x lane to 1.01x"))
-        self.assertIn("MUST come from `CUMULATIVE_VS_SEED`", text,
-                      "the reason has to travel with the instruction, or the next edit reverts it")
+        self.assertIn("The orchestrator, not this judgement role, owns `STATE_DIR`", text)
+        self.assertIn("workflow_state.py persist", text)
+        self.assertIn("cumulative: cumulativeVsSeed()", SOURCE, (
+            "STATE.json's cumulative is read back as the lane total; writing the wave-local number "
+            "would truncate a 4.35x lane to 1.01x"))
 
 
 if __name__ == "__main__":

@@ -99,10 +99,11 @@ console.log('\n# the correctness gate and the primary-metric selector, executed'
     'the legacy speedup_weighted field still satisfies the requirement');
   // (60): a metric fault must not be reported as, or silently share a path with,
   // a slow kernel. Both authoritative sites route it through the named check.
-  ok((src.match(/primMetricReason\(/g) || []).length === 2 &&
-     /primMetricReason\(r\.ver\)/.test(src) && /primMetricReason\(integMetric\)/.test(src),
-    'the authoritative sites -- the candidate filter and integrate -- route an '
-    + 'ambiguous primary metric through the named refusal');
+  ok((src.match(/primMetricReason\(/g) || []).length >= 3 &&
+     /primMetricReason\(r\.ver\)/.test(src) && /primMetricReason\(integMetric\)/.test(src)
+     && /const valid = [\s\S]{0,300}primMetricReason\(ver\)/.test(src),
+    'candidate admission, integration, and deep-outcome classification all route an ambiguous '
+    + 'primary metric through the named refusal');
 }
 
 console.log('\n# the oracle pin, executed');
@@ -900,8 +901,8 @@ console.log('\n# the budget, the commit threshold and the correctness gate');
   // Finding (62) split this from one conjunction into a gate plus a named metric
   // refusal, so the shape changed; the threshold it enforces did not.
   ok(/says\(r\.ver\.correctness, 'pass'\)\)\) return false;/.test(src) &&
-     /return primSpeedup\(r\.ver\) > CANDIDATE_FLOOR;/.test(src),
-    'the verified filter still gates on correctness and the candidate floor');
+     /const verVsInc = vsIncumbent\(r\.ver\);[\s\S]{0,100}verVsInc > CANDIDATE_FLOOR;/.test(src),
+    'the verified filter gates on correctness and the candidate floor in incumbent-relative ms');
 }
 
 console.log('\n# the commit gate needs no band file, and a measured table only TIGHTENS it, executed');
@@ -1149,7 +1150,7 @@ console.log('\n# the commit rule is a CONJUNCTION with a catastrophic fence, exe
     'search found something, and a stopping rule errs toward continuing');
 }
 
-console.log('\n# the search-phase ladder is a ONE-WAY ratchet that skips phases it cannot run, executed');
+console.log('\n# the within-cycle phase ladder ratchets forward and skips phases it cannot run, executed');
 {
   // Spending a phase's stall allowance escalates instead of ending the wave, and only the last
   // phase's exhaustion is terminal. The risk this section exists for is the intermediate state: a
@@ -1212,9 +1213,11 @@ console.log('\n# the search-phase ladder is a ONE-WAY ratchet that skips phases 
      && /searchPhase = next;\s*\n\s*phaseStall = 0;/.test(src),
     'exhausting the allowance escalates and RESETS the counter, so a new state is judged on its ' +
     'own rounds instead of inheriting the stall that promoted it');
-  ok(/stopReason = 'deep_explore_failed';/.test(src),
-    'a deep round that banked nothing is what ends the run -- a ground-up rewrite from the current ' +
-    'best failing to beat it is stronger evidence than any stall count');
+  ok(/stopReason = 'deep_explore_exhausted';/.test(src)
+     && /MIN_VALID_NOVEL_DEEP_ATTEMPTS = 2/.test(src)
+     && /deepVerdict\.stop/.test(src),
+    'deep search ends only on plural valid+novel misses; one no-gain attempt and infrastructure '
+    + 'failures cannot terminate it');
   ok(!/stopReason = 'tech_lead_stop'/.test(src),
     'and the planner can no longer end the run: its stop is a statement about the LEVEL, which is ' +
     'the premise for the next one rather than for going home');
@@ -1257,7 +1260,7 @@ console.log('\n# phase2 dispatches an ASSEMBLY engineer against a located keypoi
   // serves only the two entry points, so a JS guard cannot read the markdown.
 }
 
-console.log('\n# the deep round closes a cycle: one rewrite, then restart or stop');
+console.log('\n# deep attempts restart on a win and stop only on plural valid novelty');
 {
   ok(/roundPhase === PHASE_DEEP && !planned\.some\(d => d\.specialty === 'deep_explore'\)/.test(src),
     'the deep round IS the deep engineer, promoted when the planner did not ask for one. Leaving ' +
@@ -1270,10 +1273,29 @@ console.log('\n# the deep round closes a cycle: one rewrite, then restart or sto
      && /starting hypothesis rather than as the assignment/.test(src),
     'the planner\'s direction becomes the deep engineer\'s BRIEF rather than being discarded');
 
-  // The two outcomes, which are the whole reason the deep round is handled separately.
-  ok(/if \(roundPhase === PHASE_DEEP\) \{[\s\S]{0,900}if \(committedThisRound\) \{/.test(src),
-    'the deep round branches on whether it BANKED, not on a stall count -- it gets exactly one ' +
-    'attempt, and what it did with it decides everything');
+  // Outcome classes keep infrastructure failures apart from actual search evidence.
+  for (const outcome of ['api_failure', 'no_patch', 'compile_or_correctness_failure',
+                         'valid_no_gain', 'valid_new_structure']) {
+    ok(src.indexOf(`outcome = '${outcome}'`) >= 0,
+      `deep outcome ${outcome} is explicit rather than collapsed into one failed bit`);
+  }
+  ok(/if \(roundPhase === PHASE_DEEP\) \{[\s\S]{0,5000}if \(committedThisRound\) \{/.test(src),
+    'a committed deep structure still restarts the cycle, while non-commits are classified first');
+  const deepBlock = grab(
+    /const deepExhaustion = \(attempts, activeCycle, minimum\) => \{[\s\S]*?\n\};/,
+    'deep exhaustion verdict');
+  const deepExhaustion = new Function(`${deepBlock}; return deepExhaustion;`)();
+  const miss = (key, hash) => ({ cycle: 3, outcome: 'valid_new_structure', valid: true,
+    novel: true, beneficial: false, structure_key: key, artifact_sha256: hash });
+  ok(deepExhaustion([miss('a', '1')], 3, 2).stop === false,
+    'one valid novel no-gain attempt cannot terminate deep search');
+  ok(deepExhaustion([miss('a', '1'), miss('a', '1')], 3, 2).stop === false,
+    'a duplicate structure/artifact cannot fake the plural novelty requirement');
+  ok(deepExhaustion([miss('a', '1'), miss('b', '2')], 3, 2).stop === true,
+    'two distinct valid novel misses may close deep search');
+  ok(deepExhaustion([miss('a', '1'), { cycle: 3, outcome: 'api_failure', valid: false,
+      novel: false, beneficial: false }], 3, 2).stop === false,
+    'API failure is not exhaustion evidence');
   ok(/the deep round banked a different implementation, so the ladder restarts on it/.test(src),
     'a committed deep round restarts the ladder: the findings and keypoints of the last cycle ' +
     'describe a tree that no longer exists');
@@ -1497,9 +1519,11 @@ console.log('\n# the vs-seed frame is READ OFF THE BASELINE, not assumed, execut
   ok(/log\(`vs-seed frame: \$\{vsSeedFrame\.toUpperCase\(\)\}/.test(src),
     'which frame was detected, and why, is logged once per wave -- a silent choice here is how this ' +
     'defect survived two waves');
-  ok(/VS_SEED_FRAME: vsSeedFrame === 'absolute'/.test(src),
-    'the frame travels WITH the number to update_memory, because STATE.cumulative is written from ' +
-    'it and read back as PRIOR next wave, so one more multiplication compounds per wave');
+  ok(/cumulative: cumulativeVsSeed\(\)/.test(src)
+     && /cumulative_frame: 'vs the original seed'/.test(src)
+     && /workflow_state:persist/.test(src),
+    'the labelled vs-seed value travels to the versioned state helper after the round barrier; '
+    + 'update_memory no longer writes a competing STATE.json');
 }
 
 console.log('\n# the ISA parent archive follows the TREE, not the commit event, executed');

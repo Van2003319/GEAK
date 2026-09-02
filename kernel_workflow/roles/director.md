@@ -26,27 +26,44 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 
 Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped runs),
 `EVAL_DIR_OVERRIDE` (may be empty), `KERNEL_NAME_HINT` (basename), `TASK` (may be empty), and
-`MODE` (`optimize` default | `author`). In `author` mode you also get `TARGET_LANGUAGE` and `OP_SPEC`.
+`MODE` (`optimize` default | `author`), and `WORKFLOW_STATE_HELPER`. In `author` mode you also get `TARGET_LANGUAGE` and `OP_SPEC`.
 
 ### DEEP-MODE resume (ONLY when `STATE_DIR` is in your inputs — otherwise ignore this entire section)
-`STATE_DIR` is a stable per-(kernel,backend) directory carried ACROSS deep-mode waves. It lets a
-continued wave build on the cumulative best instead of restarting. Handle it as follows:
-- **If `STATE_DIR` is set AND `$STATE_DIR/best/` exists and is non-empty** (a prior wave's cumulative-best
-  workspace — it contains the optimized `kernel_src/` AND the immutable oracle `unittest.py`/`meta.json`/
-  `reference_io.pt`): create `EVAL_DIR` as usual, but **seed `baseline/` and `workspace/` by copying from
-  `$STATE_DIR/best/`** (same tar-pipe excludes as the optimize-mode copy) instead of from
-  `KERNEL_PATH_ORIG`. (The golden rides in `best/` as an absolute symlink → `KERNEL_PATH_ORIG/reference_io.pt`;
-  the tar-pipe carries it verbatim — do NOT add `-h/--dereference`, and do NOT re-copy it.) Re-apply
-  `chmod -w` to the oracle files. `git init` + commit this seeded state as
-  HEAD (so this wave's patches diff from the cumulative best). Then read `$STATE_DIR/STATE.json` if present
-  and return `resumed: true` plus `prior_state` (its `cumulative`, `insights`, `ledger`, `bottleneck_now`,
-  `best_per_case`). Verify the oracle is intact: `reference_io.pt` sha256 must still match `meta.json`'s
-  `reference_io_sha256` (if present) — if it was tampered, fall back to seeding from `KERNEL_PATH_ORIG` and
-  set `resumed: false`.
-- **If `STATE_DIR` is set but `$STATE_DIR/best/` is absent** (the FIRST wave): proceed with the normal
-  copy from `KERNEL_PATH_ORIG` below, and return `resumed: false` (no `prior_state`). Do NOT create
-  `$STATE_DIR/best` here — `update_memory` populates it after the first improving round.
-- Never write anything outside `EVAL_DIR` except reading `$STATE_DIR` (and, on the first wave, nothing in it).
+`STATE_DIR` is a stable per-(kernel,backend) directory carried ACROSS deep-mode waves. `STATE.json`
+is a versioned trust boundary, not a bag of optional hints. `WORKFLOW_STATE_HELPER` is the only
+implementation of its schema and canonical hashes.
+
+1. Decide/create the fresh `EVAL_DIR` first, as below. If both `$STATE_DIR/best/` and
+   `$STATE_DIR/STATE.json` exist, run exactly:
+   ```bash
+   python3 "$WORKFLOW_STATE_HELPER" validate      --state-file "$STATE_DIR/STATE.json"      --canonical "$STATE_DIR/best"      --receipt "$EVAL_DIR/resume_state_validation.json"
+   ```
+   The helper checks `geak.workflow-state/v2`, all required control fields, and the independently
+   persisted canonical source / assembly / durable-binary hashes. Invalid state exits 2 by design;
+   still parse its JSON stdout/receipt and take the invalidation branch rather than treating that exit
+   code as a setup crash.
+2. **Only `status:"valid"` may resume.** Seed `baseline/` and `workspace/` from
+   `$STATE_DIR/best/` with the same symlink-preserving tar exclusions as the normal copy, re-apply
+   oracle read-only permissions, then `git init` + commit. Return `resumed:true` and `prior_state`
+   as the FULL parsed STATE object, including (do not drop any): `search_phase`, `phase_stall`,
+   `cycle`, `phase_log`, `deep_attempts`, `last_round`, `canonical_hashes`, `insights`, `ledger`,
+   `asm_ledger`, `keypoint_citations`, `rounds`, `process_log`, `bottleneck_now`, `best_per_case`,
+   and cumulative/frame fields. These are all schema-declared by the orchestrator; omitting one
+   silently restarts that part of the search.
+3. **Any schema or hash mismatch explicitly INVALIDATES the continuation.** Do not partially import
+   a source-valid/asm-stale state and do not guess which hash is right. Seed from
+   `KERNEL_PATH_ORIG`, return `resumed:false`, `resume_invalidated:true`,
+   `resume_invalidation_reason` from the helper, and `state_validation` verbatim. Keep
+   `resume_state_validation.json` in `EVAL_DIR` as the durable receipt. Never overwrite or delete the
+   rejected state: preserving it makes the mismatch auditable.
+4. If `STATE_DIR` is set but either `best/` or `STATE.json` is absent, this is the first wave. Use
+   `KERNEL_PATH_ORIG`, return `resumed:false`, and do not create `best/`; the orchestrator's
+   versioned state capability publishes it only after a canonical commit.
+5. Independently verify the oracle as before (`reference_io.pt` vs `meta.json` when present). Oracle
+   mismatch also invalidates resume and takes the original-seed path.
+
+Never write outside `EVAL_DIR` in setup. `STATE_DIR` is read-only here; later the orchestrator's
+`workflow_state.py persist` call is the sole writer.
 
 ### `mode=author` — seed an empty workspace anchored on the immutable oracle
 When `MODE=author`, `KERNEL_PATH_ORIG` is an **op task dir** (holds `meta.json` + immutable
@@ -186,6 +203,11 @@ Return JSON:
   "source_files": ["<relative paths under workspace>"],
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
+  "resumed": false,
+  "prior_state": {},
+  "resume_invalidated": false,
+  "resume_invalidation_reason": "",
+  "state_validation": {},
   "notes": "anything unusual about the layout"
 }
 ```

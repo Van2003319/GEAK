@@ -189,12 +189,6 @@ MUTANTS = [
     ("the greedy filter computes the assembly-restore reason and discards it",
      "    if (metricReason || isaReason || asmReason) {",
      "    if (metricReason || isaReason) {"),
-    ("the ladder stops escalating on a stagnating lane",
-     "  if (!(noImproveCount >= 1) && !priorRefuted) {",
-     "  if (true) {"),
-    ("a refuted mechanism stops escalating at all",
-     "  if (!(noImproveCount >= 1) && !priorRefuted) {",
-     "  if (!(noImproveCount >= 1)) {"),
     ("the ladder escalates without a localised hot kernel",
      "  if (!hasDominantHotKernel(profile)) {",
      "  if (false) {"),
@@ -240,26 +234,25 @@ WF_MUTANTS = [
 # none of which had ever been shown to go red. That is the same exposure finding
 # (128) names -- a guard nobody has watched fail is a guard nobody knows is
 # watching. These mutants are the regressions that file exists to catch: the
-# knob's fallbacks, the three sites that must read it instead of a hard-coded
-# 1.0, the prompt's byte-identical rendering, and the commit gate it must NOT
-# reach.
+# knob's fallback, registered-only admission, the prompt and verified filter sites that must read
+# it instead of a hard-coded literal, and the commit gate it must NOT reach.
 FLOOR_MUTANTS = [
-    ("a floor of 0 is accepted instead of falling back to 1.0",
-     "  return Number.isFinite(v) && v > 0 ? v : 1.0;",
-     "  return Number.isFinite(v) ? v : 1.0;"),
-    ("the prompt renders the default floor as a bare '1' again",
+    ("a floor of 0 is accepted instead of falling back to 0.8",
+     "  return Number.isFinite(v) && v > 0 ? v : 0.8;",
+     "  return Number.isFinite(v) ? v : 0.8;"),
+    ("the prompt renders an integer floor as a bare '1' again",
      "const CANDIDATE_FLOOR_TXT = Number.isInteger(CANDIDATE_FLOOR)\n"
      "  ? CANDIDATE_FLOOR.toFixed(1) : String(CANDIDATE_FLOOR);",
      "const CANDIDATE_FLOOR_TXT = String(CANDIDATE_FLOOR);"),
     ("the Optimize prompt goes back to a hard-coded geomean>1.0",
      "when geomean>${CANDIDATE_FLOOR_TXT}.",
      "when geomean>1.0."),
-    ("the harvest shortcut reverts to a hard-coded 1.0",
-     "!(primSpeedup(eng) > CANDIDATE_FLOOR)",
-     "!(primSpeedup(eng) > 1.0)"),
+    ("an unregistered artifact is admitted to verification",
+     "if (!(journal && journal.registered && journal.entry)) {",
+     "if (false) {"),
     ("the verified filter reverts to a hard-coded 1.0",
-     "return primSpeedup(r.ver) > CANDIDATE_FLOOR;",
-     "return primSpeedup(r.ver) > 1.0;"),
+     "return verVsInc === null ? true : verVsInc > CANDIDATE_FLOOR;",
+     "return verVsInc === null ? true : verVsInc > 1.0;"),
     # Injection, and the one that matters most: the floor is a CANDIDATE gate,
     # and the whole knob is only safe because the COMMIT gate never sees it. The
     # suite pins that as an absence, so only a mutant that introduces the
@@ -281,7 +274,7 @@ FLOOR_MUTANTS = [
     # dropping the skills append is invisible -- the run succeeds and the
     # engineers simply never see the index.
     ("the hand-built Optimize prompt stops appending the expert-skills block",
-     "      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),",
+     "      expertSkillsBlock(isAsm ? 'asm_engineer' : isDeep ? 'deep_engineer' : 'engineer'),",
      "      '',"),
     ("progress_delta stops defaulting to MIN_IMPROVE",
      "  const v = parseFloat(A.progress_delta != null ? A.progress_delta : MIN_IMPROVE);",

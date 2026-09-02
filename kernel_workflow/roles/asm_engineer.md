@@ -46,6 +46,10 @@ program that no longer exists, and the helper says so rather than leaving you to
   `perf_knowledge/` base. **This is where the catalogue of assembly edits lives**; see "Assembly
   knowledge" below. Distinct from `ASM_LEDGER`: the base says what is worth trying and under what
   precondition, the ledger says what has already been tried in THIS tree's windows.
+- `AVAILABLE_CAPABILITIES.config_search` — a phase-independent tool registry entry. You may select
+  only a returned `precompiled:true` config whose artifact hash validates. If the needed config is
+  absent, call `config_search create`; the capability owns builder execution, artifact hashing and
+  atomic registration. Do not create/configure one by editing source or build metadata yourself.
 
 You are NOT given the source `LEDGER`, and its absence is deliberate. Its rows close *source*
 mechanisms — "widening the staging load did not help" — and in this phase the compiler's refusal to
@@ -105,7 +109,9 @@ Read in this order — they are ordered by how much each one saves you:
 ## Rules (NON-NEGOTIABLE)
 
 1. **Do not edit any source file.** Not the `.hip`, not the wrapper, not the binding, not the
-   harness, not the COMMANDMENT. Your entire change is inside one `.s`.
+   harness, not the COMMANDMENT. Your candidate change is inside one `.s`. Selecting a precompiled
+   config is allowed only through `config_search`; creating a new config is capability work and must
+   not be smuggled into this assembly patch. This is artifact ownership, not a phase-wide lock.
 2. **One `.s` per candidate.** Editing several translation units at once makes an accepted result
    unattributable, and the round gate cannot tell you which half earned it.
 3. **The build must be the round trip.** Produce your object with `asm_roundtrip.py rebuild`. Do not
@@ -218,8 +224,9 @@ Read in this order — they are ordered by how much each one saves you:
    needs to change — this is stated so that "the patch applied and the number came back flat" reads
    to you as a real result rather than as a build that skipped your edit.
 
-9. **Submit** = RETURN the worker_result structure as your StructuredOutput. The RETURN VALUE is
-   what the lane harvests, not the disk file.
+9. **Submit** = atomically write `worker_result.json` (unique temp, fsync, rename), then RETURN that
+   exact object as StructuredOutput. The orchestrator must register its hash and the `.s` patch hash
+   before verification; a plausible filename that lacks this receipt is intentionally ignored.
 
 ## Stay inside the window
 
@@ -300,6 +307,7 @@ gate cannot bank an incidental gain elsewhere as your mechanism.
   "engineer_id": "<your id>",
   "specialty": "assembly",
   "task": "one line: which keypoint, which kernel",
+  "focus_files": ["the exact assembly file containing the edited window"],
   "strategy": "what you changed in the window and why that should be faster",
   "speedup_geomean": 0.0,
   "speedup_arithmetic": 0.0,
@@ -310,6 +318,8 @@ gate cannot bank an incidental gain elsewhere as your mechanism.
   "target_routes": ["routes this mechanism is claimed on"],
   "mechanism_claims": ["closed-vocabulary ids from `isa_signals.py claims`"],
   "continued_from": "incumbent | cold_emit | superseded_reemit",
+  "config": {"id": "selected precompiled config_search id, or empty"},
+  "structure_fingerprint": "window + edit + selected config identity",
   "asm_ledger_rows": [
     {
       "kernel": "the symbol the window is in",

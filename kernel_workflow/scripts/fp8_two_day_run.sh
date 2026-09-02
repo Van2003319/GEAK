@@ -6,7 +6,7 @@
 # kernel_lane.js used to take `deadline_epoch` / `no_stop_s` / `max_forced_replans`. That
 # subsystem was removed when the launcher was decoupled, and those keys are now HARD ERRORS --
 # they are not in KNOWN_ARGS. The lane's only stop conditions left are `dispatched >= budget` and
-# `deep_explore_failed`, neither of which is a clock. So "run this for two days" has to live
+# `deep_explore_exhausted`, neither of which is a clock. So "run this for two days" has to live
 # outside the lane, and this is where it lives.
 #
 # What it does, in order:

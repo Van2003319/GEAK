@@ -89,7 +89,18 @@ def improved_expr() -> str:
 PRELUDE = """
 var LOGS = [];
 function log(s) { LOGS.push(String(s)); }
-var history = { insights: [], ledger: [], bottleneck_now: 'unknown' };
+var history = { insights: [], ledger: [], asm_ledger: [], rounds: [], bottleneck_now: 'unknown' };
+var keypointCitations = [];
+var deepAttempts = [];
+var processLog = [];
+var restoredCanonicalHashes = null;
+var PHASE_ORDER = ['phase1_source', 'phase2_asm', 'deep_explore'];
+var START_PHASE_FORCED = false;
+var searchPhase = 'phase1_source';
+var phaseStall = 0;
+var cycle = 1;
+var phaseLog = [{phase: searchPhase, entered_round: 1, cycle: 1, reason: 'start'}];
+var round = 0;
 var cumulative = 1.0;
 var priorCumulativeVsSeed = 1.0;
 var cumulativeVsSeed = function () { return priorCumulativeVsSeed * cumulative; };
@@ -270,3 +281,39 @@ class RouteGateStillOverridesTheSuiteGate(unittest.TestCase):
 
     def test_the_override_is_logged_in_both_directions(self):
         self.assertIn("OVERTURNS the legacy suite-geomean gate", SOURCE)
+
+
+class ForcedPhaseResumeKeepsHistoryButNotTheOldStall(unittest.TestCase):
+    def test_forced_phase_appends_an_auditable_override_and_resets_stall(self):
+        prior = {
+            "cumulative": 2.0,
+            "search_phase": "phase1_source",
+            "phase_stall": 3,
+            "cycle": 4,
+            "last_round": 9,
+            "phase_log": [
+                {"phase": "phase1_source", "entered_round": 7, "cycle": 4, "reason": "start"}
+            ],
+            "process_log": [],
+        }
+        prelude = PRELUDE.replace(
+            "var START_PHASE_FORCED = false;", "var START_PHASE_FORCED = true;"
+        ).replace(
+            "var searchPhase = 'phase1_source';", "var searchPhase = 'phase2_asm';"
+        )
+        js = (
+            prelude
+            + f"var setup = {json.dumps({'resumed': True, 'prior_state': prior})};\n"
+            + resume_block()
+            + "\nJSON.stringify({phase: searchPhase, stall: phaseStall, cycle: cycle, round: round, "
+              "phase_log: phaseLog, process_log: processLog});"
+        )
+        out = json.loads(_v8().eval(js))
+        self.assertEqual(out["phase"], "phase2_asm")
+        self.assertEqual(out["stall"], 0)
+        self.assertEqual(out["cycle"], 4)
+        self.assertEqual(out["round"], 9)
+        self.assertEqual(out["phase_log"][-1]["entered_round"], 10)
+        self.assertIn("operator forced start_phase=phase2_asm", out["phase_log"][-1]["reason"])
+        self.assertEqual(out["process_log"][-2]["event"], "resume_phase_override")
+        self.assertEqual(out["process_log"][-1]["event"], "state_resumed")

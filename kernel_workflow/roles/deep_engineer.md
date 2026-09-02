@@ -44,6 +44,9 @@ coherent implementation, and iterate hard.
   (e2e-refined weighted target + hard gates — push toward it, never violate decode-no-regress / mem cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base (see the contract section).
+- `AVAILABLE_CAPABILITIES.config_search` — callable in this phase exactly as in every other phase.
+  Select only hash-valid precompiled entries. Route creation through `config_search create`, which
+  owns the builder receipt and registration; never invent an unregistered config in prose.
 
 ## Read broadly (you get the full context, unlike specialists)
 Read ALL of these before and during your work, and re-consult as the bottleneck shifts:
@@ -125,10 +128,10 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    from other categories (e.g. warp-cooperative rewrite + native output layout + dispatch fusion).
 3. **Implement → correctness → benchmark** the change. Keep it only if correct AND faster than your
    current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git add -A && git diff --cached --binary > $OUTPUT_DIR/best_patch.diff`)
-   the MOMENT you set a new best with geomean > 1.0, not at the end. It is the RECOVERY artifact: if
-   your final return is lost (timeout/crash/mis-formatted StructuredOutput), the lane falls back to
-   re-measuring whatever >1.0x patch it finds on disk. A patch on disk still counts; a result that only
-   exists in a lost return is gone.
+   the MOMENT you set a new best with geomean > 1.0, not at the end. Before returning, atomically write
+   `worker_result.json`; the orchestrator immediately registers and hashes BOTH files in the durable
+   round journal. Recovery is registered-only: the next wave never scans for or executes an arbitrary
+   patch merely because it exists on disk.
 4. **Self-profile to re-steer**: every few accepted changes, re-run
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<benchmark cmd that cd's into $KERNEL_PATH>" $OUTPUT_DIR/profile_rN`
    to find the NEW dominant bottleneck, and attack that next. This is the core of going deep.
@@ -141,15 +144,16 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    try ONE more radically different approach, then stop); OR
    (c) a hard cap of ~40 measured iterations.
    On a 3-identical-error crash loop, reset to your best saved patch and change approach (don't grind).
+   This submits ONE attempt; it does not end the lane. The orchestrator requires multiple valid,
+   structurally novel misses or budget exhaustion and never counts API/no-patch/build failures as
+   exhaustion evidence.
 6. If your best correct version regresses vs baseline (it shouldn't), submit `status:"failed"` with no
    patch and explain — that is signal for the ledger.
 
 ## Outputs
-**Return channel (authoritative):** your StructuredOutput return, matching the schema below, is what the
-lane harvests and scores — NOT the disk JSON. **Disk artifacts:** `best_patch.diff` is the recovery
-backstop the lane re-measures if your return is lost (step 3); `worker_result.json` + `report.md` are the
-durable record for the TechLead's insight log. Write all three; never assume the disk JSON substitutes
-for the return.
+**Return channel:** return the same object you atomically wrote to `worker_result.json`.
+`best_patch.diff` becomes recoverable only after the orchestrator's journal helper records its hash and
+receipt; unregistered files are intentionally ignored. `report.md` remains the human narrative.
 
 `OUTPUT_DIR/worker_result.json` (same schema as the specialist engineer, same fields as your return):
 ```json
@@ -157,6 +161,7 @@ for the return.
   "engineer_id": "r{ROUND}_d{N}",
   "specialty": "deep_explore",
   "task": "the mandate + target",
+  "focus_files": ["relative files actually changed or central to the rewrite"],
   "strategy": "the full stack you ended up with (each compounding change, specific)",
   "speedup_geomean": 0.0,
   "speedup_arithmetic": 0.0,
@@ -164,6 +169,8 @@ for the return.
   "status": "success|partial|failed",
   "patch_file": "best_patch.diff",
   "strategies_tried": ["the full exploration trace — what worked AND what didn't"],
+  "config": {"id": "precompiled config_search id(s), or empty"},
+  "structure_fingerprint": "result-independent identity of the algorithm/layout/schedule structure",
   "notes": "roofline % achieved per representative case, where the remaining wall-clock sits (kernel vs floor), and what a follow-up could still attack — written for the TechLead's insight log"
 }
 ```

@@ -74,7 +74,7 @@ const KNOWN_ARGS = new Set([
   'sol_shapes',
   // Wall-clock window. Removed here when the launcher was decoupled, and restored with the merge
   // that brought the code back: the only stop conditions this lane has left are budget and
-  // deep_explore_failed, neither of which is a clock, so without these a fixed-duration run has to
+  // deep_explore_exhausted, neither of which is a clock, so without these a fixed-duration run has to
   // be simulated from outside. Apostrophes are avoided inside this block on purpose -- the extractor
   // in scripts/lane_args.py reads it with a quote-delimited regex.
   'deadline_epoch', 'no_stop_s', 'max_forced_replans',
@@ -737,10 +737,13 @@ const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_
 //                  asks for it. Rewrites are proposed against SOURCE.
 //   phase2_asm     source analysis stops. L2 localises a KEYPOINT in the compiled assembly and the
 //                  engineer edits that window of the `.s`.
-//   deep_explore   EXACTLY ONE dedicated round. A ground-up rewrite with broad authority, which is
-//                  a different route rather than a further step down this one.
-//                    committed  -> back to phase1_source, and the cycle runs again ON THE NEW TREE
-//                    not         -> the run ends
+//   deep_explore   Dedicated ground-up rewrites with broad authority. A successful rewrite hands
+//                  a different program back to phase1. A failed API call, missing patch, or broken
+//                  build is not evidence of exhaustion; termination requires multiple independently
+//                  valid, structurally novel misses, or the caller's budget running out.
+//                    committed              -> back to phase1_source on the NEW TREE
+//                    valid + novel misses x2 -> the run ends
+//                    infrastructure failure  -> retry while budget remains
 //
 // WHY IT LOOPS, and why deep_explore is a round rather than a phase. `deep_engineer.md` rewrites
 // the kernel from the ground up with authority over the kernel, the wrapper and the binding, so a
@@ -750,14 +753,11 @@ const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_
 // most expensive move and then throw away the only thing it produced -- a fresh starting point with
 // its own source-level and assembly-level headroom. So it resets the ladder instead.
 //
-// And it gets ONE round, not a stall allowance: it is a single rewrite whose whole job is to hand
-// the next cycle a different route. Giving it four rounds would be four ground-up rewrites in a row,
-// each discarding the last one's tree before anything had searched it.
-//
-// A deep round that does NOT commit is the terminal case: a ground-up rewrite starting from the
-// current best failed to beat it, which is the strongest evidence available that the search is out
-// of routes. Nothing caps the number of cycles beyond BUDGET, which already prices a deep round at
-// DEEP_COST.
+// A deep attempt is still a dedicated round, but one miss is not a verdict. The five outcomes below
+// are deliberately distinct: api_failure, no_patch, compile_or_correctness_failure, valid_no_gain,
+// and valid_new_structure. Only the last one is evidence that a genuinely different implementation
+// was tried; two distinct valid_new_structure misses are required before this level may end the run.
+// Every other failure keeps the level live until another affordable attempt exists or BUDGET ends it.
 const PHASE_SOURCE = 'phase1_source';
 const PHASE_ASM = 'phase2_asm';
 const PHASE_DEEP = 'deep_explore';
@@ -769,10 +769,23 @@ const PHASE_ORDER = [PHASE_SOURCE, PHASE_ASM, PHASE_DEEP];
 // when nothing was tried. phase2 became live with `asm_roundtrip.py` and `isa_signals.py keypoint`;
 // the flag stays because "can this state actually act" is a question the ladder should keep asking.
 const PHASE_IMPLEMENTED = { [PHASE_SOURCE]: true, [PHASE_ASM]: true, [PHASE_DEEP]: true };
+// One broad rewrite can fail for accidental reasons or simply choose a weak structure. Requiring two
+// independently valid and structurally novel misses is the minimum plural evidence for exhaustion.
+const MIN_VALID_NOVEL_DEEP_ATTEMPTS = 2;
+const deepExhaustion = (attempts, activeCycle, minimum) => {
+  const identities = new Set();
+  for (const a of (Array.isArray(attempts) ? attempts : [])) {
+    if (!a || a.cycle !== activeCycle || a.outcome !== 'valid_new_structure'
+        || !a.valid || !a.novel || a.beneficial) continue;
+    const identity = `${a.structure_key || ''}|${a.artifact_sha256 || ''}`;
+    if (a.structure_key && a.artifact_sha256) identities.add(identity);
+  }
+  return { stop: identities.size >= minimum, valid_novel_misses: identities.size };
+};
 
 // The next state that can act. Wraps: after `deep_explore` the cycle restarts at the source phase.
-// Never returns '' -- the loop is closed, and what ends a run is a deep round that banked nothing
-// or the budget running out, not falling off the end of a list.
+// Never returns '' -- the loop is closed. A run ends only after plural valid+novel deep misses or
+// budget exhaustion, never by falling off the end of this list.
 const nextLivePhase = (from) => {
   const n = PHASE_ORDER.length;
   const at = PHASE_ORDER.indexOf(from);
@@ -995,10 +1008,21 @@ const SETUP_SCHEMA = obj({
     // It is NOT in the same frame as anything this run measures: this run's baseline is the tree
     // STATE_DIR/best just seeded, so this run's own speedups start at 1.0. Consumed only via
     // `priorCumulativeVsSeed`; never compare it to a verified_geomean.
-    cumulative: { type: 'number' }, insights: { type: 'array', items: { type: 'string' } },
+    schema: { type: 'string' }, schema_version: { type: 'number' }, cumulative: { type: 'number' },
+    insights: { type: 'array', items: { type: 'string' } },
     ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    asm_ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    keypoint_citations: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    process_log: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    rounds: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    search_phase: { type: 'string' }, phase_stall: { type: 'number' }, cycle: { type: 'number' },
+    phase_log: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    deep_attempts: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    last_round: { type: 'number' }, canonical_hashes: { type: 'object', additionalProperties: true },
     bottleneck_now: { type: 'string' }, best_per_case: perCase,
   }, []),
+  resume_invalidated: { type: 'boolean' }, resume_invalidation_reason: { type: 'string' },
+  state_validation: { type: 'object', additionalProperties: true },
   // Finding (67). sha256 over the immutable oracle (unittest.py, meta.json, reference_io.pt,
   // baseline_src/) recorded BEFORE any engineer runs. Candidates carry `source_hash` provenance;
   // the denominator and correctness reference carried none, so a write through the golden's
@@ -1213,6 +1237,8 @@ const PLAN_SCHEMA = obj({
       id: { type: 'string' }, title: { type: 'string' },
       specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'deep_explore'] },
       focus_files: { type: 'array', items: { type: 'string' } },
+      // Persisted with the direction: entropy is about mechanisms/configurations, not just role labels.
+      mechanism: { type: 'string' }, config: { type: 'object', additionalProperties: true },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
       // Learned cards that SEEDED this direction, by filename. Structural attribution: the planner
@@ -1393,6 +1419,11 @@ const ENG_SCHEMA = obj({
   // Load-bearing for reading the curve: a round that re-emitted is measured against a different
   // program than one that continued, and without this a restart looks like a round that found less.
   continued_from: { type: 'string', enum: ['incumbent', 'cold_emit', 'superseded_reemit'] },
+  // Deep attempts count as novel only when the engineer names the structural identity independently
+  // of the benchmark result. Artifact bytes are added by the journal and cannot substitute for this.
+  structure_fingerprint: { type: 'string' }, config: { type: 'object', additionalProperties: true },
+  focus_files: { type: 'array', items: { type: 'string' } },
+  artifact_sha256: { type: 'string' }, journal_receipt: { type: 'string' },
 }, ['status', 'speedup_geomean']);
 
 const VERIFY_SCHEMA = obj({
@@ -1561,12 +1592,91 @@ const WARMSTART_WRITE_SCHEMA = obj({
   }),
 }, ['written']);
 
+// Durable-state capability receipts. The helper owns these schemas on disk; the broad nested
+// objects here preserve its evidence instead of asking the relay agent to transcribe selected fields.
+const JOURNAL_REGISTER_SCHEMA = obj({
+  registered: { type: 'boolean' }, idempotent: { type: 'boolean' }, reason: { type: 'string' },
+  entry_file: { type: 'string' }, entry: { type: 'object', additionalProperties: true },
+  artifact: { type: 'object', additionalProperties: true },
+}, ['registered']);
+const JOURNAL_DISCOVERY_SCHEMA = obj({
+  ok: { type: 'boolean' }, policy: { type: 'string' },
+  recoverable: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  invalidated: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  canonical_hashes: { type: 'object', additionalProperties: true },
+}, ['ok', 'recoverable']);
+const JOURNAL_ACTION_SCHEMA = obj({
+  ok: { type: 'boolean' }, settled: { type: 'number' },
+  entry: { type: 'object', additionalProperties: true },
+  entries: { type: 'array', items: { type: 'object', additionalProperties: true } },
+}, ['ok']);
+const STATE_PERSIST_SCHEMA = obj({
+  ok: { type: 'boolean' }, schema: { type: 'string' }, state_file: { type: 'string' },
+  best_refreshed: { type: 'boolean' },
+  canonical_hashes: { type: 'object', additionalProperties: true },
+}, ['ok']);
+const CONFIG_SELECT_SCHEMA = obj({
+  ok: { type: 'boolean' }, schema: { type: 'string' }, phase_independent: { type: 'boolean' },
+  selection_contract: { type: 'string' }, reason: { type: 'string' }, config_id: { type: 'string' },
+  config: { type: 'object', additionalProperties: true },
+}, ['ok']);
+
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
 // relevant knowledge files itself; the script only passes paths + JSON inputs.
 // ---------------------------------------------------------------------------
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+
+const WORKFLOW_STATE_HELPER = `${WORKFLOW_DIR}/scripts/workflow_state.py`;
+const ROUND_JOURNAL_HELPER = `${WORKFLOW_DIR}/scripts/round_journal.py`;
+const CONFIG_SEARCH_HELPER = `${WORKFLOW_DIR}/scripts/config_search.py`;
+// Registered before Setup so the capability truly is phase-independent. STATE_DIR makes it
+// continuation-local; standalone runs share an explicit EXP_ROOT/kernel/language registry.
+let configSearchRegistry = STATE_DIR
+  ? `${STATE_DIR}/config_search/registry.json`
+  : `${EXP_ROOT}/config_search/${kebab(KERNEL_NAME_HINT)}-${kebab(TARGET_LANGUAGE || 'default')}/registry.json`;
+const availableCapabilities = () => ({
+  config_search: {
+    schema: 'geak.config-search/v1', phase_independent: true,
+    command: `python3 ${CONFIG_SEARCH_HELPER}`,
+    registry: configSearchRegistry,
+    selection_contract: 'select only precompiled=true entries whose artifact hash validates; '
+      + 'new configs must be created through config_search create, never fabricated in a phase role',
+  },
+});
+// Stable enough for direction identity: recursively sort object keys so semantically identical config
+// objects do not inflate entropy merely because an agent emitted their keys in a different order.
+const stableValue = (v) => {
+  if (Array.isArray(v)) return `[${v.map(stableValue).join(',')}]`;
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort()
+    .map(k => `${JSON.stringify(k)}:${stableValue(v[k])}`).join(',')}}`;
+  return JSON.stringify(v == null ? null : v);
+};
+const nonEmptyObject = (v) => !!(v && typeof v === 'object' && !Array.isArray(v)
+  && Object.keys(v).length);
+const effectiveDirectionRecord = (direction, result) => {
+  const journalWorker = result && result.journal && result.journal.entry
+    && result.journal.entry.worker_summary && typeof result.journal.entry.worker_summary === 'object'
+    ? result.journal.entry.worker_summary : {};
+  const worker = result && result.eng && typeof result.eng === 'object' ? result.eng : journalWorker;
+  const requestedConfig = nonEmptyObject(worker.config)
+    ? worker.config : (nonEmptyObject(direction.config) ? direction.config : {});
+  const selected = result && result.configSelection && result.configSelection.ok
+    && nonEmptyObject(result.configSelection.config) ? result.configSelection.config : null;
+  const actualConfig = selected
+    ? { ...(selected.config || {}), id: selected.id || requestedConfig.id || '',
+        artifact_sha256: selected.artifact_sha256 || '' }
+    : requestedConfig;
+  const reportedFocus = Array.isArray(worker.focus_files) && worker.focus_files.length
+    ? worker.focus_files : (direction.focus_files || []);
+  return {
+    id: direction.id, title: direction.title, specialty: direction.specialty,
+    focus_files: reportedFocus, config: actualConfig, mechanism: direction.mechanism || '',
+    structure_fingerprint: worker.structure_fingerprint || '',
+    learned_refs: direction.learned_refs || [],
+  };
+};
 
 // --- Hung-agent guard ------------------------------------------------------
 // An agent LLM call that HANGS (no response, no terminal error) blocks a
@@ -1680,13 +1790,17 @@ function expertSkillsBlock(role) {
 }
 
 function roleAgent(role, phase, intro, inputs) {
+  const capabilityInputs = configSearchRegistry
+    ? { ...inputs, AVAILABLE_CAPABILITIES: availableCapabilities() } : inputs;
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
-
+${configSearchRegistry ? `AVAILABLE_CAPABILITIES are callable tools, not phase policy. config_search may be `
+  + `used in ANY search phase. Select only a precompiled/hash-valid result; route every new config `
+  + `through its create command.\n` : ''}
 ## Inputs
-${cfg(inputs)}
+${cfg(capabilityInputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
   return base + expertSkillsBlock(role);
@@ -1714,13 +1828,13 @@ phase('Setup');
     `${key}=${value}${A[key] == null ? ' (default)' : ''}${extra ? ` ${extra}` : ''}`;
   log('Effective run configuration (the knobs that decide what this run ADMITS):');
   log(`  ${shown('budget', BUDGET)}  ${shown('deep_cost', DEEP_COST)}  ` +
-      `${shown('max_no_improve', MAX_NO_IMPROVE, '(per PHASE, then escalate; last phase ends the run)')}`);
+      `${shown('max_no_improve', MAX_NO_IMPROVE, '(source/asm phase backstop; deep uses valid-novel evidence)')}`);
   // The ladder is the run's shape, so it is stated before the run rather than inferred from the
   // escalation lines afterwards. Phases with no implementation are named as skipped HERE, so nobody
   // waits for an assembly phase this build cannot enter.
   log(`  search_phases=${PHASE_ORDER.map(p =>
         `${p}${PHASE_IMPLEMENTED[p] ? '' : ' (SKIPPED: not implemented)'}`).join(' -> ')}` +
-      `  one-way, ${MAX_NO_IMPROVE} stalled round(s) each`);
+      `  cyclic; source/asm escalate after ${MAX_NO_IMPROVE} stalls, deep requires plural valid+novel misses`);
   log(`  ${shown('min_improve', MIN_IMPROVE)}  ${shown('candidate_floor', CANDIDATE_FLOOR)}  ` +
       `${shown('progress_delta', PROGRESS_DELTA)}` +
       `${A.progress_delta == null ? ' (= min_improve)' : ''}`);
@@ -1753,7 +1867,7 @@ const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, TASK_DIR: KERNEL_PATH_ORIG,
     EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK, SKILL_DIR: WORKFLOW_DIR,
-    MODE, TARGET_LANGUAGE, OP_SPEC,
+    MODE, TARGET_LANGUAGE, OP_SPEC, WORKFLOW_STATE_HELPER,
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
@@ -1762,7 +1876,16 @@ const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
 const KERNEL_NAME = setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
+// This registration point was live before Setup and remains independent of SEARCH_PHASE -- roles
+// decide whether they need a config, never whether the tool exists.
+const ROUND_JOURNAL_DIR = STATE_DIR
+  ? `${STATE_DIR}/round_journal`
+  : `${EVAL_DIR}/round_journal`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
+if (setup.resume_invalidated) {
+  log(`[resume] INVALIDATED persisted state: ${setup.resume_invalidation_reason || 'state/hash validation failed'}. `
+    + 'The original kernel is used; no prior search state or interrupted artifact is trusted.');
+}
 
 // ---------------------------------------------------------------------------
 // Enforce a FROZEN REAL-ONLINE BASELINE in BOTH modes (author AND same-language
@@ -2092,10 +2215,79 @@ if (DRA_ENABLED) {
   }
 }
 
+// Publish a complete continuation barrier through the versioned helper. This is shared by normal
+// measured rounds and planning-only phase transitions: a process cut after a reasoned escalation must
+// not restore the previous phase/stall cursor merely because no engineer happened to run that round.
+const persistWorkflowState = async (refreshBest, barrier) => {
+  if (!STATE_DIR) return true;
+  processLog.push({ event: 'state_persist_barrier', round, barrier,
+    search_phase: searchPhase, phase_stall: phaseStall, cycle });
+  const statePayload = {
+    cumulative: cumulativeVsSeed(),
+    cumulative_frame: 'vs the original seed',
+    wave_local_cumulative: cumulative,
+    insights: history.insights,
+    ledger: history.ledger,
+    asm_ledger: history.asm_ledger,
+    keypoint_citations: keypointCitations,
+    bottleneck_now: history.bottleneck_now,
+    best_per_case: bestPerCase,
+    rounds: history.rounds,
+    search_phase: searchPhase,
+    phase_stall: phaseStall,
+    cycle,
+    phase_log: phaseLog,
+    deep_attempts: deepAttempts,
+    last_round: round,
+    process_log: processLog,
+  };
+  const payloadPath = `${EVAL_DIR}/state_payload_r${round}_${kebab(barrier)}.json`;
+  const payloadLiteral = JSON.stringify(JSON.stringify(statePayload));
+  const stateReceipt = await agentT(
+    `Run EXACTLY these commands. The first atomically writes the supplied JSON payload; the second ` +
+    `is the only writer of STATE.json and computes all canonical hashes itself. Return only the ` +
+    `helper's JSON stdout:
+\`\`\`bash
+` +
+    `python3 - <<'PY'
+import json, os, uuid
+` +
+    `path=${JSON.stringify(payloadPath)}
+payload=json.loads(${payloadLiteral})
+` +
+    `tmp=path+'.tmp.'+uuid.uuid4().hex
+` +
+    `with open(tmp,'w',encoding='utf-8') as f:
+` +
+    ` json.dump(payload,f,sort_keys=True,indent=2); f.write('\n'); f.flush(); os.fsync(f.fileno())
+` +
+    `os.replace(tmp,path)
+PY
+` +
+    `python3 ${JSON.stringify(WORKFLOW_STATE_HELPER)} persist ` +
+    `--state-dir ${JSON.stringify(STATE_DIR)} --canonical ${JSON.stringify(CANONICAL)} ` +
+    `--payload-file ${JSON.stringify(payloadPath)} ` +
+    `${refreshBest ? '--refresh-best' : ''}
+\`\`\``,
+    { phase: 'Optimize', label: `workflow_state:persist r${round} ${barrier}`,
+      schema: STATE_PERSIST_SCHEMA });
+  if (stateReceipt && stateReceipt.ok) {
+    restoredCanonicalHashes = stateReceipt.canonical_hashes || restoredCanonicalHashes;
+    processLog.push({ event: 'state_persisted', round, barrier,
+      search_phase: searchPhase, best_refreshed: !!stateReceipt.best_refreshed });
+    return true;
+  }
+  log(`[state] r${round} ${barrier} persistence failed; the previous atomic STATE.json remains authoritative.`);
+  processLog.push({ event: 'state_persist_failed', round, barrier });
+  return false;
+};
+
 // ===========================================================================
 // PHASE: Optimization loop (budget-controlled)
 // ===========================================================================
 let dispatched = 0;          // counts ONLY optimization-direction engineers (the budget)
+// Restored from STATE.last_round on a valid continuation so output dirs, phase_log and journal ids
+// remain globally monotonic across waves rather than silently reusing round_1.
 let round = 0;
 // `cumulative` is in THIS WAVE'S FRAME: speedup vs BASELINE_PER_CASE, which the benchmark
 // engineer measured on CANONICAL at the top of this run. On a resumed wave CANONICAL already
@@ -2168,6 +2360,15 @@ let cycle = 1;
 // that ran out of phases and a lane that ran out of budget look identical in a report that only
 // says "stopped".
 let stopReason = '';
+// Both arrays are versioned continuation state. deepAttempts records outcome classes, while processLog
+// records transitions/invalidation/recovery events that must remain explainable after a restart.
+const deepAttempts = [];
+const processLog = [];
+let restoredCanonicalHashes = null;
+if (setup.resume_invalidated) processLog.push({
+  event: 'state_invalidated', round: 0,
+  reason: setup.resume_invalidation_reason || 'state/hash validation failed',
+});
 const phaseLog = [{
   phase: START_PHASE, entered_round: 1, cycle: 1,
   // The reason string has to say the entry was forced. Recording 'start' while running phase2
@@ -2189,6 +2390,8 @@ const advancePhase = (why, atRound) => {
         + 'findings and keypoints from the last cycle describe a tree that no longer exists.'
       : 'The stall counter resets; the new state is judged on its own rounds.'));
   phaseLog.push({ phase: next, entered_round: atRound + 1, cycle, reason: why });
+  processLog.push({ event: 'phase_transition', round: atRound, from: searchPhase,
+    to: next, cycle, reason: why });
   searchPhase = next;
   phaseStall = 0;
 };
@@ -2721,11 +2924,40 @@ if (setup.resumed && setup.prior_state) {
   // banked `.s` in its canonical tree, so an engineer continuing from that assembly with none of
   // the window verdicts behind it would re-run experiments the previous wave already paid for.
   if (Array.isArray(ps.asm_ledger)) history.asm_ledger = ps.asm_ledger;
+  if (Array.isArray(ps.rounds)) history.rounds = ps.rounds;
   // Carried for the same reason as `asm_ledger`, and it matters more: a per-cell rate needs several
   // attempts behind it and one wave rarely supplies them. Without this the efficacy question resets
   // every wave and can never be answered -- which is the state the lane was in before this existed.
   if (Array.isArray(ps.keypoint_citations)) keypointCitations.push(...ps.keypoint_citations);
+  if (Array.isArray(ps.deep_attempts)) deepAttempts.push(...ps.deep_attempts);
+  if (Array.isArray(ps.process_log)) processLog.push(...ps.process_log);
+  if (ps.canonical_hashes && typeof ps.canonical_hashes === 'object') {
+    restoredCanonicalHashes = ps.canonical_hashes;
+  }
+  // Restore the control-plane cursor only after Director validated schema + source/asm/binary hashes.
+  // An explicit start_phase is an operator override: preserve historical rounds/cycles, but reset the
+  // stall allowance and append the override to the phase log instead of pairing a forced phase with
+  // the previous phase's stall counter.
+  if (Number.isInteger(ps.cycle) && ps.cycle >= 1) cycle = ps.cycle;
+  if (Number.isInteger(ps.last_round) && ps.last_round >= 0) round = ps.last_round;
+  if (!START_PHASE_FORCED) {
+    if (PHASE_ORDER.includes(ps.search_phase)) searchPhase = ps.search_phase;
+    if (Number.isInteger(ps.phase_stall) && ps.phase_stall >= 0) phaseStall = ps.phase_stall;
+    if (Array.isArray(ps.phase_log) && ps.phase_log.length) {
+      phaseLog.splice(0, phaseLog.length, ...ps.phase_log);
+    }
+  } else {
+    phaseStall = 0;
+    const priorPhaseLog = Array.isArray(ps.phase_log) ? ps.phase_log : [];
+    phaseLog.splice(0, phaseLog.length, ...priorPhaseLog, {
+      phase: searchPhase, entered_round: round + 1, cycle,
+      reason: `operator forced start_phase=${searchPhase} on resume`,
+    });
+    processLog.push({ event: 'resume_phase_override', round, search_phase: searchPhase, cycle });
+  }
   if (ps.bottleneck_now) history.bottleneck_now = ps.bottleneck_now;
+  processLog.push({ event: 'state_resumed', round, search_phase: searchPhase,
+    phase_stall: phaseStall, cycle });
   if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) {
     log(`  [resume] NOT importing prior_state.best_per_case (${ps.best_per_case.length} rows): those are ` +
         'the previous wave\'s numbers in the previous wave\'s frame. This wave\'s BASELINE_PER_CASE was ' +
@@ -2733,7 +2965,9 @@ if (setup.resumed && setup.prior_state) {
   }
   log(`RESUMED from STATE_DIR: prior cumulative vs seed=${priorCumulativeVsSeed.toFixed(3)}x, ` +
       `this wave restarts at 1.000x vs the incumbent it was seeded from (same tree, different frame), ` +
-      `${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
+      `${history.insights.length} insights, ${history.ledger.length} ledger entries, ` +
+      `${history.asm_ledger.length} asm rows, ${deepAttempts.length} deep attempts, last_round=${round}; ` +
+      `resuming phase=${searchPhase} stall=${phaseStall} cycle=${cycle}.`);
 }
 
 // --- which frame is `cumulative` actually in? -------------------------------
@@ -2958,6 +3192,40 @@ correctness check; only report committed=true if it still passes. Return JSON {c
         log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
       }
     }
+  }
+}
+
+// A previous wave may have been cut after an engineer atomically registered its artifact but before
+// verify/integration settled it. Recover only journaled bytes whose artifact and worker-receipt hashes
+// still match. The helper intentionally never scans round directories, so an unregistered patch cannot
+// become executable merely because a filename happens to look harvestable.
+let interruptedArtifacts = [];
+if (STATE_DIR && !setup.resume_invalidated) {
+  const discovered = await agentT(
+    `Run EXACTLY this command and return its single JSON stdout object verbatim. Do not inspect or ` +
+    `harvest any other file:
+\`\`\`bash
+` +
+    `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} discover ` +
+    `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} ` +
+    `--canonical ${JSON.stringify(CANONICAL)} ` +
+    `--current-eval-dir ${JSON.stringify(EVAL_DIR)}
+\`\`\``,
+    { phase: 'Setup', label: 'round_journal:discover', schema: JOURNAL_DISCOVERY_SCHEMA });
+  interruptedArtifacts = discovered && Array.isArray(discovered.recoverable)
+    ? discovered.recoverable : [];
+  const invalidated = discovered && Array.isArray(discovered.invalidated)
+    ? discovered.invalidated : [];
+  if (invalidated.length) {
+    log(`[journal] excluded ${invalidated.length} interrupted completion(s): no candidate patch, `
+      + 'unreadable receipt, or registered hash mismatch. None may cross into verification.');
+    processLog.push({ event: 'journal_recovery_excluded', round, candidates: invalidated });
+  }
+  if (interruptedArtifacts.length) {
+    log(`[journal] recovered ${interruptedArtifacts.length} unresolved registered candidate(s); `
+      + 'they will be independently reverified before new work is planned.');
+    processLog.push({ event: 'journal_recovery_queued', round,
+      candidates: interruptedArtifacts.map(x => x.candidate_id) });
   }
 }
 
@@ -3374,10 +3642,40 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
       `exhausted, spend the round RE-MEASURING the committed best to tighten its error bars and say ` +
       `so. Sizing: keep the round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
   });
-  let plan = await agentT(
-    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
-      planInputs(false)),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+  let plan;
+  if (interruptedArtifacts.length) {
+    // A recovery round spends no new engineer budget: these bytes were already produced and atomically
+    // receipted in an earlier wave. Keep it separate from new planning so a fresh direction cannot hide
+    // an interrupted candidate behind the round barrier again.
+    const take = roundPhase === PHASE_DEEP ? 1 : Math.min(3, interruptedArtifacts.length);
+    const pending = interruptedArtifacts.splice(0, take);
+    plan = {
+      stop: false,
+      reasoning: 'registered interrupted artifacts are independently reverified before new work',
+      directions: pending.map((entry, i) => {
+        const worker = entry.worker_result || {};
+        return {
+          id: entry.direction || `recovered_${round}_${i}`,
+          title: `reverify interrupted ${entry.candidate_id || entry.direction || i}`,
+          specialty: worker.specialty || (entry.phase === PHASE_DEEP ? 'deep_explore' : 'algorithm'),
+          focus_files: worker.focus_files || [],
+          mechanism: Array.isArray(worker.mechanism_claims) ? worker.mechanism_claims.join('+') : '',
+          config: worker.config && typeof worker.config === 'object' ? worker.config : {},
+          expected_speedup: Number(worker.speedup_geomean) || 1,
+          prompt: entry.recovery_reason || 'independently reverify registered interrupted artifact',
+          recovered_entry: entry,
+          journal_candidate_id: entry.candidate_id,
+        };
+      }),
+    };
+    log(`Round ${round}: recovery barrier -- revalidating ${pending.length} registered interrupted `
+      + 'candidate(s) before asking the planner for new work.');
+  } else {
+    plan = await agentT(
+      roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
+        planInputs(false)),
+      { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+  }
 
   // NO EARLY STOP, but only where the ladder has nowhere left to go. Upstream refuses EVERY stop
   // while the window is unspent, because there a stop ends the run outright. Here a stop in
@@ -3410,7 +3708,14 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
     log(`Round ${round}: TechLead reports ${roundPhase} finished. `
       + `${plan ? plan.reasoning || '' : '(no plan returned)'}`);
     advancePhase(escalationReason(true, phaseStall, MAX_NO_IMPROVE), round);
-    // No directions were dispatched, so nothing is scored: the round is spent moving the ladder.
+    // No directions were dispatched, but this is still a durable control-plane round. Record and
+    // publish it before continuing so a cut here cannot resurrect the exhausted phase/stall cursor.
+    history.rounds.push({
+      round, directions: [], results: [], integrate: null, winner: null,
+      improved: false, committed: false, cumulative, cumulative_vs_seed: cumulativeVsSeed(),
+      search_phase: roundPhase, transition_only: true, transitioned_to: searchPhase,
+    });
+    await persistWorkflowState(false, 'phase_transition');
     // It cannot loop -- the next state differs, and a deep round always produces a direction.
     continue;
   }
@@ -3445,9 +3750,11 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
     ...d,
     idx: i, id: d.id || `r${round}_d${i}`,
     gpu_id: GPU_MODE === 'pin' ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
-    out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
+    out_dir: d.recovered_entry
+      ? String(((d.recovered_entry.worker_receipt || {}).path || '')).replace(/\/[^/]+$/, '')
+      : `${EVAL_DIR}/round_${round}/engineer_${i}`,
     seed_dir: CANONICAL,
-    cost: d.specialty === 'deep_explore' ? DEEP_COST : 1,
+    cost: d.recovered_entry ? 0 : (d.specialty === 'deep_explore' ? DEEP_COST : 1),
   }));
   // deep_explore is a DEDICATED-ROUND heavyweight mandate.
   const deepDir = directions.find(d => d.specialty === 'deep_explore');
@@ -3482,7 +3789,7 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
     log(`Round ${round}: no planned direction fits remaining budget ${remaining}.`);
     break;
   }
-  const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
+  const roundCost = directions.reduce((sum, d) => sum + d.cost, 0);
   dispatched += roundCost;
   // Planned-vs-dispatched on one line. `directions.length` alone is the count
   // that survived the dedicated-round shed and the affordability check, and
@@ -3495,6 +3802,12 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
   const results = await pipeline(
     directions,
     (d) => {
+      if (d.recovered_entry) {
+        // The engineer already completed in an earlier wave; its immutable journal receipt is the
+        // authority. Re-running the engineer would create different bytes under the old identity.
+        return Promise.resolve({ d, eng: d.recovered_entry.worker_result || null,
+          journal: { registered: true, entry: d.recovered_entry }, recoveredJournal: true });
+      }
       // The PHASE decides which contract an engineer reads, and it outranks the specialty: in
       // phase2 there is no source direction to implement, so a specialty label would send the
       // engineer to a role that edits the wrong artifact.
@@ -3556,7 +3869,9 @@ Save best_patch.diff via \`cd <KERNEL_PATH> && git add -A && git diff --cached -
 ## Inputs
 ${cfg({
         SPECIALTY: d.specialty,
-        DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
+        DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [],
+          mechanism: d.mechanism || '', config: d.config || {},
+          expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: d.expected_speedup ? `reach ${d.expected_speedup}x (or ~90% of the roofline ceiling), whichever is the harder bar` : 'reach ~90% of the roofline ceiling' } : {}),
         KERNEL_PATH: `${d.out_dir}/workspace`,
         OUTPUT_DIR: d.out_dir,
@@ -3593,52 +3908,137 @@ ${cfg({
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
         ...KB_INPUTS,
+        AVAILABLE_CAPABILITIES: availableCapabilities(),
       })}
 
-Return ONLY the worker_result.json structure as StructuredOutput.` +
+Before returning, atomically write the EXACT same JSON object to ${d.out_dir}/worker_result.json
+(write a unique temp file, fsync it, then rename it). This durable receipt is mandatory even when no
+patch was produced; the orchestrator journals it before verification. Return ONLY that same
+worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isAsm ? 'asm_engineer' : isDeep ? 'deep_engineer' : 'engineer'),
       { phase: 'Optimize',
         label: `${isAsm ? 'asm' : isDeep ? 'deep' : 'eng'} ${d.id}:${isAsm ? 'assembly' : d.specialty}`,
         schema: ENG_SCHEMA }
-    ).then((eng) => ({ d, eng }));
+    ).then(async (eng) => {
+      const candidateId = `r${round}:${d.id}`;
+      const journal = await agentT(
+        `Run EXACTLY this command once the engineer call has completed. Return its JSON stdout ` +
+        `verbatim even when it exits 2 (that is a durable no-receipt/no-artifact result). Do not scan ` +
+        `for any alternative patch:
+\`\`\`bash
+` +
+        `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} register ` +
+        `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} ` +
+        `--eval-dir ${JSON.stringify(EVAL_DIR)} --candidate-id ${JSON.stringify(candidateId)} ` +
+        `--round ${round} --direction ${JSON.stringify(d.id)} --phase ${JSON.stringify(roundPhase)} ` +
+        `--artifact ${JSON.stringify(`${d.out_dir}/best_patch.diff`)} ` +
+        `--worker-receipt ${JSON.stringify(`${d.out_dir}/worker_result.json`)} ` +
+        `--canonical ${JSON.stringify(CANONICAL)} --deadline-epoch ${DEADLINE_EPOCH}
+\`\`\``,
+        { phase: 'Optimize', label: `round_journal:register ${d.id}`,
+          schema: JOURNAL_REGISTER_SCHEMA });
+      const requestedConfig = effectiveDirectionRecord(d, { d, eng, journal }).config;
+      let configSelection = { ok: true, required: false };
+      if (nonEmptyObject(requestedConfig)) {
+        const configId = typeof requestedConfig.id === 'string' ? requestedConfig.id.trim() : '';
+        if (!configId) {
+          configSelection = { ok: false, required: true,
+            reason: 'selected config has no config_search id' };
+        } else {
+          const selected = await agentT(
+            `Run EXACTLY this command and return its single JSON stdout object verbatim, including ` +
+            `when it exits 2. This is the admission check for a selected config:
+\`\`\`bash
+` +
+            `python3 ${JSON.stringify(CONFIG_SEARCH_HELPER)} select ` +
+            `--registry ${JSON.stringify(configSearchRegistry)} --id ${JSON.stringify(configId)}
+\`\`\``,
+            { phase: 'Optimize', label: `config_search:select ${d.id}`,
+              schema: CONFIG_SELECT_SCHEMA });
+          configSelection = selected
+            ? { ...selected, required: true }
+            : { ok: false, required: true, reason: 'config selection capability returned nothing',
+                config_id: configId };
+        }
+      }
+      return { d, eng, journal, configSelection };
+    });
     },
 
-    (prev) => {
-      const { d, eng } = prev;
-      const patch = `${d.out_dir}/best_patch.diff`;
-      // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
-      // best_patch.diff when it beat the floor (the Optimize prompt: "Save best_patch.diff ... when
-      // geomean>CANDIDATE_FLOOR"), so a lost/failed StructuredOutput does NOT imply there is no winning patch: an
-      // engineer that died, timed out, or mis-returned can still have left an applies-clean above-floor diff
-      // on disk (observed in a bake-off: a 1.56x Triton patch was silently dropped because its
-      // worker_result.json/StructuredOutput never came back). The only return we can TRUST to suppress
-      // a patch is a clean below-floor one — the engineer ran, measured, honestly reported <=the floor, and
-      // therefore wrote no patch. In every other case (null/failed return, OR a claimed above-floor one) a patch
-      // MIGHT be on disk, so we hand the path to verify and let the oracle be the source of truth. We
-      // cannot stat the file from the workflow sandbox, so the "is there actually a patch" decision is
-      // delegated to verify, which returns apply_failed on an absent/empty patch — dropped by the
-      // `verified` filter below, i.e. the same outcome as skipping, but with no false loss.
-      // ...and never when the engineer says it saved a patch. `patch_file` is its own statement
-      // that a diff is on disk (ENG_SCHEMA); the workflow sandbox cannot stat the file. A self
-      // report is not entitled to suppress an independent measurement, and reading one as if it
-      // were a measurement is what cost this lane 28 of 40 patch-bearing slots.
-      const claimsPatch = !!(eng && typeof eng.patch_file === 'string' && eng.patch_file.trim());
-      // Raw-milliseconds ratio against the incumbent, not the engineer's own `speedup_geomean`.
-      // null (nothing lined up) reads as PASS.
-      const engVsInc = vsIncumbent(eng);
-      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !claimsPatch
-        && engVsInc !== null && !(engVsInc > CANDIDATE_FLOOR);
-      if (trustworthyBelowBaseline) {
-        log(`Round ${round} dir ${d.id}: skipping verify -- self-measured `
-          + `${engVsInc.toFixed(4)}x the incumbent, under the ${CANDIDATE_FLOOR} screen, and no `
-          + 'patch_file was claimed.');
-        return { d, eng, ver: null };
+    async (prev) => {
+      let { configSelection } = prev;
+      const { d, eng, journal } = prev;
+      const patch = d.recovered_entry
+        ? String((d.recovered_entry.artifact || {}).path || '')
+        : `${d.out_dir}/best_patch.diff`;
+      // Recovered candidates bypass the engineer stage, so revalidate their selected config here.
+      // Live candidates already carry the same receipt from config_search:select.
+      if (!configSelection) {
+        const requestedConfig = effectiveDirectionRecord(d, { d, eng, journal }).config;
+        configSelection = { ok: true, required: false };
+        if (nonEmptyObject(requestedConfig)) {
+          const configId = typeof requestedConfig.id === 'string' ? requestedConfig.id.trim() : '';
+          if (!configId) {
+            configSelection = { ok: false, required: true,
+              reason: 'selected config has no config_search id' };
+          } else {
+            const selected = await agentT(
+              `Run EXACTLY this command and return its single JSON stdout object verbatim, including ` +
+              `when it exits 2. This revalidates an interrupted candidate's selected config:
+\`\`\`bash
+` +
+              `python3 ${JSON.stringify(CONFIG_SEARCH_HELPER)} select ` +
+              `--registry ${JSON.stringify(configSearchRegistry)} --id ${JSON.stringify(configId)}
+\`\`\``,
+              { phase: 'Optimize', label: `config_search:select recovered ${d.id}`,
+                schema: CONFIG_SELECT_SCHEMA });
+            configSelection = selected
+              ? { ...selected, required: true }
+              : { ok: false, required: true, reason: 'config selection capability returned nothing',
+                  config_id: configId };
+          }
+        }
       }
-      const recovered = !eng || eng.status === 'failed';
+      // Verification is registered-only. A live StructuredOutput identifies what the engineer meant,
+      // but it does not prove which bytes are on disk; a guessed `best_patch.diff` path is the unsafe
+      // harvest shape this journal replaces. The helper atomically pins both the worker receipt and
+      // artifact hash before any candidate code executes. Missing registration degrades to an API/
+      // journal failure, never to scanning or trying a plausible filename.
+      if (!(journal && journal.registered && journal.entry)) {
+        log(`Round ${round} dir ${d.id}: NOT verifying an unregistered artifact `
+          + `(${journal && journal.reason ? journal.reason : 'journal registration returned nothing'}). `
+          + 'Only atomically receipted bytes may cross the execution boundary.');
+        return { d, eng, journal, configSelection, ver: null, patch };
+      }
+      if (!(journal.entry.artifact && journal.entry.artifact.present === true)) {
+        log(`Round ${round} dir ${d.id}: engineer completed with no patch; journaled as no_patch, `
+          + 'not sent to verification.');
+        return { d, eng, journal, configSelection, ver: null, patch };
+      }
+      if (configSelection && configSelection.required && !configSelection.ok) {
+        const reason = configSelection.reason || 'selected config is not precompiled and hash-valid';
+        log(`Round ${round} dir ${d.id}: NOT verifying candidate: ${reason}. Phase2 may select only `
+          + 'a precompiled config_search record, and the same fail-closed gate applies in every phase.');
+        const candidateId = d.journal_candidate_id || `r${round}:${d.id}`;
+        const journalConfiguration = await agentT(
+          `Run EXACTLY this command and return its JSON stdout verbatim:
+\`\`\`bash
+` +
+          `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} transition ` +
+          `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} ` +
+          `--eval-dir ${JSON.stringify(d.recovered_entry ? d.recovered_entry.eval_dir : EVAL_DIR)} ` +
+          `--candidate-id ${JSON.stringify(candidateId)} --status rejected ` +
+          `--reason ${JSON.stringify(`config selection invalid: ${reason}`)}
+\`\`\``,
+          { phase: 'Verify', label: `round_journal:config-reject ${d.id}`,
+            schema: JOURNAL_ACTION_SCHEMA });
+        return { d, eng, journal, configSelection, journalConfiguration, ver: null, patch };
+      }
+      const recovered = !!d.recovered_entry || !eng || eng.status === 'failed';
       // Two different events wear the same `recovered` flag and used to print
-      // nearly the same line. A MISSING return means the engineer died, timed
-      // out, or mis-returned, and the patch on disk is unexamined -- the case
+      // nearly the same line. A MISSING return means the live channel died or timed
+      // out, while the journal still pinned an exact worker receipt and artifact -- the case
       // the recovery path was built for. A FAILED return means the engineer ran
       // to completion, measured, and reported a loss; the patch is examined and
       // the numbers are right there. Verifying it anyway is still correct, and
@@ -3650,8 +4050,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // when there is one, which is the input to deciding whether this path
       // deserves a cheaper pre-check.
       if (recovered && !eng) {
-        log(`Round ${round} dir ${d.id}: engineer return MISSING (died/timed out/mis-returned) — `
-          + `best_patch.diff on disk is unexamined; sending to verify (oracle decides).`);
+        log(`Round ${round} dir ${d.id}: live engineer return unavailable, but its atomically `
+          + `registered artifact and worker receipt are hash-valid; sending those exact bytes to verify.`);
       } else if (recovered) {
         const ratios = ((eng.per_case || []).map(c => c && c.speedup)
           .filter(v => typeof v === 'number' && Number.isFinite(v) && v > 0));
@@ -3663,12 +4063,16 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           + `(oracle decides).`);
       }
       return agentT(
-        roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
+        roleAgent('verify_engineer', 'verify',
+          'Independently re-measure this candidate patch. Before returning, atomically write the exact '
+          + `structured result to ${d.out_dir}/verify/verification_result.json (temp + fsync + rename).`, {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
+          CONFIG_SELECTION: configSelection && configSelection.required
+            ? configSelection.config || { id: configSelection.config_id || '', invalid: true } : {},
           TASK_DIR: KERNEL_PATH_ORIG,
           GPU_ID: d.gpu_id, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           // Sent on EVERY round, not only in phase2. Whether the verifier needs it is decided by
-          // the PATCH -- an assembly patch can also arrive from a recovered on-disk artefact, or
+          // the PATCH -- an assembly patch can also arrive from a hash-validated journal recovery, or
           // ride along in a warm-start candidate won in some earlier wave -- and a helper supplied
           // only when the lane believes it is in the assembly phase is a helper that is absent
           // during exactly the run whose measurement it was meant to keep honest.
@@ -3686,24 +4090,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
             // not an independent check. Absent when the engineer declared none.
             ISA_MECHANISM_CLAIMS: eng && Array.isArray(eng.mechanism_claims)
               ? eng.mechanism_claims : [],
-            // ...and the same claim's ON-DISK copy, for the recovery path only.
-            // A lost StructuredOutput used to take the mechanism claim with it: `eng`
-            // is null, this list renders as `[]`, and the verifier -- correctly
-            // refusing to substitute a claim of its own -- reports `indeterminate`.
-            // Observed on this task the first time the lane ever committed: the
-            // engineer had declared ['reduce_lds'] and written it to
-            // <out_dir>/worker_result.json at 13:32; the recovered verify at 15:02
-            // was handed [] and the ISA layer answered nothing about the one patch
-            // that got banked. That is the identical failure the patch harvest above
-            // already refuses to make -- an engineer that died can still have left a
-            // good artefact on disk -- and the identical remedy applies, because
-            // worker_result.json is written by the engineer BEFORE verify measures
-            // anything, so reading it is not fitting the claim to the evidence. We
-            // cannot stat it from the workflow sandbox, so, exactly as with the
-            // patch, the file is named and the decision is delegated. Sent ONLY when
-            // the return was lost: a live `eng` is the authority and a file must
-            // never get to override it.
-            ...(recovered ? { ISA_MECHANISM_CLAIMS_FILE: `${d.out_dir}/worker_result.json` } : {}),
+            // The same declaration from the exact worker receipt admitted by the journal. A missing
+            // live return must not erase a pre-measurement claim, but an arbitrary nearby JSON file
+            // must not recreate one either. The helper already verified this path and hash; the
+            // verifier reads it only as the engineer's prior hypothesis, never as measurement proof.
+            ...(recovered ? { ISA_MECHANISM_CLAIMS_FILE: d.recovered_entry
+              ? String((d.recovered_entry.worker_receipt || {}).path || '')
+              : `${d.out_dir}/worker_result.json` } : {}),
             // Null on round 1, and null again after any canonical with no archive.
             // Both mean the same thing to the verifier: diff-based claims are
             // indeterminate this round; report that, do not substitute another tree.
@@ -3718,7 +4111,32 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then(async (ver) => {
+        // A null verifier return leaves the entry at engineer_complete, which is exactly the unresolved
+        // state the next wave discovers. A concrete verifier result advances it with a hashed receipt.
+        let journalVerification = null;
+        if (ver && journal && journal.registered) {
+          const candidateId = d.journal_candidate_id || `r${round}:${d.id}`;
+          const verifiedOK = ver.policy_pass === true && says(ver.status, 'verified')
+            && says(ver.correctness, 'pass');
+          journalVerification = await agentT(
+            `Run EXACTLY this command and return its JSON stdout verbatim:
+\`\`\`bash
+` +
+            `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} transition ` +
+            `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} ` +
+            `--eval-dir ${JSON.stringify(d.recovered_entry ? d.recovered_entry.eval_dir : EVAL_DIR)} ` +
+            `--candidate-id ${JSON.stringify(candidateId)} ` +
+            `--status ${verifiedOK ? 'verified' : 'rejected'} ` +
+            `--reason ${JSON.stringify(verifiedOK ? 'independent verification completed' :
+              'compile, correctness, policy, or verification gate failed')} ` +
+            `--verification-receipt ${JSON.stringify(`${d.out_dir}/verify/verification_result.json`)}
+\`\`\``,
+            { phase: 'Verify', label: `round_journal:verify ${d.id}`,
+              schema: JOURNAL_ACTION_SCHEMA });
+        }
+        return { d, eng, journal, configSelection, journalVerification, ver, patch };
+      });
     }
   );
 
@@ -3842,6 +4260,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     }
   }
   const verified = clean.filter(r => {
+    const journalVerified = !!(r.journalVerification && r.journalVerification.ok
+      && r.journalVerification.entry && r.journalVerification.entry.status === 'verified');
+    if (!journalVerified) {
+      log(`  ${r.d && r.d.id ? r.d.id : 'candidate'} not admitted: durable verification receipt `
+        + 'was not atomically journaled. The unresolved registered artifact remains recoverable.');
+      return false;
+    }
     if (!(r.ver && r.ver.policy_pass === true &&
           says(r.ver.status, 'verified') && says(r.ver.correctness, 'pass'))) return false;
     // Finding (62): a metric fault and a slow kernel are different verdicts (60).
@@ -3907,13 +4332,18 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // than trust the pairing.
     isa_source_hash: r.ver.isa_evidence && typeof r.ver.isa_evidence.source_hash === 'string'
       ? r.ver.isa_evidence.source_hash : null,
+    journal: r.journal || null,
   }));
 
   let integrate = null;
+  let integrateJournal = null;
+  let integrateJournalVerification = null;
   if (verified.length >= 2) {
     phase('Merge');
     integrate = await agentT(
-      roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
+      roleAgent('integrator', 'integrate',
+        'Combine this round\'s verified patches into one best implementation. Before returning, '
+        + `atomically write the exact structured result to ${EVAL_DIR}/round_${round}/integrate/integration_result.json.`, {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         GPU_ID: GPU_POOL, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
@@ -3928,6 +4358,24 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+    if (integrate) {
+      const integratedPatch = integrate.best && integrate.best.patch_file
+        ? integrate.best.patch_file : `${EVAL_DIR}/round_${round}/integrate/best_patch.diff`;
+      integrateJournal = await agentT(
+        `Run EXACTLY this command and return its JSON stdout verbatim:
+\`\`\`bash
+` +
+        `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} register ` +
+        `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} --eval-dir ${JSON.stringify(EVAL_DIR)} ` +
+        `--candidate-id ${JSON.stringify(`r${round}:integrated`)} --round ${round} ` +
+        `--direction ${JSON.stringify(`r${round}_integrated`)} --phase ${JSON.stringify(roundPhase)} ` +
+        `--artifact ${JSON.stringify(integratedPatch)} ` +
+        `--worker-receipt ${JSON.stringify(`${EVAL_DIR}/round_${round}/integrate/integration_result.json`)} ` +
+        `--canonical ${JSON.stringify(CANONICAL)} --deadline-epoch ${DEADLINE_EPOCH}
+\`\`\``,
+        { phase: 'Merge', label: `round_journal:register integrated r${round}`,
+          schema: JOURNAL_REGISTER_SCHEMA });
+    }
     // Finding (62): the integrated result competes against `candidates[].geomean`, which
     // on a workload-aligned run are weighted numbers. An Integrator that reports only a
     // geomean must not be compared against them -- it would win or lose on the unit.
@@ -3943,15 +4391,47 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     const integPolicyReason = integrate && integrate.policy_pass === true
       ? (policyReject(integrate, 'integrate') || twinReject(integrate, 'integrate')) : null;
     if (integPolicyReason) log(`  integrate r${round} result discarded: ${integPolicyReason}`);
-    if (integrate && integrate.policy_pass === true && !integPolicyReason && integrate.conclusion === 'improved' &&
-      integrate.best && integPrim > Math.max(...candidates.map(c => c.geomean))) {
+    const integratedArtifactRegistered = !!(integrateJournal && integrateJournal.registered
+      && integrateJournal.entry && integrateJournal.entry.artifact
+      && integrateJournal.entry.artifact.present === true);
+    const integrationEligible = !!(integrate && integrate.policy_pass === true && !integPolicyReason
+      && integrate.conclusion === 'improved' && integratedArtifactRegistered && integrate.best
+      && integPrim > Math.max(...candidates.map(c => c.geomean)));
+    if (integrateJournal && integrateJournal.registered) {
+      integrateJournalVerification = await agentT(
+        `Run EXACTLY this command and return its JSON stdout verbatim:
+\`\`\`bash
+` +
+        `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} transition ` +
+        `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} --eval-dir ${JSON.stringify(EVAL_DIR)} ` +
+        `--candidate-id ${JSON.stringify(`r${round}:integrated`)} ` +
+        `--status ${integrationEligible ? 'verified' : 'rejected'} ` +
+        `--reason ${JSON.stringify(integrationEligible
+          ? 'integrator independently measured an eligible combined candidate'
+          : 'integrated candidate failed metric, policy, artifact, or improvement gate')} ` +
+        `--verification-receipt ${JSON.stringify(`${EVAL_DIR}/round_${round}/integrate/integration_result.json`)}
+\`\`\``,
+        { phase: 'Merge', label: `round_journal:verify integrated r${round}`,
+          schema: JOURNAL_ACTION_SCHEMA });
+    }
+    const integratedDurablyVerified = !!(integrateJournalVerification
+      && integrateJournalVerification.ok && integrateJournalVerification.entry
+      && integrateJournalVerification.entry.status === 'verified');
+    if (integrationEligible && integratedDurablyVerified) {
       candidates.push({
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
         geomean: integPrim, geomean_unweighted: integrate.best.geomean,
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        journal: integrateJournal,
       });
+    } else if (integrationEligible && !integratedDurablyVerified) {
+      log(`  integrate r${round} result discarded: durable verification receipt was not journaled; `
+        + 'a merely registered integrated patch cannot cross the canonical commit boundary.');
+    } else if (integrate && integrate.conclusion === 'improved' && !integratedArtifactRegistered) {
+      log(`  integrate r${round} result discarded: artifact/receipt was not atomically registered; `
+        + 'an unjournaled integrated patch cannot cross the canonical commit boundary.');
     }
   }
 
@@ -4171,10 +4651,11 @@ and candidate ELF, exempting only separately frozen immutable baseline/oracle pa
 failure, or absent passing receipt means committed=false. The applied source is NOT guaranteed to match
 the patch verbatim after a hand-merge, so after committing, RE-RUN both the policy gate and COMMANDMENT
 correctness (cd ${CANONICAL} and use gpu_lock); only report committed=true if both pass. Even after a clean
-apply, the policy receipt is mandatory because final materialization is a new trust boundary. Return JSON
-{committed, current_best_diff, note, head_sha_before, head_sha_after}. Report the two SHAs verbatim from
-\`git rev-parse HEAD\`; if they are equal, the commit did not happen and \`committed\` MUST be false no
-matter how the rest of the run looked.`,
+apply, the policy receipt is mandatory because final materialization is a new trust boundary. Build JSON
+{committed, current_best_diff, note, head_sha_before, head_sha_after}; atomically write that exact object
+to ${EVAL_DIR}/round_${round}/commit_result.json (unique temp, fsync, rename), then return the same object.
+Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the commit did not happen and
+\`committed\` MUST be false no matter how the rest of the run looked.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
 
     // (127). The result of this call used to be discarded, so `committed: false` -- and the empty
@@ -4268,21 +4749,88 @@ matter how the rest of the run looked.`,
   // while keeping `madeProgress`, the knob that lets a sub-baseline climb keep its budget.
   if (madeProgress || committedThisRound) { phaseStall = 0; } else { phaseStall++; }
 
+  // Classify a deep attempt by evidence, not by the single `committed` bit. Infrastructure faults,
+  // a missing patch, and a broken build answer different questions from a valid measured miss. A
+  // structure is novel only when BOTH a durable artifact hash and a pre-result structural fingerprint
+  // exist and neither was already tried in this cycle.
+  let deepAttemptThisRound = null;
+  if (roundPhase === PHASE_DEEP) {
+    const result = clean.find(r => r && r.d && r.d.specialty === 'deep_explore') || clean[0] || null;
+    const journalEntry = result && result.journal && result.journal.entry
+      ? result.journal.entry : (result && result.d ? result.d.recovered_entry : null);
+    const artifact = journalEntry && journalEntry.artifact ? journalEntry.artifact : null;
+    const artifactHash = artifact && artifact.present && artifact.sha256 ? artifact.sha256 : '';
+    const eng = result && result.eng;
+    const journalWorker = journalEntry && journalEntry.worker_summary
+      && typeof journalEntry.worker_summary === 'object' ? journalEntry.worker_summary : {};
+    const ver = result && result.ver;
+    const structureKey = String((eng && eng.structure_fingerprint)
+      || journalWorker.structure_fingerprint
+      || (result && result.d && result.d.mechanism) || '').trim();
+    const journalVerificationFault = !!(ver && (!result.journalVerification
+      || !result.journalVerification.ok || !result.journalVerification.entry
+      || result.journalVerification.entry.status === 'invalidated'));
+    const durableVerification = !!(result && result.journalVerification
+      && result.journalVerification.ok && result.journalVerification.entry
+      && result.journalVerification.entry.status === 'verified');
+    const valid = !!(durableVerification && ver && ver.policy_pass === true && says(ver.status, 'verified')
+      && says(ver.correctness, 'pass') && !primMetricReason(ver) && !oracleDrift(ver)
+      && !policyReject(ver) && !twinReject(ver)
+      && !asmRestoreReject(ver, null, roundPhase === PHASE_ASM));
+    const alreadyTried = deepAttempts.some(a => a && a.cycle === cycle
+      && ((structureKey && a.structure_key === structureKey)
+        || (artifactHash && a.artifact_sha256 === artifactHash)));
+    const novel = valid && !!structureKey && !!artifactHash && !alreadyTried;
+    const configInvalid = !!(result && result.configSelection
+      && result.configSelection.required && !result.configSelection.ok);
+    let outcome;
+    if (configInvalid) {
+      outcome = 'compile_or_correctness_failure';
+    } else if (!result || !(result.journal && result.journal.registered) || journalVerificationFault
+        || ((!eng && !(journalEntry && journalEntry.worker_receipt)) || (artifactHash && !ver))) {
+      outcome = 'api_failure';
+    } else if (!artifact || artifact.present !== true) {
+      outcome = 'no_patch';
+    } else if (!valid) {
+      outcome = 'compile_or_correctness_failure';
+    } else if (novel) {
+      outcome = 'valid_new_structure';
+    } else {
+      outcome = 'valid_no_gain';
+    }
+    deepAttemptThisRound = {
+      round, cycle, direction: result && result.d ? result.d.id : '', outcome,
+      valid, novel, beneficial: improved, committed: committedThisRound,
+      structure_key: structureKey, artifact_sha256: artifactHash,
+      verification_status: ver ? String(ver.status || '') : '',
+      correctness: ver ? String(ver.correctness || '') : '',
+    };
+    deepAttempts.push(deepAttemptThisRound);
+    processLog.push({ event: 'deep_attempt', ...deepAttemptThisRound });
+    log(`  [deep] r${round} outcome=${outcome} valid=${valid} novel=${novel} `
+      + `beneficial=${improved} committed=${committedThisRound}`
+      + `${structureKey ? ` structure=${structureKey}` : ''}.`);
+  }
+
   // --- close the cycle, or hand the search on -------------------------------
   if (roundPhase === PHASE_DEEP) {
-    // A deep round gets exactly one attempt, and what it did decides everything. Committed means a
-    // different program is now canonical, so the ladder restarts and searches THAT. Not committed
-    // means a ground-up rewrite starting from the current best failed to beat it, which is the
-    // strongest evidence available that there are no routes left -- stronger than any stall count,
-    // because it is a negative result from the broadest move the search has.
     if (committedThisRound) {
       advancePhase('the deep round banked a different implementation, so the ladder restarts on it',
         round);
     } else {
-      stopReason = 'deep_explore_failed';
-      log(`STOP: the deep round banked nothing. A ground-up rewrite from the current best did not `
-        + `beat it, so the search is out of routes. Budget used ${dispatched}/${BUDGET} over `
-        + `${round} round(s) across ${cycle} cycle(s).`);
+      const deepVerdict = deepExhaustion(deepAttempts, cycle, MIN_VALID_NOVEL_DEEP_ATTEMPTS);
+      if (deepVerdict.stop) {
+        stopReason = 'deep_explore_exhausted';
+        processLog.push({ event: 'deep_exhausted', round, cycle,
+          valid_novel_misses: deepVerdict.valid_novel_misses });
+        log(`STOP: ${deepVerdict.valid_novel_misses} independently valid and structurally novel deep `
+          + `implementations failed to improve the canonical. This is plural search evidence; API `
+          + `faults, missing patches, and broken builds were not counted. Budget ${dispatched}/${BUDGET}.`);
+      } else {
+        log(`Deep search remains live: ${deepVerdict.valid_novel_misses}/${MIN_VALID_NOVEL_DEEP_ATTEMPTS} `
+          + 'valid novel misses. A single no-gain attempt and every infrastructure failure are '
+          + 'insufficient to terminate; another affordable deep attempt is required.');
+      }
     }
   } else if (phaseStall >= MAX_NO_IMPROVE) {
     advancePhase(escalationReason(false, phaseStall, MAX_NO_IMPROVE), round);
@@ -4363,7 +4911,11 @@ matter how the rest of the run looked.`,
         verifier_notes: r.ver ? (r.ver.notes || '') : '',
         verifier_correctness: r.ver ? (r.ver.correctness || '') : '',
         verifier_variance_note: r.ver ? (r.ver.variance_note || '') : '',
-        verifier_graph_safe: r.ver ? (r.ver.graph_safe || '') : '' })),
+        verifier_graph_safe: r.ver ? (r.ver.graph_safe || '') : '',
+        deep_outcome: roundPhase === PHASE_DEEP && deepAttemptThisRound
+          ? deepAttemptThisRound.outcome : '',
+        artifact_sha256: r.journal && r.journal.entry && r.journal.entry.artifact
+          ? (r.journal.entry.artifact.sha256 || '') : '' })),
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
@@ -4393,23 +4945,10 @@ matter how the rest of the run looked.`,
       // measured. `asm_ledger` avoids the same trap only because it rides inside `PRIOR_HISTORY`. On a
       // lane that never reaches phase2 the key is absent and the prompt is byte-identical to before.
       ...(keypointCitations.length ? { KEYPOINT_CITATIONS: keypointCitations } : {}),
-      // (127). STATE.json's `cumulative` is the LANE total vs the original seed, so it must be
-      // written from CUMULATIVE_VS_SEED -- never from CUMULATIVE_SPEEDUP, which is wave-local and
-      // would overwrite a 4.35x lane history with a 1.01x round number on the next resume.
-      ...(STATE_DIR ? { STATE_DIR, CANONICAL, CUMULATIVE_SPEEDUP: cumulative,
-        CUMULATIVE_VS_SEED: cumulativeVsSeed(), PRIOR_CUMULATIVE_VS_SEED: priorCumulativeVsSeed,
-        // The frame, handed over WITH the number. `update_memory` writes STATE.cumulative from
-        // CUMULATIVE_VS_SEED and the next wave reads it back as PRIOR -- so if the agent multiplies
-        // once more the error compounds per wave. On an oracle-anchored harness CUMULATIVE_SPEEDUP
-        // and CUMULATIVE_VS_SEED are the SAME number, which is exactly the shape that invites one
-        // more multiplication; saying so is cheaper than catching it a third time.
-        VS_SEED_FRAME: vsSeedFrame === 'absolute'
-          ? 'ABSOLUTE: the harness times against a fixed external reference, so CUMULATIVE_VS_SEED '
-            + 'and CUMULATIVE_SPEEDUP are the same number and neither may be multiplied by '
-            + 'PRIOR_CUMULATIVE_VS_SEED. Write CUMULATIVE_VS_SEED into STATE.cumulative verbatim.'
-          : 'CHAINED: each wave re-anchors on its incumbent, so CUMULATIVE_VS_SEED is already '
-            + 'PRIOR_CUMULATIVE_VS_SEED x CUMULATIVE_SPEEDUP. Do not multiply it again.',
-        BEST_PER_CASE: bestPerCase } : {}),
+      // State persistence is intentionally NOT delegated to update_memory. After this role returns,
+      // the orchestrator appends the round record and invokes workflow_state.py with the complete,
+      // versioned payload; otherwise STATE.json can describe memory from one barrier and phase state
+      // from another.
       ...(SHARED_KB ? { SHARED_KB, TARGET_LANGUAGE } : {}),
     }),
     { phase: 'Optimize', label: `tech_lead:memory r${round}`, schema: MEMORY_SCHEMA });
@@ -4468,8 +5007,10 @@ matter how the rest of the run looked.`,
   }
   history.rounds.push({
     round,
-    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
-      learned_refs: d.learned_refs || [] })),
+    // Persist the effective record, not just the planner proposal: the worker may narrow the files
+    // it actually touched, and config_search:select expands an id into the exact hash-valid config.
+    directions: directions.map(d => effectiveDirectionRecord(
+      d, clean.find(result => result && result.d && result.d.id === d.id))),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
       verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
       // Carried into HISTORY so the next round's planner can tell "this mechanism
@@ -4477,7 +5018,12 @@ matter how the rest of the run looked.`,
       // machine code". Those two justify opposite next moves, and without this
       // field they are the same ledger entry. Absent when the lane runs isa off.
       ...(ISA_ENABLED ? { mechanism: r.ver && r.ver.isa_evidence
-        ? r.ver.isa_evidence.mechanism_verdict : 'no_receipt' } : {}) })),
+        ? r.ver.isa_evidence.mechanism_verdict : 'no_receipt' } : {}),
+      ...(roundPhase === PHASE_DEEP && deepAttemptThisRound
+        ? { deep_outcome: deepAttemptThisRound.outcome,
+            structure_fingerprint: deepAttemptThisRound.structure_key,
+            artifact_sha256: deepAttemptThisRound.artifact_sha256 }
+        : {}) })),
     // The round's evidence contract. Recorded together so the three cannot drift:
     // the depth that was asked for, whether the artifact behind it exists, and the
     // named reason when it does not. `cannbot`'s round-state rule is the model --
@@ -4532,6 +5078,50 @@ matter how the rest of the run looked.`,
       ? { plan_request_l3: true, plan_request_l3_reason: String(plan.request_l3_reason || '').trim() }
       : {}),
   });
+
+  // Publish only after history.rounds.push so phase/deep/process memory and last_round describe
+  // one completed barrier. Canonical best/ advances only when this round demonstrably committed.
+  const statePersisted = await persistWorkflowState(committedThisRound, 'round_barrier');
+  // Settle every journal scope touched by this round. Unverified artifact-bearing entries remain
+  // pending inside the helper; that is how a process cut between engineer completion and verify is
+  // recovered next wave. A verified winner is kept pending only when its canonical commit failed.
+  const journalTargets = [];
+  const addJournalTarget = (scope, targetRound, candidateId) => {
+    if (!scope || !candidateId) return;
+    const key = `${scope}|${targetRound}`;
+    let target = journalTargets.find(x => x.key === key);
+    if (!target) {
+      target = { key, scope, round: targetRound, candidate_ids: [] };
+      journalTargets.push(target);
+    }
+    if (!target.candidate_ids.includes(candidateId)) target.candidate_ids.push(candidateId);
+  };
+  for (const r of clean) {
+    if (!(r.journal && r.journal.registered)) continue;
+    const recoveredEntry = r.d && r.d.recovered_entry ? r.d.recovered_entry : null;
+    addJournalTarget(recoveredEntry ? recoveredEntry.eval_dir : EVAL_DIR,
+      recoveredEntry ? recoveredEntry.round : round,
+      recoveredEntry ? recoveredEntry.candidate_id : `r${round}:${r.d.id}`);
+  }
+  if (integrateJournal && integrateJournal.registered) {
+    addJournalTarget(EVAL_DIR, round, `r${round}:integrated`);
+  }
+  const unsettledWinner = winner && improved ? winner.id : '';
+  for (const target of journalTargets) {
+    await agentT(
+      `Run EXACTLY this command and return its JSON stdout verbatim:
+\`\`\`bash
+` +
+      `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} settle ` +
+      `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} --eval-dir ${JSON.stringify(target.scope)} ` +
+      `--round ${target.round} --winner-direction ${JSON.stringify(unsettledWinner)} ` +
+      target.candidate_ids.map(id => `--candidate-id ${JSON.stringify(id)} `).join('') +
+      `${committedThisRound && statePersisted ? '--committed ' : ''}` +
+      `--integration-receipt ${JSON.stringify(`${EVAL_DIR}/round_${round}/commit_result.json`)}
+\`\`\``,
+      { phase: 'Merge', label: `round_journal:settle r${target.round}`, schema: JOURNAL_ACTION_SCHEMA });
+  }
+
   log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}` +
       `${improved && !committedThisRound ? ' (WINNER NOT COMMITTED -- canonical unchanged)' : ''}` +
       `, cumulative=${cumulative.toFixed(2)}x vs this wave's baseline` +
@@ -4907,6 +5497,9 @@ return {
   final_phase: searchPhase,
   cycles: cycle,
   phases_entered: phaseLog,
+  deep_attempts: deepAttempts,
+  process_log: processLog,
+  canonical_hashes: restoredCanonicalHashes,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
   deadline_hit: deadlineHit,
@@ -4929,9 +5522,14 @@ return {
   direction_entropy: (() => {
     const seen = new Set(); let n = 0;
     for (const r of history.rounds) for (const d of (r.directions || [])) {
-      n++; seen.add(`${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`);
+      n++;
+      const focus = (d.focus_files || []).slice().sort().join(',');
+      const mechanism = d.mechanism || d.structure_fingerprint || '';
+      const config = stableValue(d.config || {});
+      seen.add(`${d.specialty}|focus=${focus}|mechanism=${mechanism}|config=${config}`);
     }
-    return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
+    return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3),
+      dimensions: ['specialty', 'focus_files', 'mechanism', 'config'] } : null;
   })(),
   // null when the step was off, or the run earned nothing worth a card.
   learned_card: learned_card && learned_card.card_path

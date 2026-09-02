@@ -132,6 +132,10 @@ jobs:
             kernel_workflow/scripts/test_ir_signals.py \
             kernel_workflow/scripts/test_isa_signals.py \
             kernel_workflow/scripts/test_isa_capture.py \
+            kernel_workflow/scripts/test_workflow_state.py \
+            kernel_workflow/scripts/test_round_journal.py \
+            kernel_workflow/scripts/test_config_search.py \
+            kernel_workflow/scripts/test_workflow_resume_contract.py \
             kernel_workflow/scripts/test_script_conventions.py \
             kernel_workflow/scripts/test_role_script_references.py
 

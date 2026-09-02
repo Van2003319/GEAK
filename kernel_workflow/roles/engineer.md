@@ -25,6 +25,8 @@ work in your OWN private workspace copy — total isolation, no coordination wit
   weighted target and never violate its gates, e.g. decode-no-regress or the memory cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base, resolved by the TechLead for THIS kernel (see the next section).
+- `AVAILABLE_CAPABILITIES.config_search` — phase-independent config lookup/materialisation. Select
+  only hash-valid `precompiled:true` results; route new config creation through its `create` command.
 
 ## Load only the knowledge for your specialty (keeps context focused)
 - algorithm  → `hip_optimization.md` (P0/P1) or `triton_optimization.md`, + `geomean_levers.md`
@@ -113,17 +115,16 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    `speedup_weighted = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's `weight` from
    `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
 5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git add -A && git diff --cached --binary > $OUTPUT_DIR/best_patch.diff`.
-   Do this the MOMENT you have a qualifying result — not at the end. `best_patch.diff` is the RECOVERY
-   artifact: if your final return is lost (you time out, crash, or mis-format the StructuredOutput),
-   the lane falls back to re-measuring whatever >1.0x patch it finds on disk. A patch left on disk
-   still counts; work that only exists in a lost return is gone. Re-save it whenever `best` improves.
+   Do this the MOMENT you have a qualifying result and re-save whenever `best` improves. The file alone
+   has no execution authority: an interrupted candidate is recoverable only after the orchestrator's
+   atomic journal records the exact patch hash together with the exact `worker_result.json` hash.
+   Unregistered files are ignored even when they have the expected name.
 6. **Iterate** a few variations (params/tiling/unroll/specialization), keeping the best. Obey
    self-monitoring: switch approach after ~8 stalled steps, force-submit after ~12, stop tuning when
    3 benchmarks are within 1%.
-7. **Submit** = RETURN the worker_result structure below as your StructuredOutput. **The RETURN VALUE
-   is what the lane harvests** — not the disk file. Only a clean below-baseline return (`status` other
-   than `failed`, geomean ≤ 1.0) tells the lane to skip you; any winning result MUST come back in the
-   return (with `best_patch.diff` already on disk as the recovery backstop, per step 5).
+7. **Submit** = atomically write the worker_result object below (unique temp file, fsync, rename), then
+   RETURN that exact same object as StructuredOutput. Write the receipt even when no patch was produced;
+   the journal distinguishes `no_patch` from a lost API return without scanning the output directory.
 
 ## Declare what your edit should do to the MACHINE CODE (only when `ISA_SIGNALS_HELPER` is set)
 
@@ -179,11 +180,10 @@ Rules, and they are the same shape as the `mechanism_claims` rules above:
   not move is information, and it is how a direction gets closed instead of re-proposed next round.
 
 ## Outputs
-**Return channel (authoritative):** your StructuredOutput return, matching the schema below, is what
-the lane reads and scores. **Disk artifacts (durable + recovery):** `best_patch.diff` is the recovery
-backstop the lane re-measures if your return is lost (step 5); `worker_result.json` + `report.md` below
-are the durable record the TechLead's insight log reads. Write ALL THREE, but never assume the disk
-JSON substitutes for the return — the lane does not read `worker_result.json`, it reads your return.
+**Return and durable receipt:** atomically write `worker_result.json`, then return the exact same
+object as StructuredOutput. `best_patch.diff` becomes eligible for independent verification only when
+the orchestrator journals both hashes after completion. `report.md` is the human narrative. Write all
+applicable artifacts, but never treat an unregistered path or filename as a recoverable candidate.
 
 `OUTPUT_DIR/worker_result.json` (same fields as your StructuredOutput return):
 ```json
@@ -191,6 +191,7 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
   "engineer_id": "r{ROUND}_d{N}",
   "specialty": "algorithm|memory|compute|host_runtime",
   "task": "the assigned direction",
+  "focus_files": ["relative files actually changed or inspected for this implementation"],
   "strategy": "what you actually implemented (specific)",
   "speedup_geomean": 0.0,
   "speedup_arithmetic": 0.0,
@@ -201,6 +202,8 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
   "strategies_tried": ["..."],
   "mechanism_claims": ["closed-vocabulary ids from `isa_signals.py claims`; omit when ISA_SIGNALS_HELPER is unset"],
   "target_routes": ["the route(s) your mechanism is claimed on; [] when the direction names none"],
+  "config": {"id": "precompiled config_search id(s), or empty"},
+  "structure_fingerprint": "result-independent algorithm/layout/schedule identity",
   "notes": "what worked / what didn't — written for the TechLead's insight log"
 }
 ```

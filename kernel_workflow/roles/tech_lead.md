@@ -167,6 +167,12 @@ prior rounds — see below). Also the current best per-case table. Plus `KERNEL_
 `DEEP_SEARCH_BRIEF` — a path to the Deep Research Agent's compact ranked-directions brief
 (`EVAL_DIR/deep_search_brief.md`), or `''` when the DRA did not run / produced nothing.
 
+**Phase-independent capability hook.** `AVAILABLE_CAPABILITIES.config_search`, when present, is
+registered for every search phase. It is a tool, not a phase transition: call its `search` command
+whenever configuration evidence would help. Select only `precompiled:true`, hash-valid matches. If a
+needed config does not exist, route its builder request through `config_search create`; never ask a
+phase engineer to fabricate an unregistered config. The capability intentionally has no phase lock.
+
 **DEEP-MODE hooks (act on these ONLY if present in your inputs; otherwise ignore — a normal run never
 passes them):**
 - `SHARED_KB` — a cross-backend blackboard file (techniques that worked / dead-ends / cross-backend
@@ -223,6 +229,13 @@ direction may even be:**
   The engineers CONTINUE from the banked `.s` rather than re-emitting it, so directions compound
   the way source directions do. `ASM_CONTINUATION` in the memory step tells you when one did not.
 
+  **Configuration rule:** phase2 may SELECT an existing precompiled config returned by
+  `AVAILABLE_CAPABILITIES.config_search`; it may not create one by editing source/build metadata under
+  an assembly direction. If no suitable config exists, invoke `config_search create`. Only after that
+  capability returns a hash-valid `precompiled:true` record may the assembly direction select it.
+  This is a narrow artifact-ownership rule, not a coarse phase lock: config_search remains callable in
+  every phase, and phase2 still edits assembly normally.
+
   **Price the direction before you fund it, and the knowledge base is where the pricing lives.**
   `KERNEL_KNOWLEDGE_DIR/languages/asm_mfma/` carries the page set for this activity — in phase2 it is
   the relevant part of the base, not the operator cards. Two of its three pre-flight gates are yours
@@ -244,9 +257,11 @@ direction may even be:**
   several of its entries are measured losses with the conditions attached. Reading it costs a page and
   routinely closes a direction for free. Same contract as the rest of the base: it ADDS candidates and
   names preconditions, it never forecloses one, and the box overrules it.
-- `deep_explore` — one dedicated round that hands the next cycle a DIFFERENT ROUTE. If you do not
+- `deep_explore` — each attempt is a dedicated round aimed at a DIFFERENT ROUTE. If you do not
   return a `deep_explore` direction the round is promoted to one anyway, using your first direction
-  as its brief, so make that direction the one you would most want a ground-up rewrite aimed at.
+  as its brief. One no-gain result is never terminal: the orchestrator distinguishes API failure,
+  no patch, compile/correctness failure, valid no-gain, and valid new structure. It requires at least
+  two valid, structurally novel misses (or budget exhaustion) before declaring deep search exhausted.
 
 ### `stop` now means "this LEVEL is finished", and that is an escalation
 
@@ -265,9 +280,11 @@ So the gate keeps its meaning, but check it against the CURRENT level:
 none of them land. You reaching the gate first is the normal and better path — it is a reasoned
 verdict where the counter is only a round count.
 
-**What ends the run** is a `deep_explore` round that banks nothing: a ground-up rewrite starting
-from the current best failed to beat it. Not your stop, and not a plateau. A committed deep round
-restarts the ladder at `phase1_source` on the new tree, and `CYCLE` tells you which pass you are on.
+**What ends the run** is budget exhaustion or plural evidence: at least two independently valid,
+structurally novel deep implementations that did not improve the incumbent. A single no-gain attempt,
+an API failure, a missing patch, or a compile/correctness failure is explicitly insufficient. A
+committed deep round restarts the ladder at `phase1_source` on the new tree, and `CYCLE` tells you
+which pass you are on.
 
 ### `SOL_STATUS` — how much of the hardware is still on the table
 
@@ -532,6 +549,8 @@ Return JSON:
       "title": "short name",
       "specialty": "algorithm|memory|compute|host_runtime",
       "focus_files": ["<rel paths this direction may edit>"],
+      "mechanism": "stable mechanism id used for novelty/entropy",
+      "config": {"only": "a precompiled config_search record, or empty"},
       "expected_speedup": 2.0,
       "prompt": "full, self-contained task description for the engineer",
       "kk_refs": ["<optional perf_knowledge card paths grounding THIS direction; omit/[] if none>"]
@@ -568,7 +587,9 @@ verified geomean, status, the engineer's `notes`, and the independent verifier's
 the round winner, the re-profile shift (if any), and the prior `HISTORY`. Treat verifier evidence as
 authoritative when it conflicts with the engineer's self-report, and preserve its concrete failure
 reason in the hypothesis ledger so the next round can repair the candidate instead of discarding the
-direction.
+direction. A deep result also carries `deep_outcome`; preserve its exact five-way vocabulary
+(`api_failure`, `no_patch`, `compile_or_correctness_failure`, `valid_no_gain`,
+`valid_new_structure`) instead of collapsing every non-win into a dead end.
 
 Maintain two structures and write them to `EVAL_DIR/insight_log.md` (human-readable) and return
 them as JSON so the script can thread them into the next `plan_round`:
@@ -709,51 +730,15 @@ round re-emits from the new source and needs to know which of its windows have a
 against a program that no longer exists, and silently dropping them makes that round look like a
 cold start with no memory when in fact it has memory it must not trust.
 
-**DEEP-MODE persistence + sharing (do these ONLY if the named input is present; a normal run passes
-none of them, so skip this whole block then):**
-- `STATE_DIR` (+ `CANONICAL`, `CUMULATIVE_SPEEDUP`, `BEST_PER_CASE`): persist this wave's progress so a
-  re-invocation CONTINUES instead of restarting. After updating the blackboard, run:
-  ```bash
-  mkdir -p "$STATE_DIR"
-  # sync the cumulative-best workspace (code + immutable oracle) to STATE_DIR/best (tar-pipe, exclude
-  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it. The golden
-  # (reference_io.pt, if present) is an absolute symlink in CANONICAL; this tar carries it verbatim so
-  # best/ shares the one physical file — never add -h/--dereference. NO `rm` (it
-  # prompts and blocks autonomous runs): stage into a UNIQUE tmp, then atomically swap with mv-aside.
-  TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"; mkdir -p "$TMP"
-  ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/build' --exclude='*/__pycache__' \
-      --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$TMP" && tar -xf - )
-  [ -e "$STATE_DIR/best" ] && mv "$STATE_DIR/best" "$STATE_DIR/best.old_$(date +%s)_$$" 2>/dev/null || true
-  mv "$TMP" "$STATE_DIR/best"
-  ```
-  Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_VS_SEED>, cumulative_frame:
-  "vs the original seed", wave_local_cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger, asm_ledger,
-  keypoint_citations, bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full
-  carried-forward state).
-  `asm_ledger` is `PRIOR_HISTORY.asm_ledger` plus anything this round filed — carry it even on a
-  source round, because `best/` carries the banked `.s` with it and a wave that resumes onto that
-  assembly with none of the window verdicts behind it re-runs experiments the last wave paid for.
-  `keypoint_citations` is `KEYPOINT_CITATIONS` **copied verbatim** — omit the key entirely when that
-  input was absent, and never synthesise rows. Carry it on a source round for the same reason as
-  `asm_ledger`: the sample is what makes a localiser rate readable, and one wave rarely reaches four
-  worked windows.
-  Do this EVERY round (even non-improving) so a kill mid-wave never loses the ledger; only refresh
-  `best/` when the cumulative best actually advanced this wave.
-
-  **`cumulative` MUST come from `CUMULATIVE_VS_SEED`, not from `CUMULATIVE_SPEEDUP`** — finding (127).
-  The two inputs are different denominators and the next wave reads `cumulative` back as the lane total:
-  - `CUMULATIVE_SPEEDUP` is **wave-local** — vs `BASELINE_PER_CASE`, which was measured on the tree this
-    wave was seeded from. It is 1.0 at the top of every wave, including a resumed one, *by construction*
-    and not because progress was lost.
-  - `CUMULATIVE_VS_SEED` = the prior waves' lane total × this wave's `CUMULATIVE_SPEEDUP`. It is the only
-    one of the two that is comparable across waves.
-
-  Writing the wave-local number into `cumulative` silently truncates the lane history to the last wave
-  (a 4.35× lane becomes 1.01×). Writing the vs-seed number into any *comparison* against a verifier's
-  `verified_geomean` is the mirror-image error and is what suppressed `IMPROVED` for a whole wave.
-  If `CUMULATIVE_VS_SEED` is absent from your inputs (an older lane script), write
-  `cumulative: <CUMULATIVE_SPEEDUP>` and add `cumulative_frame: "wave-local; vs-seed total unavailable"`
-  — say which frame you wrote rather than leaving the number unlabelled.
+**DEEP-MODE persistence + sharing (only when named inputs are present):**
+- The orchestrator, not this judgement role, owns `STATE_DIR`. After your structured memory return is
+  incorporated and the round record is appended, it invokes `workflow_state.py persist` with the
+  complete `geak.workflow-state/v2` payload and atomically refreshes `best/` only on a canonical commit.
+  Do not write `STATE.json` or copy `best/` yourself. This ordering is load-bearing: state must include
+  the completed round, `search_phase`, `phase_stall`, `cycle`, `phase_log`, classified `deep_attempts`,
+  `last_round`, `process_log`, and canonical source/asm/binary hashes from one barrier.
+- Keep returning `insights`, `ledger`, and `asm_ledger` normally. The orchestrator also carries
+  `KEYPOINT_CITATIONS` verbatim; you do not own or rewrite those rows.
 - `SHARED_KB` (+ `TARGET_LANGUAGE`): APPEND this wave's distilled, EVIDENCE-BACKED findings for your
   backend into the shared blackboard file so the OTHER backends learn from you next wave — each entry:
   technique → measured effect (Xx on which shape class) → your backend → and dead-ends with evidence.

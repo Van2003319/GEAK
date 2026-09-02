@@ -106,7 +106,7 @@ OPERATOR_TOOLS = {
     "fp8_two_day_run.sh":
         "The LAUNCHER, so it is a root of this search and never a target of it. It runs the lane "
         "for a fixed wall-clock budget in waves, which is where 'two days' lives now that the lane "
-        "has no clock of its own -- its only stop conditions are budget and deep_explore_failed.",
+        "has no clock of its own -- its only stop conditions are budget and deep_explore_exhausted.",
     "route_gate.py":
         "The Python twin of `routeGate` in kernel_lane.js, which is the LIVE gate. Nothing runs "
         "this at runtime; test_route_gate_parity.py executes both on the same inputs and requires "
