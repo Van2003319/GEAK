@@ -26,8 +26,14 @@ dev = ["pytest", "pytest-cov>=5.0", "coverage>=7.0"]
 [project.urls]
 Homepage = "https://github.com/AMD-AGI/GEAK"
 
+[project.scripts]
+geak-asm-tuner = "asm_tuner.cli:main"
+
 [tool.setuptools]
-packages = ["geak"]
+packages = ["geak", "asm_tuner", "asm_tuner.adapters"]
+
+[tool.setuptools.package-data]
+asm_tuner = ["PROVENANCE.json"]
 
 # NOTE: metadata + deps live here (PEP 621). setup.py stays only because a
 # [project] table can't express the build-time bootstrap hook (clone repo +
