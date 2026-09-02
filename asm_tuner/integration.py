@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import sys
@@ -18,9 +19,10 @@ from .compiler import ShardCompiler
 from .contracts import TaskContract, canonical_json, read_object, sha256_file
 from .runtime_table import RuntimeTableStore
 from .schema import KernelConfig
+from .search_space import plan_route_candidates, policy_for
 
 
-RELEASE_SCHEMA = "geak.asm-release/v1"
+RELEASE_SCHEMA = "geak.asm-release/v2"
 SELECTION_SCHEMA = "geak.asm-selection/v1"
 MATERIALIZATION_SCHEMA = "geak.asm-materialization/v1"
 VERIFICATION_SCHEMA = "geak.asm-materialization-verification/v1"
@@ -111,6 +113,7 @@ def create_release(
     result = compiler.compile_shard(contract.adapter, [config], shared=True)
     artifact = _artifact_row(contract, result, config)
     route_selection = {route.name: config.config_id for route in contract.routes}
+    route_rankings = {route.name: [config.config_id] for route in contract.routes}
     payload: Dict[str, Any] = {
         "schema": RELEASE_SCHEMA,
         "task": contract.identity(),
@@ -129,6 +132,7 @@ def create_release(
         "variant": variant or str(contract.search_space["default_variant"]),
         "selection_reason": selection_reason,
         "route_selection": route_selection,
+        "route_rankings": route_rankings,
         "artifacts": [artifact],
     }
     payload["release_id"] = _release_identity(payload)
@@ -174,44 +178,190 @@ class _CompiledCallable:
         return out
 
 
+def _search_round_cache(
+    path: Path,
+    *,
+    search_id: str,
+    route: str,
+    round_index: int,
+    candidate_ids: Sequence[str],
+    fingerprints: Mapping[str, Mapping[str, str]],
+    protocol_hash: str,
+) -> Optional[Dict[str, Any]]:
+    if not path.is_file():
+        return None
+    try:
+        value = read_object(path)
+    except Exception:
+        return None
+    if (value.get("schema") != "geak.asm-canonical-search-round/v2" or
+            value.get("search_id") != search_id or value.get("route") != route or
+            int(value.get("round", -1)) != round_index or
+            value.get("candidate_ids") != list(candidate_ids) or
+            value.get("fingerprints") != dict(fingerprints) or
+            value.get("protocol_hash") != protocol_hash):
+        return None
+    receipt = value.get("receipt") or {}
+    medians = receipt.get("medians_ms") or {}
+    if set(medians) != set(candidate_ids):
+        return None
+    try:
+        if not all(math.isfinite(float(medians[name])) and float(medians[name]) > 0
+                   for name in candidate_ids):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if receipt.get("protocol_hash") != protocol_hash:
+        return None
+    invariants = receipt.get("invariants") or {}
+    if not invariants or not all(bool(value) for value in invariants.values()):
+        return None
+    if (receipt.get("gpu_lock") or {}).get("mode") != "external":
+        return None
+    return value
+
+
 def search_release(
     contract: TaskContract,
     *,
     cache_root: Path,
     output_dir: Path,
-    variants: Sequence[str],
+    variants: Sequence[str] = (),
     case_ids: Optional[Sequence[str]] = None,
     hipcc: Optional[str] = None,
     optimization: str = "-O3",
+    bootstrap: bool = False,
 ) -> Dict[str, Any]:
-    """Canonical multi-arm search under the task's exact protocol-v2 builders.
+    """Run bounded per-route successive halving under protocol v2.
 
-    The arms share each semantic-weight slot and rotate order inside one external
-    GPU lock/fence.  A restricted case list is a smoke search; unmeasured routes
-    retain the declared seed, so the resulting runtime table is still a complete
-    atomic suite and says which routes were actually measured.
+    Candidate generation and route-static pruning happen before compilation.
+    Every round is a protocol-v2 paired-arms receipt, and each route retains its
+    own top-K. Compile artifacts and complete round receipts are content checked
+    and reusable after interruption.
     """
+
     if os.environ.get("GEAK_GPU_LOCK_HELD") != "1" or os.environ.get("GEAK_GPU_FENCE_HELD") != "1":
         raise IntegrationError("canonical search requires gpu_lock.sh + gpu_fence_run.sh")
     if not contract.oracle_compatible:
         raise IntegrationError("canonical search requires a protocol-v2 oracle manifest")
-    variants = tuple(dict.fromkeys(str(name) for name in variants))
-    if len(variants) < 2:
-        raise IntegrationError("canonical search requires at least two declared variants")
-    configs = [contract.config_variant(name) for name in variants]
-    compiler = ShardCompiler(Path(cache_root), hipcc=hipcc, optimization=optimization)
-    results = [compiler.compile_shard(contract.adapter, [config], shared=True) for config in configs]
-    artifacts = [_artifact_row(contract, result, config) for result, config in zip(results, configs)]
-    by_id = {row["config_id"]: row for row in artifacts}
-    calls = {row["config_id"]: _CompiledCallable(contract.adapter_name, row) for row in artifacts}
-    wanted = set(case_ids or [case["id"] for case in contract.cases])
-    unknown = wanted - {case["id"] for case in contract.cases}
+
+    requested_cases = case_ids
+    if bootstrap and not requested_cases:
+        requested_cases = tuple(
+            (contract.search_space.get("bootstrap_search") or {}).get("cases") or ()
+        )
+    wanted = tuple(dict.fromkeys(str(value) for value in (
+        requested_cases or [case["id"] for case in contract.cases]
+    )))
+    known = {str(case["id"]) for case in contract.cases}
+    unknown = set(wanted) - known
     if unknown:
         raise IntegrationError("unknown canonical search routes: %s" % sorted(unknown))
+    policy = policy_for(contract.search_space, bootstrap=bootstrap)
+    top_n = policy["first_round_top_n"]
+    top_k = policy["top_k"]
+    rounds_limit = policy["rounds"]
+    eta = policy["eta"]
+    cu_count = policy["cu_count"]
+
+    requested_variants = tuple(dict.fromkeys(str(name) for name in variants))
+    if requested_variants:
+        pool = tuple(contract.config_variant(name) for name in requested_variants)
+        if len(pool) < 3:
+            raise IntegrationError("canonical search refuses fewer than three distinct candidates")
+    else:
+        pool = contract.search_configs
+
+    plans: Dict[str, Any] = {}
+    for route in contract.routes:
+        if route.name not in wanted:
+            continue
+        plan = plan_route_candidates(
+            contract.search_space, pool, route, cu_count=cu_count, limit=top_n,
+            assume_static_valid=True,
+        )
+        if len(plan.candidates) < top_n:
+            raise IntegrationError(
+                "route %s produced only %d candidates below required top-N=%d"
+                % (route.name, len(plan.candidates), top_n)
+            )
+        plans[route.name] = plan
+
+    compile_ids = {contract.default_config.config_id}
+    config_by_id = {config.config_id: config for config in pool}
+    config_by_id[contract.default_config.config_id] = contract.default_config
+    for plan in plans.values():
+        compile_ids.update(config.config_id for config in plan.candidates)
+    if len(compile_ids) > policy["max_compiled_candidates"]:
+        raise IntegrationError(
+            "bounded candidate union %d exceeds compile cap %d"
+            % (len(compile_ids), policy["max_compiled_candidates"])
+        )
+    if len(compile_ids) < 8:
+        raise IntegrationError("canonical search requires at least one 8-candidate compile shard")
+    compile_configs = [config_by_id[config_id] for config_id in sorted(compile_ids)]
+
+    compiler = ShardCompiler(Path(cache_root), hipcc=hipcc, optimization=optimization)
+    results = compiler.compile(
+        contract.adapter,
+        compile_configs,
+        shard_size=policy["shard_size"],
+        on_demand=False,
+        shared=True,
+    )
+    artifacts: List[Dict[str, Any]] = []
+    for result in results:
+        for row in result.manifest["configs"]:
+            config = KernelConfig.from_dict(row)
+            artifacts.append(_artifact_row(contract, result, config))
+    by_id = {row["config_id"]: row for row in artifacts}
+    if set(compile_ids) != set(by_id):
+        raise IntegrationError("compile metadata gate did not admit the complete bounded candidate union")
+    calls = {config_id: _CompiledCallable(contract.adapter_name, by_id[config_id])
+             for config_id in compile_ids}
+
+    search_identity = {
+        "task_digest": contract.task_digest,
+        "protocol_hash": contract.protocol["hash"],
+        "policy": policy,
+        "bootstrap": bool(bootstrap),
+        "routes": {name: [config.config_id for config in plans[name].candidates]
+                   for name in sorted(plans)},
+        "artifacts": {config_id: {
+            "artifact_sha256": by_id[config_id]["artifact_sha256"],
+            "source_sha256": by_id[config_id]["source_sha256"],
+            "compile_manifest_sha256": by_id[config_id]["compile_manifest_sha256"],
+            "isa_hash": by_id[config_id]["isa_hash"],
+        } for config_id in sorted(by_id)},
+    }
+    search_id = hashlib.sha256(canonical_json(search_identity).encode("utf-8")).hexdigest()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    state_path = output_dir / "search_state.json"
+    state: Dict[str, Any] = {
+        "schema": "geak.asm-canonical-search-state/v2",
+        "search_id": search_id,
+        "identity": search_identity,
+        "status": "running",
+        "completed_rounds": [],
+    }
+    if state_path.is_file():
+        try:
+            prior = read_object(state_path)
+            if prior.get("search_id") == search_id:
+                state = prior
+                state["status"] = "running"
+        except Exception:
+            pass
+    _atomic_json(state_path, state)
+
     route_selection = {route.name: contract.default_config.config_id for route in contract.routes}
+    route_rankings = {route.name: [contract.default_config.config_id] for route in contract.routes}
     measurements: Dict[str, Any] = {}
+    cache_hits = 0
+    cache_misses = 0
+    total_arm_evaluations = 0
+
     with _task_import_path(contract.task_root):
         runner = _import_path(
             contract.task_root / "scripts" / "task_runner.py",
@@ -222,51 +372,148 @@ def search_release(
             raise IntegrationError("canonical task runner did not load its harness")
         for case in contract.cases:
             case_id = str(case["id"])
-            if case_id not in wanted:
+            if case_id not in plans:
                 continue
+            route = next(route for route in contract.routes if route.name == case_id)
             slots = runner._make_measurement_slots(dict(case), dict(contract.protocol))
-            first_args = tuple(slots[0]["args"])
-            if contract.adapter_name == "bf16":
-                import torch
-                reference = (first_args[0].float() @ first_args[1].float().t()).to(torch.bfloat16)
-            else:
-                reference = runner._dequant_reference(*first_args)
-            correctness = {}
-            for config_id, call in calls.items():
-                output = call(*first_args)
-                ok, error = harness.correct(
-                    output, reference, float(contract.value.get("tolerance", 0.02)),
+            survivors = list(plans[case_id].candidates)
+            rounds: List[Dict[str, Any]] = []
+            last_medians: Dict[str, float] = {}
+            for round_index in range(rounds_limit):
+                candidate_ids = [config.config_id for config in survivors]
+                projected = total_arm_evaluations + len(candidate_ids)
+                route_projected = sum(len(row["candidate_ids"]) for row in rounds) + len(candidate_ids)
+                if route_projected > policy["max_route_arm_evaluations"]:
+                    raise IntegrationError(
+                        "route %s exceeds arm-evaluation budget %d"
+                        % (case_id, policy["max_route_arm_evaluations"])
+                    )
+                fingerprints = {config_id: {
+                    "artifact_sha256": by_id[config_id]["artifact_sha256"],
+                    "source_sha256": by_id[config_id]["source_sha256"],
+                    "compile_manifest_sha256": by_id[config_id]["compile_manifest_sha256"],
+                    "isa_hash": by_id[config_id]["isa_hash"],
+                } for config_id in candidate_ids}
+                round_path = output_dir / "rounds" / case_id / ("round_%02d.json" % round_index)
+                cached = _search_round_cache(
+                    round_path,
+                    search_id=search_id,
+                    route=case_id,
+                    round_index=round_index,
+                    candidate_ids=candidate_ids,
+                    fingerprints=fingerprints,
+                    protocol_hash=str(contract.protocol["hash"]),
                 )
-                correctness[config_id] = {"passed": bool(ok), "max_relative_error": error}
-                if not ok:
-                    raise IntegrationError("%s failed %s correctness" % (config_id, case_id))
-            arms = {
-                config_id: (lambda slot, fn=call: fn(*slot["args"]))
-                for config_id, call in calls.items()
-            }
-            receipt = harness.measure_paired_arms(
-                arms, slots, protocol=dict(contract.protocol), metric="single_call_latency",
-            )
-            if receipt.get("protocol_hash") != contract.protocol["hash"]:
-                raise IntegrationError("measurement receipt protocol hash drift")
-            invariants = receipt.get("invariants") or {}
-            if not all(invariants.values()):
-                raise IntegrationError("protocol-v2 receipt invariant failed for %s" % case_id)
-            if (receipt.get("gpu_lock") or {}).get("mode") != "external":
-                raise IntegrationError("measurement did not inherit the lane GPU lock")
-            winner = min(calls, key=lambda config_id: (
-                float(receipt["medians_ms"][config_id]), config_id,
-            ))
-            route_selection[case_id] = winner
-            receipt_path = output_dir / "receipts" / (case_id + ".json")
-            _atomic_json(receipt_path, receipt)
+                round_cache_hit = cached is not None
+                if cached is None:
+                    correctness: Dict[str, Any] = {}
+                    if round_index == 0:
+                        first_args = tuple(slots[0]["args"])
+                        if contract.adapter_name == "bf16":
+                            import torch
+                            reference = (first_args[0].float() @ first_args[1].float().t()).to(torch.bfloat16)
+                        else:
+                            reference = runner._dequant_reference(*first_args)
+                        for config_id in candidate_ids:
+                            output = calls[config_id](*first_args)
+                            ok, error = harness.correct(
+                                output, reference, float(contract.value.get("tolerance", 0.02)),
+                            )
+                            correctness[config_id] = {
+                                "passed": bool(ok),
+                                "max_relative_error": error,
+                            }
+                            if not ok:
+                                raise IntegrationError(
+                                    "%s failed %s correctness" % (config_id, case_id)
+                                )
+                    arms = {
+                        config_id: (lambda slot, fn=calls[config_id]: fn(*slot["args"]))
+                        for config_id in candidate_ids
+                    }
+                    receipt = harness.measure_paired_arms(
+                        arms, slots, protocol=dict(contract.protocol), metric="single_call_latency",
+                    )
+                    if receipt.get("protocol_hash") != contract.protocol["hash"]:
+                        raise IntegrationError("measurement receipt protocol hash drift")
+                    invariants = receipt.get("invariants") or {}
+                    if not invariants or not all(invariants.values()):
+                        raise IntegrationError("protocol-v2 receipt invariant failed for %s" % case_id)
+                    if (receipt.get("gpu_lock") or {}).get("mode") != "external":
+                        raise IntegrationError("measurement did not inherit the lane GPU lock")
+                    cached = {
+                        "schema": "geak.asm-canonical-search-round/v2",
+                        "search_id": search_id,
+                        "route": case_id,
+                        "round": round_index,
+                        "candidate_ids": candidate_ids,
+                        "fingerprints": fingerprints,
+                        "protocol_hash": contract.protocol["hash"],
+                        "correctness": correctness,
+                        "receipt": receipt,
+                    }
+                    _atomic_json(round_path, cached)
+                    cache_misses += 1
+                else:
+                    cache_hits += 1
+                medians = {name: float(value) for name, value in
+                           cached["receipt"]["medians_ms"].items()}
+                last_medians = medians
+                final_round = round_index + 1 == rounds_limit
+                keep = min(
+                    len(survivors),
+                    top_k if final_round else max(
+                        top_k, int(math.ceil(len(survivors) / float(eta))),
+                    ),
+                )
+                survivors = sorted(
+                    survivors,
+                    key=lambda config: (medians[config.config_id], config.config_id),
+                )[:keep]
+                total_arm_evaluations = projected
+                round_row = {
+                    "round": round_index,
+                    "candidate_ids": candidate_ids,
+                    "kept": [config.config_id for config in survivors],
+                    "medians_ms": medians,
+                    "receipt": str(round_path),
+                    "receipt_sha256": sha256_file(round_path),
+                    "cache_hit": round_cache_hit,
+                    "protocol_samples_per_arm": len(slots) * int(
+                        contract.protocol["metrics"]["single_call_latency"]["cycles"]
+                    ),
+                }
+                rounds.append(round_row)
+                key = "%s:%d" % (case_id, round_index)
+                completed = list(state.get("completed_rounds") or [])
+                if key not in completed:
+                    completed.append(key)
+                state["completed_rounds"] = completed
+                state["last_completed"] = key
+                _atomic_json(state_path, state)
+
+            selected = sorted(
+                survivors,
+                key=lambda config: (last_medians[config.config_id], config.config_id),
+            )[:top_k]
+            selected_ids = [config.config_id for config in selected]
+            route_selection[case_id] = selected_ids[0]
+            route_rankings[case_id] = selected_ids
             measurements[case_id] = {
-                "winner": winner,
-                "medians_ms": receipt["medians_ms"],
-                "correctness": correctness,
-                "receipt": str(receipt_path),
-                "receipt_sha256": sha256_file(receipt_path),
+                "candidate_plan": plans[case_id].to_dict(),
+                "rounds": rounds,
+                "selected": [{
+                    "rank": rank,
+                    "config_id": config_id,
+                    "median_ms": last_medians[config_id],
+                    "isa_hash": by_id[config_id]["isa_hash"],
+                } for rank, config_id in enumerate(selected_ids)],
             }
+
+    selected_config_ids = sorted({
+        config_id for ranking in route_rankings.values() for config_id in ranking
+    })
+    release_artifacts = [by_id[config_id] for config_id in selected_config_ids]
     payload: Dict[str, Any] = {
         "schema": RELEASE_SCHEMA,
         "task": contract.identity(),
@@ -279,11 +526,21 @@ def search_release(
         },
         "fallback": {"kind": "canonical", "reason": "shape absent from canonical CASES"},
         "search_space_manifest": str(contract.value["search_space_manifest"]),
-        "variant": "paired-search:" + ",".join(variants),
-        "selection_reason": "protocol-v2 paired search; measured_routes=%s" % ",".join(sorted(wanted)),
+        "variant": ("declared:" + ",".join(requested_variants)
+                    if requested_variants else "generated-successive-halving"),
+        "selection_reason": "protocol-v2 per-route successive halving; measured_routes=%s"
+                            % ",".join(sorted(wanted)),
         "measured_routes": sorted(wanted),
         "route_selection": route_selection,
-        "artifacts": artifacts,
+        "route_rankings": route_rankings,
+        "search": {
+            "search_id": search_id,
+            "policy": policy,
+            "compiled_candidates": len(compile_ids),
+            "compile_shards": [len(result.manifest["configs"]) for result in results],
+            "arm_evaluations": total_arm_evaluations,
+        },
+        "artifacts": release_artifacts,
     }
     payload["release_id"] = _release_identity(payload)
     payload["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -291,18 +548,28 @@ def search_release(
     _atomic_json(target, payload)
     validate_release(payload, contract)
     summary = {
-        "schema": "geak.asm-canonical-search/v1",
+        "schema": "geak.asm-canonical-search/v2",
         "ok": True,
         "task": contract.task,
         "release_id": payload["release_id"],
         "release_manifest": str(target),
+        "search_id": search_id,
         "task_digest": contract.task_digest,
         "protocol_hash": contract.protocol["hash"],
         "oracle_manifest_sha256": contract.oracle_sha256,
         "measured_routes": sorted(wanted),
         "route_selection": route_selection,
+        "route_rankings": route_rankings,
+        "search_space": contract.search_materialization.to_dict(),
+        "budget": payload["search"],
+        "cache": {"round_hits": cache_hits, "round_misses": cache_misses,
+                  "compile_hits": sum(1 for result in results if result.cache_hit),
+                  "compile_misses": sum(1 for result in results if not result.cache_hit)},
         "measurements": measurements,
     }
+    state["status"] = "complete"
+    state["release_id"] = payload["release_id"]
+    _atomic_json(state_path, state)
     _atomic_json(output_dir / "search_summary.json", summary)
     return {"release": payload, "manifest": str(target), "summary": summary}
 
@@ -326,8 +593,18 @@ def validate_release(value: Mapping[str, Any], contract: TaskContract) -> None:
             oracle.get("protocol_hash") != contract.protocol.get("hash")):
         raise IntegrationError("release oracle manifest is stale or mismatched")
     routes = value.get("route_selection")
-    if not isinstance(routes, dict) or set(routes) != {route.name for route in contract.routes}:
+    route_names = {route.name for route in contract.routes}
+    if not isinstance(routes, dict) or set(routes) != route_names:
         raise IntegrationError("release does not select the complete canonical suite")
+    rankings = value.get("route_rankings")
+    if not isinstance(rankings, dict) or set(rankings) != route_names:
+        raise IntegrationError("release does not rank the complete canonical suite")
+    for route_name, config_ids in rankings.items():
+        if (not isinstance(config_ids, list) or not config_ids or
+                len(config_ids) != len(set(config_ids))):
+            raise IntegrationError("route %s rankings must be a non-empty unique list" % route_name)
+        if routes[route_name] != config_ids[0]:
+            raise IntegrationError("route %s winner differs from ranking zero" % route_name)
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise IntegrationError("release has no compiled artifacts")
@@ -348,8 +625,9 @@ def validate_release(value: Mapping[str, Any], contract: TaskContract) -> None:
         if row.get("symbol") != contract.adapter.launch_name(config):
             raise IntegrationError("release launch symbol does not match config")
         by_id[config.config_id] = row
-    if set(routes.values()) - set(by_id):
-        raise IntegrationError("a route selects a config without an artifact")
+    ranked_ids = {config_id for config_ids in rankings.values() for config_id in config_ids}
+    if ranked_ids - set(by_id):
+        raise IntegrationError("a route ranking selects a config without an artifact")
 
 
 def load_release(path: Path, contract: TaskContract) -> Dict[str, Any]:
@@ -430,23 +708,26 @@ def materialize_release(
                 raise IntegrationError("installed %s hash mismatch for %s" % (key, config_id))
     selections: Dict[str, List[Mapping[str, Any]]] = {}
     for route in local_contract.routes:
-        config_id = str(value["route_selection"][route.name])
-        source = by_id[config_id]
-        local = installed[config_id]
-        selections[route.name] = [{
-            "config_id": config_id,
-            "config": source["config"],
-            "kernel": source["kernel"],
-            "symbol": source["symbol"],
-            "isa_hash": source["isa_hash"],
-            "artifact": local["artifact"],
-            "artifact_sha256": source["artifact_sha256"],
-            "source": local["source"],
-            "source_sha256": source["source_sha256"],
-            "compile_manifest": local["compile_manifest"],
-            "compile_manifest_sha256": source["compile_manifest_sha256"],
-            "selection_reason": value.get("selection_reason"),
-        }]
+        ranked: List[Mapping[str, Any]] = []
+        for config_id in value["route_rankings"][route.name]:
+            config_id = str(config_id)
+            source = by_id[config_id]
+            local = installed[config_id]
+            ranked.append({
+                "config_id": config_id,
+                "config": source["config"],
+                "kernel": source["kernel"],
+                "symbol": source["symbol"],
+                "isa_hash": source["isa_hash"],
+                "artifact": local["artifact"],
+                "artifact_sha256": source["artifact_sha256"],
+                "source": local["source"],
+                "source_sha256": source["source_sha256"],
+                "compile_manifest": local["compile_manifest"],
+                "compile_manifest_sha256": source["compile_manifest_sha256"],
+                "selection_reason": value.get("selection_reason"),
+            })
+        selections[route.name] = ranked
     release_context = {
         "release_id": value["release_id"],
         "task": {
@@ -464,6 +745,7 @@ def materialize_release(
         },
         "oracle": value["oracle"],
         "fallback": value["fallback"],
+        "search": dict(value.get("search") or {}),
     }
     table_path = workspace / ".geak_tuner" / "runtime_table.json"
     table = RuntimeTableStore(table_path).publish_suite(
@@ -481,7 +763,9 @@ def materialize_release(
         "protocol_hash": local_contract.protocol["hash"],
         "oracle_manifest_sha256": local_contract.oracle_sha256,
         "table_digest": table["table_digest"],
-        "config_ids": sorted(set(value["route_selection"].values())),
+        "config_ids": sorted({
+            config_id for ranking in value["route_rankings"].values() for config_id in ranking
+        }),
     }
     _atomic_json(workspace / "asm_tuner_selection.json", selection)
     receipt = {
@@ -505,36 +789,43 @@ def materialize_release(
     return receipt
 
 
-def _load_library_symbols(workspace: Path, table: Mapping[str, Any]) -> List[Mapping[str, str]]:
+def _load_library_symbols(workspace: Path, table: Mapping[str, Any]) -> List[Mapping[str, Any]]:
     loaded: Dict[str, Any] = {}
-    rows: List[Mapping[str, str]] = []
+    rows: List[Mapping[str, Any]] = []
     for route_id in table["suite"]["route_ids"]:
-        entry = table["routes"][route_id]["entries"][0]
-        artifact = (workspace / entry["artifact"]).resolve()
-        source = (workspace / entry["source"]).resolve()
-        if not _within(artifact, workspace) or not _within(source, workspace):
-            raise IntegrationError("runtime table path escapes materialized workspace")
-        if not artifact.is_file() or artifact.is_symlink() or sha256_file(artifact) != entry["artifact_sha256"]:
-            raise IntegrationError("materialized artifact hash mismatch for %s" % route_id)
-        if not source.is_file() or source.is_symlink() or sha256_file(source) != entry["source_sha256"]:
-            raise IntegrationError("materialized source hash mismatch for %s" % route_id)
-        key = str(artifact)
-        library = loaded.get(key)
-        if library is None:
-            try:
-                library = ctypes.CDLL(key)
-            except OSError as exc:
-                raise IntegrationError("cannot load materialized artifact %s: %s" % (artifact, exc)) from exc
-            loaded[key] = library
-        if not hasattr(library, str(entry["symbol"])):
-            raise IntegrationError("artifact lacks dispatch symbol %s" % entry["symbol"])
-        rows.append({
-            "route": route_id,
-            "config_id": entry["config_id"],
-            "symbol": entry["symbol"],
-            "artifact_sha256": entry["artifact_sha256"],
-            "source_sha256": entry["source_sha256"],
-        })
+        for entry in table["routes"][route_id]["entries"]:
+            artifact = (workspace / entry["artifact"]).resolve()
+            source = (workspace / entry["source"]).resolve()
+            compile_manifest = (workspace / entry["compile_manifest"]).resolve()
+            if (not _within(artifact, workspace) or not _within(source, workspace) or
+                    not _within(compile_manifest, workspace)):
+                raise IntegrationError("runtime table path escapes materialized workspace")
+            if not artifact.is_file() or artifact.is_symlink() or sha256_file(artifact) != entry["artifact_sha256"]:
+                raise IntegrationError("materialized artifact hash mismatch for %s" % route_id)
+            if not source.is_file() or source.is_symlink() or sha256_file(source) != entry["source_sha256"]:
+                raise IntegrationError("materialized source hash mismatch for %s" % route_id)
+            if (not compile_manifest.is_file() or compile_manifest.is_symlink() or
+                    sha256_file(compile_manifest) != entry["compile_manifest_sha256"]):
+                raise IntegrationError("materialized compile manifest hash mismatch for %s" % route_id)
+            key = str(artifact)
+            library = loaded.get(key)
+            if library is None:
+                try:
+                    library = ctypes.CDLL(key)
+                except OSError as exc:
+                    raise IntegrationError("cannot load materialized artifact %s: %s" % (artifact, exc)) from exc
+                loaded[key] = library
+            if not hasattr(library, str(entry["symbol"])):
+                raise IntegrationError("artifact lacks dispatch symbol %s" % entry["symbol"])
+            rows.append({
+                "route": route_id,
+                "rank": int(entry["rank"]),
+                "config_id": entry["config_id"],
+                "symbol": entry["symbol"],
+                "artifact_sha256": entry["artifact_sha256"],
+                "source_sha256": entry["source_sha256"],
+                "compile_manifest_sha256": entry["compile_manifest_sha256"],
+            })
     return rows
 
 
@@ -567,30 +858,30 @@ def _verify_workspace(
         compiler = ShardCompiler(root)
         seen = set()
         for route_id in table["suite"]["route_ids"]:
-            entry = table["routes"][route_id]["entries"][0]
-            if entry["config_id"] in seen:
-                continue
-            seen.add(entry["config_id"])
-            config = KernelConfig.from_dict(entry["config"])
-            result = compiler.compile_shard(local.adapter, [config], shared=True)
-            rebuilt_source = result.artifact("source")
-            rebuilt_artifact = result.artifact("shared")
-            kernel = next(row for row in result.manifest["kernels"]
-                          if row["config_id"] == config.config_id)
-            if sha256_file(rebuilt_source) != entry["source_sha256"]:
-                raise IntegrationError("independent rebuild source hash mismatch")
-            if kernel["isa_hash"] != entry["isa_hash"]:
-                raise IntegrationError("independent rebuild ISA hash mismatch")
-            library = ctypes.CDLL(str(rebuilt_artifact))
-            if not hasattr(library, entry["symbol"]):
-                raise IntegrationError("independent rebuild lacks dispatch symbol")
-            rebuilt.append({
-                "config_id": config.config_id,
-                "source_sha256": sha256_file(rebuilt_source),
-                "artifact_sha256": sha256_file(rebuilt_artifact),
-                "isa_hash": kernel["isa_hash"],
-                "symbol": entry["symbol"],
-            })
+            for entry in table["routes"][route_id]["entries"]:
+                if entry["config_id"] in seen:
+                    continue
+                seen.add(entry["config_id"])
+                config = KernelConfig.from_dict(entry["config"])
+                result = compiler.compile_shard(local.adapter, [config], shared=True)
+                rebuilt_source = result.artifact("source")
+                rebuilt_artifact = result.artifact("shared")
+                kernel = next(row for row in result.manifest["kernels"]
+                              if row["config_id"] == config.config_id)
+                if sha256_file(rebuilt_source) != entry["source_sha256"]:
+                    raise IntegrationError("independent rebuild source hash mismatch")
+                if kernel["isa_hash"] != entry["isa_hash"]:
+                    raise IntegrationError("independent rebuild ISA hash mismatch")
+                library = ctypes.CDLL(str(rebuilt_artifact))
+                if not hasattr(library, entry["symbol"]):
+                    raise IntegrationError("independent rebuild lacks dispatch symbol")
+                rebuilt.append({
+                    "config_id": config.config_id,
+                    "source_sha256": sha256_file(rebuilt_source),
+                    "artifact_sha256": sha256_file(rebuilt_artifact),
+                    "isa_hash": kernel["isa_hash"],
+                    "symbol": entry["symbol"],
+                })
     return {
         "schema": VERIFICATION_SCHEMA,
         "ok": True,

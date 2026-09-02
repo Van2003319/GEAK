@@ -443,13 +443,14 @@ def create_asm_config(
 def search_asm_configs(
     registry_value: os.PathLike[str] | str,
     *, task_manifest: os.PathLike[str] | str, cache: os.PathLike[str] | str,
-    output: os.PathLike[str] | str, variants: Sequence[str], cases: Sequence[str],
+    output: os.PathLike[str] | str, variants: Sequence[str] = (),
+    cases: Sequence[str] = (), bootstrap: bool = False,
 ) -> dict[str, Any]:
     _require_lane_gpu_boundary()
     contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
     searched = search_release(
         contract, cache_root=Path(cache), output_dir=Path(output),
-        variants=variants, case_ids=cases or None,
+        variants=variants, case_ids=cases or None, bootstrap=bootstrap,
     )
     release = searched["release"]
     registry_config = {
@@ -458,7 +459,10 @@ def search_asm_configs(
         "protocol_hash": contract.protocol["hash"],
         "oracle_manifest_sha256": contract.oracle_sha256,
         "release_id": release["release_id"], "variant": release["variant"],
-        "config_ids": sorted(set(release["route_selection"].values())),
+        "config_ids": sorted({
+            config_id for ranking in release["route_rankings"].values()
+            for config_id in ranking
+        }),
         "priority": 0,
     }
     registered = register_config(
@@ -546,13 +550,13 @@ def prepare_asm_config(
         bootstrap = contract.search_space.get("bootstrap_search") or {}
         variants = list(bootstrap.get("variants") or [])
         cases = list(bootstrap.get("cases") or [])
-        if variants:
+        if cases:
             created = search_asm_configs(
                 registry_value, task_manifest=task_manifest, cache=cache,
                 output=_registry_path(registry_value).parent / "bootstrap_search",
-                variants=variants, cases=cases,
+                variants=variants, cases=cases, bootstrap=True,
             )
-            create_mode = "protocol_v2_paired_bootstrap"
+            create_mode = "protocol_v2_generated_halving_bootstrap"
         else:
             created = create_asm_config(
                 registry_value, task_manifest=task_manifest, cache=cache,
@@ -635,8 +639,9 @@ def _parser() -> argparse.ArgumentParser:
     search_asm.add_argument("--task-manifest", required=True)
     search_asm.add_argument("--cache", required=True)
     search_asm.add_argument("--output", required=True)
-    search_asm.add_argument("--variant", action="append", required=True)
+    search_asm.add_argument("--variant", action="append", default=[])
     search_asm.add_argument("--case", action="append", default=[])
+    search_asm.add_argument("--bootstrap", action="store_true")
 
     create_asm = sub.add_parser("create-asm")
     create_asm.add_argument("--registry", required=True)
@@ -690,6 +695,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = search_asm_configs(
                 args.registry, task_manifest=args.task_manifest, cache=args.cache,
                 output=args.output, variants=args.variant, cases=args.case,
+                bootstrap=args.bootstrap,
             )
         elif args.command == "create-asm":
             result = create_asm_config(

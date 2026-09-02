@@ -204,6 +204,7 @@ class SuccessiveHalvingRunner:
                     "symbol": self.adapter.launch_name(candidate.config),
                     "cache_key": candidate.cache_key,
                     "compile_manifest": str(candidate.manifest_path),
+                    "compile_manifest_sha256": hashlib.sha256(candidate.manifest_path.read_bytes()).hexdigest(),
                     "artifact": str(candidate.shared_object),
                     "artifact_sha256": hashlib.sha256(candidate.shared_object.read_bytes()).hexdigest(),
                     "source": str(source_path),

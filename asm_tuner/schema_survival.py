@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Iterable, Mapping
 
 from .schema import DType, KernelConfig
 
 
 # Minimal records copied from ROCm 7.2 hipBLASLt gfx942 msgpack databases on
-# 2026-09-02. They are schema-survival records, never executable kernels and never members of default_seed() and
-# never read from /opt/rocm or an experiment directory at runtime.
+# 2026-09-02. Raw records are schema-survival inputs, never default winners and
+# never read from /opt/rocm or an experiment directory at runtime. Executable
+# counterparts are discovered from the manifest domains, with inactive vendor
+# axes neutralized rather than hand-writing an exact vendor point.
 _RAW: Dict[str, Dict[str, Any]] = {
     "bf16_solution205554": {
         "solution_id": 205554,
@@ -128,3 +130,30 @@ def default_seed(dtype: DType) -> KernelConfig:
         "store": "vector", "lds_scratch_bytes": 4096,
         "provenance": {"kind": "mvp_correctness_seed", "vendor_default": False},
     })
+
+
+def generated_survival_candidate(
+    configs: Iterable[KernelConfig], name: str,
+) -> KernelConfig:
+    """Find the executable domain-generated counterpart of a raw vendor record."""
+
+    target = get_fixture(name)
+    matches = []
+    for config in configs:
+        if (
+            config.dtype is target.dtype and
+            (config.bm, config.bn, config.bk) == (target.bm, target.bn, target.bk) and
+            config.wave_grid == target.wave_grid and
+            config.miwt == target.miwt and
+            config.pgr == 2 and config.plr == 0 and config.xcc == 1 and
+            config.gsu == 1 and config.stream_k == 0 and
+            config.a_lds.buffers == 1 and config.b_lds.buffers == 1 and
+            config.a_lds.pad_elements == 0 and config.b_lds.pad_elements == 0 and
+            config.vector_widths == target.vector_widths and
+            config.wgm == 1 and config.stagger == 0 and
+            config.store == target.store
+        ):
+            matches.append(config)
+    if not matches:
+        raise LookupError("generated domains do not contain executable survival point %s" % name)
+    return sorted(matches, key=lambda config: config.config_id)[0]

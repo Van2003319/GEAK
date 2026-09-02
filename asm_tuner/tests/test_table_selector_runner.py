@@ -59,12 +59,16 @@ def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
         adapter=get_adapter("bf16"),
         output_dir=tmp_path / "out",
         runtime_table=RuntimeTableStore(table_path),
-        budgets=(1, 3), eta=2, top_k=1, warmups=1,
+        budgets=(1, 3), eta=2, top_k=2, warmups=1,
         measure=measure, release=release,
     )
     summary = runner.run(candidates, [route_a, route_b])
-    assert summary["routes"]["route_a"]["selected"][0]["config_id"] == configs[0].config_id
-    assert summary["routes"]["route_b"]["selected"][0]["config_id"] == configs[2].config_id
+    assert [row["config_id"] for row in summary["routes"]["route_a"]["selected"]] == [
+        configs[0].config_id, configs[1].config_id,
+    ]
+    assert [row["config_id"] for row in summary["routes"]["route_b"]["selected"]] == [
+        configs[2].config_id, configs[1].config_id,
+    ]
 
     table = RuntimeTableStore(table_path).load()
     assert table["revision"] == 1
@@ -73,6 +77,7 @@ def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
     assert (tmp_path / "runtime_table.json.v1.json").exists()
     assert not (tmp_path / "runtime_table.json.v2.json").exists()
     assert RuntimeSelector(table).select("route_a")["config_id"] == configs[0].config_id
+    assert RuntimeSelector(table).select("route_a", rank=1)["config_id"] == configs[1].config_id
     assert RuntimeSelector.from_path(table_path).select_shape(65, 64, 32)["config_id"] == configs[2].config_id
 
     receipts = list((tmp_path / "out" / "receipts").rglob("*.json"))

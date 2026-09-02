@@ -65,13 +65,12 @@ def _axis_value(config: KernelConfig, axis: str) -> Any:
 class TaskAdapter(ABC):
     name: str
     dtype: DType
-    source_version = "rocwmma-mvp-v1"
+    source_version = "rocwmma-pgr2-v2"
 
     # An INACTIVE axis may remain present in the schema so old records survive,
-    # but executable candidates must use its one neutral value.  Accepting PGR=2
-    # in a single-config shard would otherwise make a fake search look real: the
-    # generated synchronous body never reads PGR.
-    inactive_neutral_values: Mapping[str, Any] = {"pgr": 1, "plr": 0, "xcc": 1}
+    # but executable candidates must use its one neutral value. PGR is not in
+    # this map: PGR1 and the register-prefetching PGR2 are both executable.
+    inactive_neutral_values: Mapping[str, Any] = {"plr": 0, "xcc": 1}
 
     axis_capabilities: Mapping[str, AxisCapability] = {
         "bm": AxisCapability(AxisState.ACTIVE, "compile-time macro-tile M"),
@@ -85,8 +84,8 @@ class TaskAdapter(ABC):
         "stagger": AxisCapability(AxisState.ACTIVE, "rotates the semantic K-stage order"),
         "store": AxisCapability(AxisState.ACTIVE, "vector or non-temporal epilogue"),
         "pgr": AxisCapability(
-            AxisState.INACTIVE,
-            "global-read prefetch distance is recorded but this MVP body is synchronous",
+            AxisState.ACTIVE,
+            "PGR2 prefetches the next global K stage into VGPR packs while current LDS is consumed",
         ),
         "plr": AxisCapability(
             AxisState.INACTIVE,

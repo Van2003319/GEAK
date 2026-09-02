@@ -1,0 +1,490 @@
+{
+  "adapters": {
+    "bf16": {
+      "compile_cache_key": "46bb38937c3462eb8550dabd21851955df485b631493dca40fd09e1133ec15c5",
+      "compiler": {
+        "executable": "/opt/rocm-7.2.3/bin/hipcc",
+        "version": "HIP version: 7.2.53211-c2d9476115\nAMD clang version 22.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.2.3 26084 f58b06dce1f9c15707c5f808fd002e18c2accf7e)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /opt/rocm-7.2.3/lib/llvm/bin\nConfiguration file: /opt/rocm-7.2.3/lib/llvm/bin/clang++.cfg"
+      },
+      "fixture": "bf16_solution205554",
+      "k_stages": 2,
+      "pgr1": {
+        "agpr": 112,
+        "config": {
+          "a_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "arch": "gfx942",
+          "b_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "bk": 64,
+          "bm": 128,
+          "bn": 224,
+          "derived": {
+            "lds": {
+              "a_bytes": 16384,
+              "b_bytes": 28672,
+              "pgr_counted_as_buffer": false,
+              "scratch_bytes": 4096,
+              "total_bytes": 49152
+            },
+            "miwt": {
+              "m": 4,
+              "n": 7
+            },
+            "nw": 4,
+            "register_estimate": {
+              "accumulator_vgpr": 112,
+              "pgr_register_vgpr": 4,
+              "regular_vgpr": 36,
+              "unified_vgpr": 148
+            },
+            "wave_tile": {
+              "m": 64,
+              "n": 112
+            }
+          },
+          "dtype": "bf16",
+          "gsu": 1,
+          "layout": "a_mk_b_nk",
+          "lds_scratch_bytes": 4096,
+          "mfma": {
+            "blocks": 1,
+            "k": 16,
+            "m": 16,
+            "n": 16
+          },
+          "pgr": 1,
+          "plr": 0,
+          "provenance": {
+            "generator": "geak.dependent-domain-sweeps/v1",
+            "kind": "dependent_domain_generator",
+            "sweep": "pipeline_memory",
+            "vendor_default": false
+          },
+          "schema": "geak.asm_config/v1",
+          "stagger": 0,
+          "store": {
+            "mode": "vector"
+          },
+          "stream_k": 0,
+          "vector_widths": {
+            "a": 8,
+            "b": 8,
+            "store": 4
+          },
+          "wave_grid": {
+            "m": 2,
+            "n": 2
+          },
+          "wgm": 1,
+          "xcc": 1
+        },
+        "config_id": "5bcb970e0c6145736eb6",
+        "correctness": {
+          "atol": 1.0164716339111328,
+          "checked": true,
+          "cols": 224,
+          "fully_written": true,
+          "max_abs_error": 0.12281417846679688,
+          "max_relative_error": 0.0038869106210768223,
+          "mode": "full",
+          "passed": true,
+          "rows": 128,
+          "rtol": 0.03
+        },
+        "instruction_count": 6929,
+        "isa_hash": "480be7066050b93bec79ac25e6889333e20a4dafca9a50cf4a804de8a8ddb1a3",
+        "lds_bytes": 49152,
+        "median_us": 38.19999843835831,
+        "occupancy": {
+          "limiting_resources": [
+            "lds"
+          ],
+          "waves_per_cu": 4,
+          "workgroups_per_cu": 1
+        },
+        "samples_us": [
+          42.319998145103455,
+          34.07999873161316
+        ],
+        "scratch_bytes_per_workitem": 0,
+        "sgpr": 40,
+        "unified_vgpr": 180,
+        "vgpr": 68
+      },
+      "pgr2": {
+        "agpr": 112,
+        "config": {
+          "a_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "arch": "gfx942",
+          "b_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "bk": 64,
+          "bm": 128,
+          "bn": 224,
+          "derived": {
+            "lds": {
+              "a_bytes": 16384,
+              "b_bytes": 28672,
+              "pgr_counted_as_buffer": false,
+              "scratch_bytes": 4096,
+              "total_bytes": 49152
+            },
+            "miwt": {
+              "m": 4,
+              "n": 7
+            },
+            "nw": 4,
+            "register_estimate": {
+              "accumulator_vgpr": 112,
+              "pgr_register_vgpr": 44,
+              "regular_vgpr": 76,
+              "unified_vgpr": 188
+            },
+            "wave_tile": {
+              "m": 64,
+              "n": 112
+            }
+          },
+          "dtype": "bf16",
+          "gsu": 1,
+          "layout": "a_mk_b_nk",
+          "lds_scratch_bytes": 4096,
+          "mfma": {
+            "blocks": 1,
+            "k": 16,
+            "m": 16,
+            "n": 16
+          },
+          "pgr": 2,
+          "plr": 0,
+          "provenance": {
+            "generator": "geak.dependent-domain-sweeps/v1",
+            "kind": "dependent_domain_generator",
+            "sweep": "pipeline_memory",
+            "vendor_default": false
+          },
+          "schema": "geak.asm_config/v1",
+          "stagger": 0,
+          "store": {
+            "mode": "vector"
+          },
+          "stream_k": 0,
+          "vector_widths": {
+            "a": 8,
+            "b": 8,
+            "store": 4
+          },
+          "wave_grid": {
+            "m": 2,
+            "n": 2
+          },
+          "wgm": 1,
+          "xcc": 1
+        },
+        "config_id": "31785b2cef72cc10c51c",
+        "correctness": {
+          "atol": 1.0164716339111328,
+          "checked": true,
+          "cols": 224,
+          "fully_written": true,
+          "max_abs_error": 0.12281417846679688,
+          "max_relative_error": 0.0038869106210768223,
+          "mode": "full",
+          "passed": true,
+          "rows": 128,
+          "rtol": 0.03
+        },
+        "instruction_count": 9276,
+        "isa_hash": "d77f4c8a6ea74d7a5bb7bfc7038c920c3df5c1441bde36ec7929cdafd91e98fe",
+        "lds_bytes": 49152,
+        "median_us": 33.81999954581261,
+        "occupancy": {
+          "limiting_resources": [
+            "lds"
+          ],
+          "waves_per_cu": 4,
+          "workgroups_per_cu": 1
+        },
+        "samples_us": [
+          35.48000007867813,
+          32.15999901294708
+        ],
+        "scratch_bytes_per_workitem": 0,
+        "sgpr": 76,
+        "unified_vgpr": 248,
+        "vgpr": 136
+      },
+      "route": {
+        "k": 128,
+        "m": 128,
+        "n": 224,
+        "name": "pgr2_smoke",
+        "weight": 1.0
+      },
+      "search_space": {
+        "accepted": 38192,
+        "generated": 61020,
+        "rejected": 22828
+      },
+      "source_version": "rocwmma-pgr2-v2",
+      "task_digest": "4d1e8742749a2b2ecbb859267417b90a7eb188966328ba45a76bc489204b9513"
+    },
+    "fp8_rowwise": {
+      "compile_cache_key": "022c7a16f1f148b8b3830684e79c91b4611d1e51fc74a0dccf4d6a0444ba9c0f",
+      "compiler": {
+        "executable": "/opt/rocm-7.2.3/bin/hipcc",
+        "version": "HIP version: 7.2.53211-c2d9476115\nAMD clang version 22.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.2.3 26084 f58b06dce1f9c15707c5f808fd002e18c2accf7e)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /opt/rocm-7.2.3/lib/llvm/bin\nConfiguration file: /opt/rocm-7.2.3/lib/llvm/bin/clang++.cfg"
+      },
+      "fixture": "fp8_solution262788",
+      "k_stages": 2,
+      "pgr1": {
+        "agpr": 64,
+        "config": {
+          "a_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "arch": "gfx942",
+          "b_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "bk": 128,
+          "bm": 128,
+          "bn": 128,
+          "derived": {
+            "lds": {
+              "a_bytes": 16384,
+              "b_bytes": 16384,
+              "pgr_counted_as_buffer": false,
+              "scratch_bytes": 4096,
+              "total_bytes": 36864
+            },
+            "miwt": {
+              "m": 4,
+              "n": 4
+            },
+            "nw": 4,
+            "register_estimate": {
+              "accumulator_vgpr": 64,
+              "pgr_register_vgpr": 4,
+              "regular_vgpr": 36,
+              "unified_vgpr": 100
+            },
+            "wave_tile": {
+              "m": 64,
+              "n": 64
+            }
+          },
+          "dtype": "fp8_e4m3_fnuz",
+          "gsu": 1,
+          "layout": "a_mk_b_nk",
+          "lds_scratch_bytes": 4096,
+          "mfma": {
+            "blocks": 1,
+            "k": 32,
+            "m": 16,
+            "n": 16
+          },
+          "pgr": 1,
+          "plr": 0,
+          "provenance": {
+            "generator": "geak.dependent-domain-sweeps/v1",
+            "kind": "dependent_domain_generator",
+            "sweep": "pipeline_memory",
+            "vendor_default": false
+          },
+          "schema": "geak.asm_config/v1",
+          "stagger": 0,
+          "store": {
+            "mode": "vector"
+          },
+          "stream_k": 0,
+          "vector_widths": {
+            "a": 16,
+            "b": 16,
+            "store": 4
+          },
+          "wave_grid": {
+            "m": 2,
+            "n": 2
+          },
+          "wgm": 1,
+          "xcc": 1
+        },
+        "config_id": "aa75e26532409150589e",
+        "correctness": {
+          "atol": 1.8005548095703126,
+          "checked": true,
+          "cols": 128,
+          "fully_written": true,
+          "max_abs_error": 0.2452545166015625,
+          "max_relative_error": 0.0038541434332728386,
+          "mode": "full",
+          "passed": true,
+          "rows": 128,
+          "rtol": 0.03
+        },
+        "instruction_count": 5020,
+        "isa_hash": "bad28717ca6d988dd3811626c7d8fa42bcf0380caf0da6f57eb033642fc4d74e",
+        "lds_bytes": 36864,
+        "median_us": 26.120000518858433,
+        "occupancy": {
+          "limiting_resources": [
+            "lds"
+          ],
+          "waves_per_cu": 4,
+          "workgroups_per_cu": 1
+        },
+        "samples_us": [
+          26.040000841021538,
+          26.200000196695328
+        ],
+        "scratch_bytes_per_workitem": 0,
+        "sgpr": 43,
+        "unified_vgpr": 120,
+        "vgpr": 54
+      },
+      "pgr2": {
+        "agpr": 64,
+        "config": {
+          "a_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "arch": "gfx942",
+          "b_lds": {
+            "buffers": 1,
+            "pad_elements": 0
+          },
+          "bk": 128,
+          "bm": 128,
+          "bn": 128,
+          "derived": {
+            "lds": {
+              "a_bytes": 16384,
+              "b_bytes": 16384,
+              "pgr_counted_as_buffer": false,
+              "scratch_bytes": 4096,
+              "total_bytes": 36864
+            },
+            "miwt": {
+              "m": 4,
+              "n": 4
+            },
+            "nw": 4,
+            "register_estimate": {
+              "accumulator_vgpr": 64,
+              "pgr_register_vgpr": 32,
+              "regular_vgpr": 64,
+              "unified_vgpr": 128
+            },
+            "wave_tile": {
+              "m": 64,
+              "n": 64
+            }
+          },
+          "dtype": "fp8_e4m3_fnuz",
+          "gsu": 1,
+          "layout": "a_mk_b_nk",
+          "lds_scratch_bytes": 4096,
+          "mfma": {
+            "blocks": 1,
+            "k": 32,
+            "m": 16,
+            "n": 16
+          },
+          "pgr": 2,
+          "plr": 0,
+          "provenance": {
+            "generator": "geak.dependent-domain-sweeps/v1",
+            "kind": "dependent_domain_generator",
+            "sweep": "pipeline_memory",
+            "vendor_default": false
+          },
+          "schema": "geak.asm_config/v1",
+          "stagger": 0,
+          "store": {
+            "mode": "vector"
+          },
+          "stream_k": 0,
+          "vector_widths": {
+            "a": 16,
+            "b": 16,
+            "store": 4
+          },
+          "wave_grid": {
+            "m": 2,
+            "n": 2
+          },
+          "wgm": 1,
+          "xcc": 1
+        },
+        "config_id": "5ff3cd559f034cb6ce1c",
+        "correctness": {
+          "atol": 1.8005548095703126,
+          "checked": true,
+          "cols": 128,
+          "fully_written": true,
+          "max_abs_error": 0.2452545166015625,
+          "max_relative_error": 0.0038541434332728386,
+          "mode": "full",
+          "passed": true,
+          "rows": 128,
+          "rtol": 0.03
+        },
+        "instruction_count": 7733,
+        "isa_hash": "1a6f3b7f74ce192951f9f425b75a7e53de80dc243f8c031062df3475ce7bdb9f",
+        "lds_bytes": 36864,
+        "median_us": 25.15999972820282,
+        "occupancy": {
+          "limiting_resources": [
+            "lds"
+          ],
+          "waves_per_cu": 4,
+          "workgroups_per_cu": 1
+        },
+        "samples_us": [
+          25.24000033736229,
+          25.07999911904335
+        ],
+        "scratch_bytes_per_workitem": 0,
+        "sgpr": 92,
+        "unified_vgpr": 164,
+        "vgpr": 99
+      },
+      "route": {
+        "k": 256,
+        "m": 128,
+        "n": 128,
+        "name": "pgr2_smoke",
+        "weight": 1.0
+      },
+      "search_space": {
+        "accepted": 45342,
+        "generated": 50880,
+        "rejected": 5538
+      },
+      "source_version": "rocwmma-pgr2-v2",
+      "task_digest": "fe48ac6800b096d9e6ee69141fb32ecd7e963aee26a9b8ca22f145091cb6d79f"
+    }
+  },
+  "arch": "gfx942",
+  "created_at": "2026-09-02T16:12:45.470560+00:00",
+  "gpu_boundary": {
+    "fence": true,
+    "lock": "/tmp/team_gpu_locks/gpu_0.lock",
+    "visible_devices": "0"
+  },
+  "schema": "geak.gfx942-pgr2-smoke/v1"
+}

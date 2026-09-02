@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from asm_tuner.adapters.base import InactiveAxisError
 from asm_tuner.contracts import TaskContract
+from asm_tuner.schema_survival import generated_survival_candidate
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,19 +25,66 @@ def test_contract_binds_cases_builders_correctness_protocol_and_oracle(manifest)
     assert "scripts/task_runner.py" in contract.semantic_hashes
     assert "harness_lib.py" in contract.semantic_hashes
     assert "geak_tuner_runtime.py" in contract.semantic_hashes
+    assert len(contract.identity()["search_space_sha256"]) == 64
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS, ids=lambda p: p.stem)
-def test_search_space_has_real_seed_and_nondefault_geometry_only(manifest):
+def test_search_space_expands_dependent_domains_with_bounded_policy(manifest):
     contract = TaskContract.load(manifest)
-    seed = contract.config_variant("seed")
-    geometry = contract.config_variant("geometry_m32_n64_w1x4")
-    assert seed.config_id != geometry.config_id
-    assert (seed.bm, seed.bn, seed.wave_grid.m, seed.wave_grid.n) == (64, 64, 2, 2)
-    assert (geometry.bm, geometry.bn, geometry.wave_grid.m, geometry.wave_grid.n) == (32, 64, 1, 4)
+    materialized = contract.search_materialization
+    assert len(materialized.generated) > 50_000
+    assert len(materialized.accepted) > 30_000
+    assert len(materialized.rejected) > 0
+    assert contract.adapter.axis_status()["pgr"]["state"] == "active"
+    assert contract.search_space["domains"]["pgr"] == [1, 2]
+    assert contract.search_space["domains"]["wave_count"] == [2, 4, 8]
     assert contract.search_space["fail_closed"]["inactive_neutral_values"] == {
-        "pgr": 1, "plr": 0, "xcc": 1,
+        "plr": 0, "xcc": 1,
     }
+    assert contract.search_space["search_policy"]["full"] == {
+        "cu_count": 304,
+        "eta": 2,
+        "first_round_top_n": 12,
+        "max_compiled_candidates": 160,
+        "max_route_arm_evaluations": 24,
+        "rounds": 3,
+        "shard_size": 12,
+        "top_k": 2,
+    }
+    if contract.adapter_name == "bf16":
+        required = {64, 96, 112, 128, 160, 176, 192, 224, 256}
+        assert required <= set(contract.search_space["domains"]["bm"])
+        assert required <= set(contract.search_space["domains"]["bn"])
+        assert {32, 64, 128} <= set(contract.search_space["domains"]["bk"])
+        assert contract.search_space["bootstrap_search"]["cases"] == ["prefill_m2048_square"]
+    else:
+        assert 128 in contract.search_space["domains"]["bm"]
+        assert 128 in contract.search_space["domains"]["bn"]
+        assert 128 in contract.search_space["domains"]["bk"]
+        assert contract.search_space["bootstrap_search"]["cases"] == ["prefill_m1024_down"]
+
+
+@pytest.mark.parametrize(
+    "manifest_name,fixture_name,geometry,miwt",
+    [
+        ("dense_bf16_gemm_fused.json", "bf16_solution205554",
+         (128, 224, 64, 2, 2), (4, 7)),
+        ("dense_fp8_gemm_rowwise.json", "fp8_solution262788",
+         (128, 128, 128, 2, 2), (4, 4)),
+    ],
+)
+def test_schema_survival_points_are_generated_not_default_winners(
+    manifest_name, fixture_name, geometry, miwt,
+):
+    contract = TaskContract.load(MANIFEST_DIR / manifest_name)
+    config = generated_survival_candidate(contract.search_configs, fixture_name)
+    assert (config.bm, config.bn, config.bk,
+            config.wave_grid.m, config.wave_grid.n) == geometry
+    assert (config.miwt.m, config.miwt.n) == miwt
+    assert config.pgr == 2 and config.plr == 0 and config.xcc == 1
+    assert config.a_lds.buffers == config.b_lds.buffers == 1
+    assert config.config_id != contract.default_config.config_id
+    assert config.config_id not in contract.search_space["variants"]
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS, ids=lambda p: p.stem)
@@ -55,6 +102,8 @@ def test_runtime_loader_is_identical_for_bf16_and_fp8():
     bf16 = ROOT / "examples/tasks/dense_bf16_gemm_fused/geak_tuner_runtime.py"
     fp8 = ROOT / "examples/tasks/dense_fp8_gemm_rowwise/geak_tuner_runtime.py"
     assert bf16.read_bytes() == fp8.read_bytes()
+    text = bf16.read_text()
+    assert "ranks are not contiguous" in text
     for wrapper in (
         ROOT / "examples/tasks/dense_bf16_gemm_fused/gemm_wrapper.py",
         ROOT / "examples/tasks/dense_fp8_gemm_rowwise/gemm_wrapper.py",
@@ -64,12 +113,19 @@ def test_runtime_loader_is_identical_for_bf16_and_fp8():
         assert text.index("_tuner_dispatch") < text.index("from kernel_loader import gemm_ext")
 
 
-def test_committed_gpu_evidence_proves_symbols_changed():
-    evidence = json.loads((ROOT / "asm_tuner/evidence/gfx942_canonical_smoke_20260902.json").read_text())
-    assert evidence["dispatch_changed"] == {"bf16": True, "fp8": True}
-    assert evidence["protocol"]["schema"] == "geak.measurement-protocol/v2"
-    assert all(row["correctness"] == "pass" for row in evidence["smokes"].values())
-    assert all(row["independent_rebuild"]["status"] == "pass"
-               for row in evidence["smokes"].values())
-    assert all(search["status"] == "pass"
-               for search in evidence["protocol_v2_paired_search"].values())
+def test_committed_gpu_evidence_proves_pgr2_correctness_and_distinct_isa():
+    evidence = json.loads((ROOT / "asm_tuner/evidence/gfx942_pgr2_smoke_20260902.json").read_text())
+    assert evidence["arch"] == "gfx942"
+    manifests = {
+        "bf16": MANIFEST_DIR / "dense_bf16_gemm_fused.json",
+        "fp8_rowwise": MANIFEST_DIR / "dense_fp8_gemm_rowwise.json",
+    }
+    for adapter, row in evidence["adapters"].items():
+        assert row["task_digest"] == TaskContract.load(manifests[adapter]).task_digest
+        assert row["source_version"] == "rocwmma-pgr2-v2"
+        assert row["search_space"]["accepted"] > 30_000
+        assert row["pgr1"]["correctness"]["passed"] is True
+        assert row["pgr2"]["correctness"]["passed"] is True
+        assert row["pgr1"]["isa_hash"] != row["pgr2"]["isa_hash"]
+        assert row["pgr2"]["scratch_bytes_per_workitem"] == 0
+        assert row["pgr2"]["lds_bytes"] == row["pgr1"]["lds_bytes"]

@@ -102,6 +102,16 @@ def _load_table() -> Optional[Mapping[str, Any]]:
     protocol = value.get("protocol") or {}
     if protocol.get("schema") != "geak.measurement-protocol/v2" or len(str(protocol.get("hash") or "")) != 64:
         raise TunerDispatchError("runtime table is not bound to measurement protocol v2")
+    for route_id, row in routes.items():
+        entries = row.get("entries") or []
+        if not entries:
+            raise TunerDispatchError("route %s has no ranked artifacts" % route_id)
+        for rank, entry in enumerate(entries):
+            if entry.get("rank") != rank:
+                raise TunerDispatchError("route %s ranks are not contiguous" % route_id)
+            if (entry.get("task_digest") != task.get("digest") or
+                    entry.get("protocol_hash") != protocol.get("hash")):
+                raise TunerDispatchError("route %s rank %d binding mismatch" % (route_id, rank))
     _TABLE = value
     return value
 
@@ -124,14 +134,19 @@ def _select(table: Mapping[str, Any], shape: Tuple[int, int, int]) -> Optional[T
 def _library(entry: Mapping[str, Any]) -> Any:
     artifact = (_TASK_ROOT / str(entry["artifact"])).resolve()
     source = (_TASK_ROOT / str(entry["source"])).resolve()
-    if not _within(artifact, _TASK_ROOT) or not _within(source, _TASK_ROOT):
-        raise TunerDispatchError("runtime table artifact/source escapes task workspace")
+    compile_manifest = (_TASK_ROOT / str(entry["compile_manifest"])).resolve()
+    if (not _within(artifact, _TASK_ROOT) or not _within(source, _TASK_ROOT) or
+            not _within(compile_manifest, _TASK_ROOT)):
+        raise TunerDispatchError("runtime table artifact/source/manifest escapes task workspace")
     if (not artifact.is_file() or artifact.is_symlink() or
             _sha256(artifact) != entry.get("artifact_sha256")):
         raise TunerDispatchError("materialized artifact hash mismatch")
     if (not source.is_file() or source.is_symlink() or
             _sha256(source) != entry.get("source_sha256")):
         raise TunerDispatchError("materialized generated-source hash mismatch")
+    if (not compile_manifest.is_file() or compile_manifest.is_symlink() or
+            _sha256(compile_manifest) != entry.get("compile_manifest_sha256")):
+        raise TunerDispatchError("materialized compile-manifest hash mismatch")
     key = str(artifact)
     library = _LIBRARIES.get(key)
     if library is None:
@@ -158,6 +173,7 @@ def _trace(table: Mapping[str, Any], route: str, entry: Mapping[str, Any]) -> No
         "symbol": entry.get("symbol"),
         "artifact_sha256": entry.get("artifact_sha256"),
         "source_sha256": entry.get("source_sha256"),
+        "compile_manifest_sha256": entry.get("compile_manifest_sha256"),
     })
 
 

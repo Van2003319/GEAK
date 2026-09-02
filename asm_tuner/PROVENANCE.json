@@ -1,10 +1,18 @@
 {
+  "active_pipeline_axis": {
+    "pgr": [
+      1,
+      2
+    ],
+    "pgr2": "next global K stage held in VGPR packs; LDS buffer count unchanged"
+  },
   "canonical_integration": {
-    "gpu_evidence": "evidence/gfx942_canonical_smoke_20260902.json",
+    "gpu_evidence": "evidence/gfx942_pgr2_smoke_20260902.json",
     "materialization": "task-local explicit shared artifact loaded by versioned route table",
     "measurement_protocol": "geak.measurement-protocol/v2",
     "registry_bridge": "kernel_workflow/scripts/config_search.py (geak.config-search/v2)",
-    "runtime_table": "geak.runtime_table/v2; complete-suite atomic publication",
+    "runtime_table": "geak.runtime_table/v2; complete-suite atomic top-K publication",
+    "search": "dependent domains + route-static pruning + protocol-v2 per-route successive halving",
     "task_manifests": [
       "manifests/tasks/dense_bf16_gemm_fused.json",
       "manifests/tasks/dense_fp8_gemm_rowwise.json"
@@ -30,7 +38,7 @@
   "schema_survival_records": [
     {
       "executable": false,
-      "purpose": "normalization/schema survival only; inactive axes are rejected by adapters",
+      "purpose": "raw normalization target; executable neutral-axis counterpart must be domain-generated and compiled",
       "raw_macro_tile": [
         224,
         128
@@ -43,7 +51,7 @@
     },
     {
       "executable": false,
-      "purpose": "normalization/schema survival only; inactive axes are rejected by adapters",
+      "purpose": "raw normalization target; executable neutral-axis counterpart must be domain-generated and compiled",
       "raw_macro_tile": [
         128,
         128
@@ -57,7 +65,6 @@
   ],
   "unsupported_axes_fail_closed": {
     "gsu": 1,
-    "pgr": 1,
     "plr": 0,
     "stream_k": 0,
     "xcc": 1

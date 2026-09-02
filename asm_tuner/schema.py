@@ -198,6 +198,22 @@ class LdsEstimate:
 
 
 @dataclass(frozen=True)
+class RegisterEstimate:
+    regular_vgpr: int
+    accumulator_vgpr: int
+    unified_vgpr: int
+    pgr_register_vgpr: int
+
+    def to_dict(self) -> Dict[str, int]:
+        return {
+            "regular_vgpr": self.regular_vgpr,
+            "accumulator_vgpr": self.accumulator_vgpr,
+            "unified_vgpr": self.unified_vgpr,
+            "pgr_register_vgpr": self.pgr_register_vgpr,
+        }
+
+
+@dataclass(frozen=True)
 class Route:
     name: str
     m: int
@@ -313,6 +329,35 @@ class KernelConfig:
         total = a_bytes + b_bytes + self.lds_scratch_bytes
         return LdsEstimate(a_bytes, b_bytes, self.lds_scratch_bytes, total, False)
 
+    @property
+    def register_estimate(self) -> RegisterEstimate:
+        """Source-level register-pressure estimate used before compilation.
+
+        PGR2 holds every per-thread global-load pack for the next K stage in
+        ordinary VGPRs while the current LDS stage is consumed. Accumulators
+        remain a separate AGPR allocation on CDNA. Compiler metadata is still
+        the authoritative post-compile gate.
+        """
+
+        nt = max(1, self.nw * self.arch_spec.wave_size)
+        a_width = max(1, self.vector_widths.a)
+        b_width = max(1, self.vector_widths.b)
+        a_chunks = self.bm * ((max(1, self.bk) + a_width - 1) // a_width)
+        b_chunks = self.bn * ((max(1, self.bk) + b_width - 1) // b_width)
+        a_packs = (a_chunks + nt - 1) // nt
+        b_packs = (b_chunks + nt - 1) // nt
+        a_pack_vgpr = (a_width * self.dtype_bytes + 3) // 4
+        b_pack_vgpr = (b_width * self.dtype_bytes + 3) // 4
+        if self.pgr == 2:
+            pgr_vgpr = a_packs * a_pack_vgpr + b_packs * b_pack_vgpr
+        else:
+            pgr_vgpr = max(a_pack_vgpr, b_pack_vgpr)
+        # Addressing, fragment descriptors, scales, and epilogue temporaries.
+        regular = 32 + pgr_vgpr
+        miwt = self.miwt
+        accumulator = miwt.m * miwt.n * 4
+        return RegisterEstimate(regular, accumulator, regular + accumulator, pgr_vgpr)
+
     def grid_for(self, route: Route) -> Tuple[int, int, int]:
         gx = (route.n + self.bn - 1) // self.bn
         gy = (route.m + self.bm - 1) // self.bm
@@ -349,6 +394,7 @@ class KernelConfig:
                     "miwt": self.miwt.to_dict(),
                     "nw": self.nw,
                     "lds": self.lds.to_dict(),
+                    "register_estimate": self.register_estimate.to_dict(),
                 }
             except ConfigError as exc:
                 out["derived_error"] = str(exc)
@@ -413,8 +459,8 @@ def validate_config(config: KernelConfig) -> LegalityReport:
     except ConfigError as exc:
         errors.append(str(exc))
 
-    if config.pgr < 1:
-        errors.append("PGR must be >= 1")
+    if config.pgr not in (1, 2):
+        errors.append("PGR must be 1 (synchronous) or 2 (one-stage global-register prefetch)")
     if config.plr < 0:
         errors.append("PLR must be >= 0")
     for name, operand in (("A", config.a_lds), ("B", config.b_lds)):
@@ -450,6 +496,27 @@ def validate_config(config: KernelConfig) -> LegalityReport:
             "LDS scratch must reserve at least %d bytes for the per-wave epilogue"
             % config.required_epilogue_scratch_bytes
         )
+
+    try:
+        registers = config.register_estimate
+    except ConfigError:
+        registers = None
+    if registers is not None:
+        if registers.regular_vgpr > 256:
+            errors.append(
+                "estimated regular VGPR demand %d exceeds the architectural 256-VGPR wave limit"
+                % registers.regular_vgpr
+            )
+        if registers.accumulator_vgpr > 256:
+            errors.append(
+                "estimated accumulator VGPR demand %d exceeds the architectural 256-AGPR wave limit"
+                % registers.accumulator_vgpr
+            )
+        if registers.unified_vgpr > config.arch_spec.vgprs_per_simd:
+            errors.append(
+                "estimated unified VGPR demand %d exceeds %d registers/SIMD"
+                % (registers.unified_vgpr, config.arch_spec.vgprs_per_simd)
+            )
 
     if config.gsu != 1:
         errors.append("MVP executable supports only GSU=1")

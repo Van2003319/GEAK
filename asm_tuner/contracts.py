@@ -13,11 +13,16 @@ from typing import Any, Dict, Iterator, Mapping, Optional, Tuple
 
 from .adapters import get_adapter
 from .schema import KernelConfig, Route
+from .search_space import (
+    SEARCH_SPACE_SCHEMA,
+    SearchSpaceMaterialization,
+    materialize_search_space,
+    validate_search_manifest,
+)
 
 
 TASK_CONTRACT_SCHEMA = "geak.asm-task-contract/v1"
 ROUTE_MANIFEST_SCHEMA = "geak.asm-route-manifest/v1"
-SEARCH_SPACE_SCHEMA = "geak.asm-search-space/v1"
 ORACLE_MANIFEST_SCHEMA = "geak.oracle-route-manifest/v2"
 
 
@@ -159,6 +164,18 @@ class TaskContract:
         ) for case in self.cases)
 
     @property
+    def search_materialization(self) -> SearchSpaceMaterialization:
+        return materialize_search_space(self.search_space, self.adapter_name)
+
+    @property
+    def generated_configs(self) -> Tuple[KernelConfig, ...]:
+        return self.search_materialization.generated
+
+    @property
+    def search_configs(self) -> Tuple[KernelConfig, ...]:
+        return self.search_materialization.accepted
+
+    @property
     def default_config(self) -> KernelConfig:
         variant = str(self.search_space.get("default_variant") or "seed")
         return self.config_variant(variant)
@@ -172,11 +189,10 @@ class TaskContract:
         return config
 
     def config_by_id(self, config_id: str) -> KernelConfig:
-        for name in sorted((self.search_space.get("variants") or {})):
-            config = self.config_variant(name)
+        for config in self.search_configs:
             if config.config_id == config_id:
                 return config
-        raise ContractError("config %s is absent from the declared search space" % config_id)
+        raise ContractError("config %s is absent from the generated executable search space" % config_id)
 
     def case(self, case_id: str) -> Mapping[str, Any]:
         for case in self.cases:
@@ -197,6 +213,10 @@ class TaskContract:
             "oracle_manifest_sha256": self.oracle_sha256,
             "oracle_protocol_hash": self.oracle.get("protocol_hash"),
             "oracle_compatible": self.oracle_compatible,
+            "search_space_sha256": sha256_file(
+                self.repo_root / str(self.value["search_space_manifest"])
+            ),
+            "search_space": self.search_materialization.to_dict(),
         }
 
     @classmethod
@@ -236,6 +256,10 @@ class TaskContract:
         if (search_space.get("task") != value.get("task") or
                 search_space.get("adapter") != value.get("adapter")):
             raise ContractError("search-space task/adapter mismatch")
+        try:
+            validate_search_manifest(search_space, str(value["adapter"]))
+        except ValueError as exc:
+            raise ContractError("invalid dependent search-space manifest: %s" % exc) from exc
 
         bindings = value.get("bindings") or {}
         case_binding = bindings.get("cases") or {}
@@ -328,6 +352,7 @@ class TaskContract:
             "semantic_hashes": semantic_hashes,
             "binding_hashes": binding_hashes,
             "route_manifest_sha256": sha256_file(route_path),
+            "search_space_manifest_sha256": sha256_file(search_path),
             "protocol_hash": protocol["hash"],
             "oracle_manifest_sha256": oracle_sha256,
         }
@@ -337,8 +362,15 @@ class TaskContract:
             task_digest, semantic_hashes, binding_hashes, protocol, oracle,
             oracle_sha256, oracle_compatible,
         )
-        # Validate every declared point now. This is where inactive PGR/PLR/XCC
-        # values fail closed instead of surviving until a long GPU run.
+        # Validate declared release variants and materialize the generated legal
+        # set now. Inactive PLR/XCC or unsupported GSU/StreamK domains fail here,
+        # before compilation or a long GPU run.
         for variant in sorted((search_space.get("variants") or {})):
             contract.config_variant(variant)
+        try:
+            generated = contract.search_materialization
+        except ValueError as exc:
+            raise ContractError("cannot materialize dependent search space: %s" % exc) from exc
+        if contract.default_config.config_id not in {config.config_id for config in generated.accepted}:
+            raise ContractError("default variant did not survive generated static pruning")
         return contract

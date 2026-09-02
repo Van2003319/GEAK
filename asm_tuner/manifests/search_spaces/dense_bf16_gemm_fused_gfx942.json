@@ -27,8 +27,8 @@
       "state": "unsupported"
     },
     "pgr": {
-      "reason": "global-read prefetch distance is recorded but this MVP body is synchronous",
-      "state": "inactive"
+      "reason": "PGR2 prefetches the next global K stage into VGPR packs while current LDS is consumed",
+      "state": "active"
     },
     "plr": {
       "reason": "local-read prefetch distance is recorded but this MVP body is synchronous",
@@ -65,18 +65,122 @@
   },
   "bootstrap_search": {
     "cases": [
-      "decode_m2_square"
+      "prefill_m2048_square"
     ],
-    "purpose": "bounded protocol-v2 lane bootstrap; not a full-suite tune",
-    "variants": [
-      "seed",
-      "geometry_m32_n64_w1x4"
-    ]
+    "policy": "bootstrap",
+    "purpose": "bounded protocol-v2 large-M bootstrap over generated domains; not a full-suite tune"
   },
   "default_variant": "seed",
+  "domains": {
+    "a_lds": [
+      {
+        "buffers": 1,
+        "pad_elements": 0
+      },
+      {
+        "buffers": 1,
+        "pad_elements": 8
+      },
+      {
+        "buffers": 2,
+        "pad_elements": 0
+      }
+    ],
+    "b_lds": [
+      {
+        "buffers": 1,
+        "pad_elements": 0
+      },
+      {
+        "buffers": 1,
+        "pad_elements": 8
+      },
+      {
+        "buffers": 2,
+        "pad_elements": 0
+      }
+    ],
+    "bk": [
+      32,
+      64,
+      128
+    ],
+    "bm": [
+      64,
+      96,
+      112,
+      128,
+      160,
+      176,
+      192,
+      224,
+      256
+    ],
+    "bn": [
+      64,
+      96,
+      112,
+      128,
+      160,
+      176,
+      192,
+      224,
+      256
+    ],
+    "pgr": [
+      1,
+      2
+    ],
+    "stagger": [
+      0,
+      8,
+      16
+    ],
+    "store": [
+      {
+        "mode": "vector"
+      },
+      {
+        "mode": "non_temporal"
+      }
+    ],
+    "vector_widths": [
+      {
+        "a": 4,
+        "b": 4,
+        "store": 2
+      },
+      {
+        "a": 8,
+        "b": 8,
+        "store": 4
+      },
+      {
+        "a": 8,
+        "b": 4,
+        "store": 4
+      },
+      {
+        "a": 4,
+        "b": 8,
+        "store": 8
+      }
+    ],
+    "wave_count": [
+      2,
+      4,
+      8
+    ],
+    "wgm": [
+      1,
+      4,
+      8,
+      16,
+      32
+    ]
+  },
   "fail_closed": {
     "inactive_neutral_values": {
-      "pgr": 1,
       "plr": 0,
       "xcc": 1
     },
@@ -85,11 +189,8 @@
       "stream_k": 0
     }
   },
-  "schema": "geak.asm-search-space/v1",
-  "search_policy": "declared points only; no Cartesian expansion of inactive axes",
-  "task": "dense_bf16_gemm_fused",
-  "variants": {
-    "geometry_m32_n64_w1x4": {
+  "generator": {
+    "base": {
       "a_lds": {
         "buffers": 1,
         "pad_elements": 0
@@ -100,12 +201,12 @@
         "pad_elements": 0
       },
       "bk": 32,
-      "bm": 32,
+      "bm": 64,
       "bn": 64,
       "dtype": "bf16",
       "gsu": 1,
       "layout": "a_mk_b_nk",
-      "lds_scratch_bytes": 4096,
+      "lds_scratch_bytes": "auto",
       "mfma": {
         "blocks": 1,
         "k": 16,
@@ -114,11 +215,6 @@
       },
       "pgr": 1,
       "plr": 0,
-      "provenance": {
-        "kind": "canonical_nondefault_geometry",
-        "vendor_default": false
-      },
-      "schema": "geak.asm_config/v1",
       "stagger": 0,
       "store": {
         "mode": "vector"
@@ -130,12 +226,81 @@
         "store": 4
       },
       "wave_grid": {
-        "m": 1,
-        "n": 4
+        "m": 2,
+        "n": 2
       },
       "wgm": 1,
       "xcc": 1
     },
+    "dependencies": [
+      "wave_grid_factor_pairs",
+      "integral_mfma_wave_tile",
+      "auto_epilogue_scratch"
+    ],
+    "geometry": {
+      "bk": "bk",
+      "bm": "bm",
+      "bn": "bn",
+      "wave_count": "wave_count"
+    },
+    "kind": "geak.dependent-domain-sweeps/v1",
+    "profile_sweeps": [
+      {
+        "axes": [
+          "pgr",
+          "a_lds",
+          "b_lds"
+        ],
+        "name": "pipeline_memory"
+      },
+      {
+        "axes": [
+          "pgr",
+          "vector_widths",
+          "store"
+        ],
+        "name": "global_epilogue_io"
+      },
+      {
+        "axes": [
+          "pgr",
+          "wgm",
+          "stagger"
+        ],
+        "name": "mapping_schedule"
+      }
+    ],
+    "route_dependencies": [
+      "pgr2_requires_two_k_stages",
+      "stagger_requires_two_k_stages"
+    ]
+  },
+  "schema": "geak.asm-search-space/v2",
+  "search_policy": {
+    "bootstrap": {
+      "cu_count": 304,
+      "eta": 2,
+      "first_round_top_n": 8,
+      "max_compiled_candidates": 16,
+      "max_route_arm_evaluations": 12,
+      "rounds": 2,
+      "shard_size": 12,
+      "top_k": 2
+    },
+    "full": {
+      "cu_count": 304,
+      "eta": 2,
+      "first_round_top_n": 12,
+      "max_compiled_candidates": 160,
+      "max_route_arm_evaluations": 24,
+      "rounds": 3,
+      "shard_size": 12,
+      "top_k": 2
+    }
+  },
+  "search_policy_note": "Generate geometry times dependent profile sweeps, prune compile-time and route-time dependencies, then use grid coverage and data reuse only as soft ranking signals.",
+  "task": "dense_bf16_gemm_fused",
+  "variants": {
     "seed": {
       "a_lds": {
         "buffers": 1,

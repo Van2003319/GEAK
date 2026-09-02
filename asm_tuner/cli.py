@@ -11,7 +11,7 @@ import yaml
 
 from .adapters import get_adapter
 from .compiler import ShardCompiler
-from .pruning import shape_sort_key, static_prune
+from .pruning import route_static_prune, shape_sort_components, shape_sort_key, static_prune
 from .runtime_table import RuntimeSelector
 from .schema import DType, KernelConfig, Route, validate_config
 from .schema_survival import default_seed, get_fixture
@@ -75,21 +75,26 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     configs = _configs(args.configs)
     result = static_prune(configs)
     ranks: Dict[str, Any] = {}
+    route_rejected: Dict[str, Any] = {}
     for route in _routes(args.routes):
-        rows = sorted(result.accepted, key=lambda config: shape_sort_key(config, route, args.cu_count))
+        route_result = route_static_prune(result.accepted, route)
+        rows = sorted(route_result.accepted, key=lambda config: shape_sort_key(config, route, args.cu_count))
         ranks[route.name] = [
             {
                 "config_id": config.config_id,
                 "sort_key": list(shape_sort_key(config, route, args.cu_count)),
+                "soft_scores": shape_sort_components(config, route, args.cu_count),
                 "grid": list(config.grid_for(route)),
             }
             for config in rows
         ]
+        route_rejected[route.name] = [row.to_dict() for row in route_result.rejected]
     _print({
         "accepted": [config.config_id for config in result.accepted],
         "rejected": [row.to_dict() for row in result.rejected],
         "shape_ranks": ranks,
-        "grid_policy": "sort_only_never_hard_prune",
+        "route_rejected": route_rejected,
+        "grid_policy": "grid_and_reuse_are_soft_sort_only_never_hard_prune",
     })
     return 0
 

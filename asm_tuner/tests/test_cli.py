@@ -26,5 +26,5 @@ def test_validate_and_prune_commands_use_only_explicit_files(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["reports"][0]["valid"] is True
     assert main(["prune", "--configs", str(config_path), "--routes", str(route_path), "--cu-count", "304"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["grid_policy"] == "sort_only_never_hard_prune"
+    assert result["grid_policy"] == "grid_and_reuse_are_soft_sort_only_never_hard_prune"
     assert result["shape_ranks"]["tiny"][0]["grid"][2] == 1

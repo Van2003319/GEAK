@@ -185,3 +185,59 @@ def parse_assembly(assembly: str, expected: Mapping[str, KernelConfig]) -> Dict[
             occupancy=estimate_occupancy(config, unified_vgpr, sgpr, lds),
         )
     return parsed
+
+
+def metadata_gate_errors(config: KernelConfig, metadata: Any) -> Tuple[str, ...]:
+    """Authoritative post-compile resource gate for an executable kernel."""
+
+    def field(name: str, default: Any = 0) -> Any:
+        if isinstance(metadata, Mapping):
+            return metadata.get(name, default)
+        return getattr(metadata, name, default)
+
+    errors: List[str] = []
+    if field("config_id") != config.config_id:
+        errors.append("metadata config_id does not match compiled config")
+    if int(field("lds_bytes")) != config.lds.total_bytes:
+        errors.append(
+            "static LDS=%d but amdhsa metadata reports %d"
+            % (config.lds.total_bytes, int(field("lds_bytes")))
+        )
+    if int(field("scratch_bytes_per_workitem")) != 0:
+        errors.append(
+            "compiler introduced %d scratch bytes/workitem (register spill)"
+            % int(field("scratch_bytes_per_workitem"))
+        )
+    limits = (
+        ("vgpr", 256, "regular VGPR"),
+        ("agpr", 256, "AGPR"),
+        ("unified_vgpr", config.arch_spec.vgprs_per_simd, "unified VGPR"),
+        ("next_free_vgpr", config.arch_spec.vgprs_per_simd, "next-free VGPR"),
+        ("sgpr", config.arch_spec.sgprs_per_simd, "SGPR"),
+        ("next_free_sgpr", config.arch_spec.sgprs_per_simd, "next-free SGPR"),
+    )
+    for name, limit, label in limits:
+        actual = int(field(name))
+        if actual < 0 or actual > limit:
+            errors.append("%s count %d exceeds hard limit %d" % (label, actual, limit))
+    if int(field("instruction_count")) <= 0:
+        errors.append("compiled kernel has no parsed ISA instructions")
+    occupancy = field("occupancy", {})
+    if isinstance(occupancy, Occupancy):
+        workgroups = occupancy.workgroups_per_cu
+        waves = occupancy.waves_per_cu
+    else:
+        workgroups = int((occupancy or {}).get("workgroups_per_cu", 0))
+        waves = int((occupancy or {}).get("waves_per_cu", 0))
+    if workgroups < 1 or waves < config.nw:
+        errors.append(
+            "compiled resources leave zero executable workgroups (workgroups=%d waves=%d)"
+            % (workgroups, waves)
+        )
+    return tuple(errors)
+
+
+def require_metadata_gate(config: KernelConfig, metadata: Any) -> None:
+    errors = metadata_gate_errors(config, metadata)
+    if errors:
+        raise MetadataError("%s metadata gate failed: %s" % (config.config_id, "; ".join(errors)))

@@ -113,7 +113,11 @@ def _validate_v2(value: Mapping[str, Any]) -> None:
         for rank, entry in enumerate(entries):
             if entry.get("rank") != rank:
                 raise RuntimeTableError("route %s ranks are not contiguous" % route_id)
-            for key in ("config_id", "symbol", "artifact", "artifact_sha256", "source", "source_sha256"):
+            for key in (
+                "config_id", "config", "symbol", "isa_hash",
+                "artifact", "artifact_sha256", "source", "source_sha256",
+                "compile_manifest", "compile_manifest_sha256",
+            ):
                 if not entry.get(key):
                     raise RuntimeTableError("route %s entry lacks %s" % (route_id, key))
             if entry.get("task_digest") != task.get("digest"):
@@ -179,6 +183,7 @@ class RuntimeTableStore:
         protocol = dict(release.get("protocol") or {})
         oracle = dict(release.get("oracle") or {})
         fallback = dict(release.get("fallback") or {})
+        search = dict(release.get("search") or {})
         if not task.get("name") or len(str(task.get("digest") or "")) != 64:
             raise RuntimeTableError("release requires task name and 64-byte digest")
         if protocol.get("schema") != "geak.measurement-protocol/v2" or len(str(protocol.get("hash") or "")) != 64:
@@ -231,6 +236,7 @@ class RuntimeTableStore:
                 "protocol": protocol,
                 "oracle": oracle,
                 "fallback": fallback,
+                "search": search,
                 "suite": {"atomic": True, "complete": True, "route_ids": sorted(names)},
                 "routes": table_routes,
                 "history": history,

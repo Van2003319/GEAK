@@ -18,7 +18,7 @@ def test_lds_accounts_independent_buffers_pads_and_scratch_not_pgr():
     seed = default_seed(DType.BF16)
     value = seed.to_dict()
     value.update({
-        "pgr": 7,
+        "pgr": 2,
         "a_lds": {"buffers": 2, "pad": 8},
         "b_lds": {"buffers": 3, "pad": 16},
         "lds_scratch_bytes": 4096,
@@ -29,6 +29,7 @@ def test_lds_accounts_independent_buffers_pads_and_scratch_not_pgr():
     assert config.lds.total_bytes == config.lds.a_bytes + config.lds.b_bytes + 4096
     assert config.lds.pgr_counted_as_buffer is False
     assert replace(config, pgr=1).lds == config.lds
+    assert config.register_estimate.pgr_register_vgpr > replace(config, pgr=1).register_estimate.pgr_register_vgpr
     assert validate_config(config).valid
 
 

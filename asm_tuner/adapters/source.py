@@ -23,8 +23,15 @@ using FragA = rocwmma::fragment<rocwmma::matrix_a, 16, 16, kMfmaK, InputT, rocwm
 using FragB = rocwmma::fragment<rocwmma::matrix_b, 16, 16, kMfmaK, InputT, rocwmma::col_major>;
 using FragC = rocwmma::fragment<rocwmma::accumulator, 16, 16, kMfmaK, float>;
 
+template <int ElementBytes, int V>
+struct RawPackType;
+template <int V>
+struct RawPackType<1, V> { using type = unsigned char __attribute__((ext_vector_type(V))); };
+template <int V>
+struct RawPackType<2, V> { using type = unsigned short __attribute__((ext_vector_type(V))); };
+
 template <typename T, int V>
-struct alignas(sizeof(T) * V) Pack { T x[V]; };
+using Pack = typename RawPackType<sizeof(T), V>::type;
 
 template <typename T, int V>
 __device__ __forceinline__ Pack<T, V> guarded_load(
@@ -36,14 +43,23 @@ __device__ __forceinline__ Pack<T, V> guarded_load(
     }
     if (row_valid) {
 #pragma unroll
-        for (int e = 0; e < V; ++e) if (e < remaining) value.x[e] = ptr[e];
+        for (int e = 0; e < V; ++e) {
+            if (e < remaining) {
+                if constexpr (sizeof(T) == 1) {
+                    value[e] = *reinterpret_cast<const unsigned char*>(ptr + e);
+                } else {
+                    value[e] = *reinterpret_cast<const unsigned short*>(ptr + e);
+                }
+            }
+        }
     }
     return value;
 }
 
 template <int BM, int BN, int BK, int WAVES_M, int WAVES_N,
           int A_BUFFERS, int B_BUFFERS, int A_PAD, int B_PAD,
-          int VWA, int VWB, int VWS, int WGM, int STAGGER, bool NON_TEMPORAL>
+          int VWA, int VWB, int VWS, int WGM, int STAGGER, int PGR,
+          bool NON_TEMPORAL>
 __device__ __forceinline__ void gemm_body(
     int m, int n, int k,
     const InputT* __restrict__ a, const InputT* __restrict__ b,
@@ -59,10 +75,17 @@ __device__ __forceinline__ void gemm_body(
     constexpr int B_TOTAL = B_BUFFERS * B_SLOT;
     constexpr int TM = BM / (WAVES_M * kMfmaM);
     constexpr int TN = BN / (WAVES_N * kMfmaN);
+    constexpr int A_CHUNKS_PER_ROW = BK / VWA;
+    constexpr int B_CHUNKS_PER_ROW = BK / VWB;
+    constexpr int A_CHUNKS = BM * A_CHUNKS_PER_ROW;
+    constexpr int B_CHUNKS = BN * B_CHUNKS_PER_ROW;
+    constexpr int A_PREFETCH_PACKS = (A_CHUNKS + NT - 1) / NT;
+    constexpr int B_PREFETCH_PACKS = (B_CHUNKS + NT - 1) / NT;
     static_assert(BM % (WAVES_M * kMfmaM) == 0, "invalid M wave tile");
     static_assert(BN % (WAVES_N * kMfmaN) == 0, "invalid N wave tile");
     static_assert(BK % kMfmaK == 0, "invalid K tile");
     static_assert(kMfmaN % VWS == 0, "store vector crosses fragment rows");
+    static_assert(PGR == 1 || PGR == 2, "only PGR1 and PGR2 are implemented");
 
     const int block = static_cast<int>(blockIdx.x);
     const int gx = (n + BN - 1) / BN;
@@ -105,6 +128,40 @@ __device__ __forceinline__ void gemm_body(
     const int stages = (k + BK - 1) / BK;
     int stage_shift = 0;
     if constexpr (STAGGER > 0) stage_shift = block % (STAGGER < stages ? STAGGER : stages);
+
+    // PGR2 owns exactly one future global stage in ordinary registers. It does
+    // not add an LDS slot: A_BUFFERS=B_BUFFERS=1 remains a valid pipeline.
+    Pack<InputT, VWA> a_prefetch[A_PREFETCH_PACKS];
+    Pack<InputT, VWB> b_prefetch[B_PREFETCH_PACKS];
+    if constexpr (PGR == 2) {
+        const int first_stage = stage_shift;
+        const int first_k0 = first_stage * BK;
+#pragma unroll
+        for (int slot = 0; slot < A_PREFETCH_PACKS; ++slot) {
+            const int chunk = tid + slot * NT;
+            a_prefetch[slot] = Pack<InputT, VWA>{};
+            if (chunk < A_CHUNKS) {
+                const int row = chunk / A_CHUNKS_PER_ROW;
+                const int kk = (chunk % A_CHUNKS_PER_ROW) * VWA;
+                const bool valid = row0 + row < m;
+                const InputT* src = valid ? a + static_cast<long>(row0 + row) * k + first_k0 + kk : a;
+                a_prefetch[slot] = guarded_load<InputT, VWA>(src, valid, k - first_k0 - kk);
+            }
+        }
+#pragma unroll
+        for (int slot = 0; slot < B_PREFETCH_PACKS; ++slot) {
+            const int chunk = tid + slot * NT;
+            b_prefetch[slot] = Pack<InputT, VWB>{};
+            if (chunk < B_CHUNKS) {
+                const int row = chunk / B_CHUNKS_PER_ROW;
+                const int kk = (chunk % B_CHUNKS_PER_ROW) * VWB;
+                const bool valid = col0 + row < n;
+                const InputT* src = valid ? b + static_cast<long>(col0 + row) * k + first_k0 + kk : b;
+                b_prefetch[slot] = guarded_load<InputT, VWB>(src, valid, k - first_k0 - kk);
+            }
+        }
+    }
+
     for (int logical_stage = 0; logical_stage < stages; ++logical_stage) {
         int stage = logical_stage + stage_shift;
         if (stage >= stages) stage -= stages;
@@ -112,27 +169,78 @@ __device__ __forceinline__ void gemm_body(
         InputT* const sA = a_base + (stage % A_BUFFERS) * A_SLOT;
         InputT* const sB = b_base + (stage % B_BUFFERS) * B_SLOT;
 
-        constexpr int A_CHUNKS_PER_ROW = BK / VWA;
-        constexpr int B_CHUNKS_PER_ROW = BK / VWB;
-        constexpr int A_CHUNKS = BM * A_CHUNKS_PER_ROW;
-        constexpr int B_CHUNKS = BN * B_CHUNKS_PER_ROW;
-        for (int chunk = tid; chunk < A_CHUNKS; chunk += NT) {
-            const int row = chunk / A_CHUNKS_PER_ROW;
-            const int kk = (chunk % A_CHUNKS_PER_ROW) * VWA;
-            const bool valid = row0 + row < m;
-            const InputT* src = valid ? a + static_cast<long>(row0 + row) * k + k0 + kk : a;
-            const auto value = guarded_load<InputT, VWA>(src, valid, k - k0 - kk);
-            *reinterpret_cast<Pack<InputT, VWA>*>(sA + row * LDA + kk) = value;
-        }
-        for (int chunk = tid; chunk < B_CHUNKS; chunk += NT) {
-            const int row = chunk / B_CHUNKS_PER_ROW;
-            const int kk = (chunk % B_CHUNKS_PER_ROW) * VWB;
-            const bool valid = col0 + row < n;
-            const InputT* src = valid ? b + static_cast<long>(col0 + row) * k + k0 + kk : b;
-            const auto value = guarded_load<InputT, VWB>(src, valid, k - k0 - kk);
-            *reinterpret_cast<Pack<InputT, VWB>*>(sB + row * LDB + kk) = value;
+        if constexpr (PGR == 1) {
+            for (int chunk = tid; chunk < A_CHUNKS; chunk += NT) {
+                const int row = chunk / A_CHUNKS_PER_ROW;
+                const int kk = (chunk % A_CHUNKS_PER_ROW) * VWA;
+                const bool valid = row0 + row < m;
+                const InputT* src = valid ? a + static_cast<long>(row0 + row) * k + k0 + kk : a;
+                const auto value = guarded_load<InputT, VWA>(src, valid, k - k0 - kk);
+                *reinterpret_cast<Pack<InputT, VWA>*>(sA + row * LDA + kk) = value;
+            }
+            for (int chunk = tid; chunk < B_CHUNKS; chunk += NT) {
+                const int row = chunk / B_CHUNKS_PER_ROW;
+                const int kk = (chunk % B_CHUNKS_PER_ROW) * VWB;
+                const bool valid = col0 + row < n;
+                const InputT* src = valid ? b + static_cast<long>(col0 + row) * k + k0 + kk : b;
+                const auto value = guarded_load<InputT, VWB>(src, valid, k - k0 - kk);
+                *reinterpret_cast<Pack<InputT, VWB>*>(sB + row * LDB + kk) = value;
+            }
+        } else {
+#pragma unroll
+            for (int slot = 0; slot < A_PREFETCH_PACKS; ++slot) {
+                const int chunk = tid + slot * NT;
+                if (chunk < A_CHUNKS) {
+                    const int row = chunk / A_CHUNKS_PER_ROW;
+                    const int kk = (chunk % A_CHUNKS_PER_ROW) * VWA;
+                    *reinterpret_cast<Pack<InputT, VWA>*>(sA + row * LDA + kk) = a_prefetch[slot];
+                }
+            }
+#pragma unroll
+            for (int slot = 0; slot < B_PREFETCH_PACKS; ++slot) {
+                const int chunk = tid + slot * NT;
+                if (chunk < B_CHUNKS) {
+                    const int row = chunk / B_CHUNKS_PER_ROW;
+                    const int kk = (chunk % B_CHUNKS_PER_ROW) * VWB;
+                    *reinterpret_cast<Pack<InputT, VWB>*>(sB + row * LDB + kk) = b_prefetch[slot];
+                }
+            }
         }
         __syncthreads();
+
+        if constexpr (PGR == 2) {
+            if (logical_stage + 1 < stages) {
+                int next_stage = logical_stage + 1 + stage_shift;
+                if (next_stage >= stages) next_stage -= stages;
+                const int next_k0 = next_stage * BK;
+                // These global loads are intentionally issued before current
+                // LDS reads/MFMA. Their values stay live until the next loop.
+#pragma unroll
+                for (int slot = 0; slot < A_PREFETCH_PACKS; ++slot) {
+                    const int chunk = tid + slot * NT;
+                    a_prefetch[slot] = Pack<InputT, VWA>{};
+                    if (chunk < A_CHUNKS) {
+                        const int row = chunk / A_CHUNKS_PER_ROW;
+                        const int kk = (chunk % A_CHUNKS_PER_ROW) * VWA;
+                        const bool valid = row0 + row < m;
+                        const InputT* src = valid ? a + static_cast<long>(row0 + row) * k + next_k0 + kk : a;
+                        a_prefetch[slot] = guarded_load<InputT, VWA>(src, valid, k - next_k0 - kk);
+                    }
+                }
+#pragma unroll
+                for (int slot = 0; slot < B_PREFETCH_PACKS; ++slot) {
+                    const int chunk = tid + slot * NT;
+                    b_prefetch[slot] = Pack<InputT, VWB>{};
+                    if (chunk < B_CHUNKS) {
+                        const int row = chunk / B_CHUNKS_PER_ROW;
+                        const int kk = (chunk % B_CHUNKS_PER_ROW) * VWB;
+                        const bool valid = col0 + row < n;
+                        const InputT* src = valid ? b + static_cast<long>(col0 + row) * k + next_k0 + kk : b;
+                        b_prefetch[slot] = guarded_load<InputT, VWB>(src, valid, k - next_k0 - kk);
+                    }
+                }
+            }
+        }
 
 #pragma unroll
         for (int sk = 0; sk < BK; sk += kMfmaK) {
@@ -174,7 +282,8 @@ __device__ __forceinline__ void gemm_body(
                     for (int e = 0; e < VWS; ++e) {
                         float value = wave_out[linear + e];
                         if constexpr (kScaled) value *= a_scale[row] * b_scale[col + e];
-                        out.x[e] = OutputT(value);
+                        const OutputT converted(value);
+                        out[e] = *reinterpret_cast<const unsigned short*>(&converted);
                     }
                     *reinterpret_cast<Pack<OutputT, VWS>*>(dst) = out;
                 } else {
@@ -210,12 +319,12 @@ def _entry(config: KernelConfig, adapter_name: str, arch_guard: str) -> str:
         config.bm, config.bn, config.bk, config.wave_grid.m, config.wave_grid.n,
         config.a_lds.buffers, config.b_lds.buffers, config.a_lds.pad_elements,
         config.b_lds.pad_elements, config.vector_widths.a, config.vector_widths.b,
-        config.vector_widths.store, config.wgm, config.stagger,
+        config.vector_widths.store, config.wgm, config.stagger, config.pgr,
     )) + ", " + non_temporal
     config_json = json.dumps(config.to_dict(include_derived=True), sort_keys=True, separators=(",", ":"))
     source = r'''
 // CONFIG @CONFIG_JSON@
-// PGR=@PGR@ and PLR=@PLR@ are manifest-visible INACTIVE axes in source_version rocwmma-mvp-v1.
+// PGR=@PGR@ is executable; PLR=@PLR@ remains fail-closed in source_version rocwmma-pgr2-v2.
 extern "C" __global__ __launch_bounds__(@THREADS@, 1)
 void @KERNEL@(
     int m, int n, int k, const InputT* a, const InputT* b,
