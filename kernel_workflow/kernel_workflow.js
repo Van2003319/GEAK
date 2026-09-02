@@ -68,7 +68,7 @@ const KNOWN_ARGS = new Set([
   'start_phase',
   // Canonical asm_tuner bridge. required means no Engineer may start until
   // search/create/select/materialize has produced a hash-valid suite table.
-  'asm_tuner_manifest', 'asm_tuner_mode',
+  'asm_tuner_manifest', 'asm_tuner_mode', 'score_metric',
 ]);
 {
   const unknown = Object.keys(A).filter(k => !KNOWN_ARGS.has(k));

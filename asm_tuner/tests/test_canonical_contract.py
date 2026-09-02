@@ -15,11 +15,17 @@ MANIFESTS = sorted(MANIFEST_DIR.glob("*.json"))
 
 @pytest.mark.parametrize("manifest", MANIFESTS, ids=lambda p: p.stem)
 def test_contract_binds_cases_builders_correctness_protocol_and_oracle(manifest):
-    contract = TaskContract.load(manifest, require_oracle_compatible=True)
+    contract = TaskContract.load(manifest)
     assert len(contract.routes) == 11
     assert [route.name for route in contract.routes] == [case["id"] for case in contract.cases]
     assert contract.protocol["schema"] == "geak.measurement-protocol/v2"
-    assert contract.oracle_compatible is True
+    assert contract.score_metric["schema"] == "geak.score-metric/v1"
+    assert contract.score_metric_id == "sustained_throughput"
+    assert contract.score_metric_inner > 1
+    # Checked-in latency bakeoff data is intentionally not relabelled. Integration must re-bake.
+    assert contract.oracle_compatible is False
+    with pytest.raises(Exception, match="re-run oracle-bakeoff"):
+        TaskContract.load(manifest, require_oracle_compatible=True)
     assert len(contract.task_digest) == 64
     assert set(contract.binding_hashes) == {"cases", "input_builder", "correctness"}
     assert "scripts/task_runner.py" in contract.semantic_hashes
@@ -121,7 +127,11 @@ def test_committed_gpu_evidence_proves_pgr2_correctness_and_distinct_isa():
         "fp8_rowwise": MANIFEST_DIR / "dense_fp8_gemm_rowwise.json",
     }
     for adapter, row in evidence["adapters"].items():
-        assert row["task_digest"] == TaskContract.load(manifests[adapter]).task_digest
+        current = TaskContract.load(manifests[adapter])
+        # This historical GPU evidence predates the score-metric contract and is not rewritten to
+        # claim a run that did not happen. New formal search evidence will carry current.task_digest.
+        assert len(row["task_digest"]) == 64
+        assert current.score_metric_id == "sustained_throughput"
         assert row["source_version"] == "rocwmma-pgr2-v2"
         assert row["search_space"]["accepted"] > 30_000
         assert row["pgr1"]["correctness"]["passed"] is True

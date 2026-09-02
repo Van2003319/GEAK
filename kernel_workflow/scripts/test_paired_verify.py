@@ -39,12 +39,12 @@ class FakeOutput:
 def protocol() -> dict:
     return harness.measurement_protocol(
         "semantic_weight_rotating", seed=7, latency_cycles=4,
-        throughput_cycles=2, throughput_inner=2, warmup_cycles=1,
+        throughput_cycles=4, throughput_inner=2, warmup_cycles=1,
         output_ring_size=3, rotation_target_mb=2, assumed_cache_mb=1,
         max_slots=2, timing_prime_mb=1, synthetic_evict_mb=2)
 
 
-def measurement(route: str, gain: float) -> dict:
+def measurement(route: str, gain: float, metric_id: str) -> dict:
     proto = protocol()
     slots = [
         {"slot_id": f"{route}-slot-{index}", "fingerprint": f"{index + 1:064x}",
@@ -52,39 +52,62 @@ def measurement(route: str, gain: float) -> dict:
          "args": (object(),)}
         for index in range(2)
     ]
-    pointer = iter(range(1000, 10000))
+    pointer = iter(range(1000, 100000))
     arm_ms = {"candidate": 1.0 - gain, "incumbent": 1.0, "oracle:report": 0.5}
 
     def arm(name):
         return lambda _slot: FakeOutput(next(pointer), arm_ms[name])
 
     def timer(call, inner, retain):
-        assert inner == 1
-        out = call()
-        retain(out)
-        return {"ms": out.ms, "wall_ms": out.ms, "host_ms": 0.01,
+        outputs = [call() for _ in range(inner)]
+        for out in outputs:
+            retain(out)
+        return {"ms": outputs[-1].ms, "wall_ms": outputs[-1].ms, "host_ms": 0.01,
                 "timer": "cuda_event", "primed": True,
-                "output_ptrs": [out.data_ptr()]}
+                "output_ptrs": [out.data_ptr() for out in outputs]}
 
     with mock.patch.dict(os.environ, {"GEAK_GPU_LOCK_HELD": "1",
-                                      "GEAK_GPU_LOCK_FILE": LOCK}, clear=False), \
-            mock.patch.object(harness, "sync", lambda *args, **kwargs: None):
+                                      "GEAK_GPU_LOCK_FILE": LOCK}, clear=False),             mock.patch.object(harness, "sync", lambda *args, **kwargs: None):
         return harness.measure_paired_arms(
             {name: arm(name) for name in ("candidate", "incumbent", "oracle:report")},
-            slots, protocol=proto, metric="single_call_latency",
+            slots, protocol=proto, metric=metric_id,
             sample_timer=timer, cache_prepare=lambda _policy: None)
 
 
-def raw_suite(routes=("target", "guard")) -> dict:
+def raw_suite(routes=("target", "guard"), metric_id="sustained_throughput") -> dict:
+    proto = protocol()
+    score_metric = harness.score_metric_config(metric_id, protocol=proto)
+    secondary_metric = harness.secondary_score_metric(score_metric, protocol=proto)
     rows = []
     for route in routes:
-        rows.append({"route": route,
-                     "measurement_receipt": measurement(route, 0.07 if route == "target" else 0.0),
-                     "absolute_report": {"oracle_arm": "oracle:report"}})
-    return {"schema": pv.RAW_SUITE_SCHEMA, "expected_routes": sorted(routes),
-            "protocol_hash": rows[0]["measurement_receipt"]["protocol_hash"],
-            "promotion_control": "incumbent", "oracle_role": "absolute_report_only",
-            "routes": rows}
+        gain = 0.07 if route == "target" else 0.0
+        score_receipt = measurement(route, gain, score_metric["id"])
+        secondary_receipt = measurement(route, gain, secondary_metric["id"])
+        candidate_ms = score_receipt["medians_ms"]["candidate"]
+        incumbent_ms = score_receipt["medians_ms"]["incumbent"]
+        rows.append({
+            "route": route,
+            "score_metric": score_metric,
+            "execution_time_ms": candidate_ms,
+            "incumbent_ms": incumbent_ms,
+            "speedup": incumbent_ms / candidate_ms,
+            "measurement_receipt": score_receipt,
+            "secondary_metric": secondary_metric,
+            "secondary_measurement_receipt": secondary_receipt,
+            "absolute_report": {"oracle_arm": "oracle:report"},
+        })
+    return {
+        "schema": pv.RAW_SUITE_SCHEMA,
+        "expected_routes": sorted(routes),
+        "protocol_hash": rows[0]["measurement_receipt"]["protocol_hash"],
+        "score_metric": score_metric,
+        "metric_id": score_metric["id"],
+        "inner": score_metric["inner"],
+        "secondary_metric": secondary_metric,
+        "promotion_control": "incumbent",
+        "oracle_role": "absolute_report_only",
+        "routes": rows,
+    }
 
 
 def roots(tmp_path: Path) -> tuple[Path, Path]:
@@ -126,6 +149,9 @@ def test_task_receipt_to_adapter_to_python_gate(tmp_path: Path) -> None:
     assert gate_input["schema"] == rg.INPUT_SCHEMA
     assert gate_input["measurement"]["canonical_input_sha256"] == task["canonical_input_sha256"]
     assert gate_input["measurement"]["protocol_hash"] == task["protocol_hash"]
+    assert gate_input["measurement"]["score_metric"] == task["score_metric"]
+    assert gate_input["measurement"]["metric_id"] == "sustained_throughput"
+    assert gate_input["measurement"]["inner"] > 1
     assert gate_input["measurement"]["gpu_lock"]["path"] == LOCK
     assert gate_input["measurement"]["priming"]["all_samples_primed"] is True
     assert gate_input["measurement"]["output_lifecycle"]["all_arms_rotated"] is True
@@ -165,6 +191,36 @@ def test_stale_task_digest_and_protocol_hash_are_rejected(tmp_path: Path) -> Non
                  target_routes=["target"])
 
 
+def test_metric_id_and_inner_drift_are_rejected(tmp_path: Path) -> None:
+    task = task_receipt(tmp_path)
+    task["inner"] = 1
+    unhashed = dict(task)
+    unhashed.pop("canonical_input_sha256")
+    task["canonical_input_sha256"] = pv.canonical_sha256(unhashed)
+    with pytest.raises(pv.PairedVerifyError, match="metric_id/inner"):
+        pv.adapt(task, session_id="lane-session", expected_routes=["target", "guard"],
+                 target_routes=["target"])
+
+
+def test_latency_legacy_selection_remains_explicitly_sealable(tmp_path: Path) -> None:
+    candidate, incumbent = roots(tmp_path)
+    hashes_c = ws.canonical_hashes(candidate)
+    hashes_i = ws.canonical_hashes(incumbent)
+    task_root = tmp_path / "task"
+    task_root.mkdir()
+    adapter = task_root / "adapter.py"
+    adapter.write_text("# adapter\n")
+    receipt = pv.seal_task_receipt(
+        raw_suite(metric_id="single_call_latency"), candidate_root=candidate,
+        incumbent_root=incumbent, candidate_hashes_before=hashes_c,
+        candidate_hashes_after=hashes_c, incumbent_hashes_before=hashes_i,
+        incumbent_hashes_after=hashes_i, expected_routes=["target", "guard"],
+        lock_path=LOCK, command=[sys.executable, str(adapter)],
+        expected_metric_id="single_call_latency")
+    assert receipt["metric_id"] == "single_call_latency"
+    assert receipt["inner"] == 1
+
+
 def test_unprimed_or_stale_output_lifecycle_is_rejected(tmp_path: Path) -> None:
     task = task_receipt(tmp_path)
     route = task["routes"][0]
@@ -195,7 +251,7 @@ def test_produce_runs_one_command_under_external_lock_and_seals_roots(tmp_path: 
         receipt = pv.produce(
             candidate_root=candidate, incumbent_root=incumbent, task_root=task_root,
             expected_routes=["target", "guard"], command=[sys.executable, str(adapter)],
-            output=output)
+            output=output, score_metric_id="sustained_throughput")
     assert output.is_file()
     assert receipt["incumbent_unchanged"] is True
     assert receipt["gpu_lock"] == {"mode": "external", "path": LOCK}
@@ -219,4 +275,4 @@ def test_produce_refuses_when_incumbent_is_modified(tmp_path: Path) -> None:
             pytest.raises(pv.PairedVerifyError, match="modified the incumbent"):
         pv.produce(candidate_root=candidate, incumbent_root=incumbent, task_root=task_root,
                    expected_routes=["target", "guard"], command=[sys.executable, str(adapter)],
-                   output=tmp_path / "out.json")
+                   output=tmp_path / "out.json", score_metric_id="sustained_throughput")

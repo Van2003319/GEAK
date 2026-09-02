@@ -6,6 +6,7 @@ mid-run route change, even if another process re-bakes the file concurrently.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -44,12 +45,50 @@ class FrozenRouteManifest:
     def backend(self, m: int, n: int, k: int) -> str:
         return str(self.entry(m, n, k)["backend"])
 
-    def validate_for(self, protocol_hash: str, cases: list[dict]) -> tuple[bool, list[str]]:
+    def validate_for(self, protocol_hash: str, score_metric: dict | str,
+                     cases: list[dict] | None = None) -> tuple[bool, list[str]]:
+        # Two-argument callers are legacy latency lanes. They remain readable, but every new bake
+        # writes the complete versioned object below.
+        if cases is None:
+            cases = score_metric  # type: ignore[assignment]
+            score_metric = "single_call_latency"
+        expected_id = (score_metric.get("id") if isinstance(score_metric, dict)
+                       else str(score_metric))
         errors = []
         if self._payload.get("frozen") is not True:
             errors.append("manifest is not frozen")
-        if self._payload.get("selection_metric") != "single_call_latency":
-            errors.append("selection metric is not single_call_latency")
+        if expected_id not in ("single_call_latency", "sustained_throughput"):
+            errors.append(f"unsupported requested score metric {expected_id!r}")
+        if self._payload.get("selection_metric") != expected_id:
+            errors.append(
+                f"selection metric differs: manifest={self._payload.get('selection_metric')!r} "
+                f"requested={expected_id!r}; re-run oracle-bakeoff")
+        manifest_metric = self._payload.get("score_metric")
+        if manifest_metric is None:
+            if expected_id != "single_call_latency":
+                errors.append("legacy oracle has no score_metric binding; re-run oracle-bakeoff")
+        elif not isinstance(score_metric, dict) or manifest_metric != score_metric:
+            errors.append("score_metric object differs; re-run oracle-bakeoff")
+        if isinstance(score_metric, dict):
+            metric_body = dict(score_metric)
+            metric_digest = metric_body.pop("hash", None)
+            computed = hashlib.sha256(json.dumps(
+                metric_body, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False).encode("utf-8")).hexdigest()
+            if (score_metric.get("schema") != "geak.score-metric/v1"
+                    or isinstance(score_metric.get("version"), bool)
+                    or score_metric.get("version") != 1
+                    or score_metric.get("unit") != "ms/call"
+                    or score_metric.get("protocol_hash") != protocol_hash
+                    or metric_digest != computed):
+                errors.append("requested score_metric binding is malformed or stale")
+            if ((expected_id == "single_call_latency"
+                 and (isinstance(score_metric.get("inner"), bool)
+                      or score_metric.get("inner") != 1))
+                    or (expected_id == "sustained_throughput"
+                        and (not isinstance(score_metric.get("inner"), int)
+                             or score_metric["inner"] <= 1))):
+                errors.append("requested score_metric inner is invalid")
         if self._payload.get("protocol_hash") != protocol_hash:
             errors.append("protocol hash differs; re-run oracle-bakeoff")
         routes = self._payload.get("routes", {})
@@ -71,8 +110,25 @@ class FrozenRouteManifest:
 
 
 def write_route_manifest(path: str | os.PathLike[str], payload: dict) -> None:
-    if payload.get("schema") != SCHEMA or payload.get("frozen") is not True:
-        raise ValueError("only a complete frozen v2 route manifest may be written")
+    metric = payload.get("score_metric")
+    metric_body = dict(metric) if isinstance(metric, dict) else {}
+    metric_digest = metric_body.pop("hash", None)
+    computed = hashlib.sha256(json.dumps(
+        metric_body, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True, allow_nan=False).encode("utf-8")).hexdigest()
+    if (payload.get("schema") != SCHEMA or payload.get("frozen") is not True
+            or not isinstance(metric, dict) or metric.get("schema") != "geak.score-metric/v1"
+            or isinstance(metric.get("version"), bool) or metric.get("version") != 1
+            or metric_digest != computed
+            or metric.get("unit") != "ms/call"
+            or metric.get("id") not in ("single_call_latency", "sustained_throughput")
+            or (metric.get("id") == "single_call_latency"
+                and (isinstance(metric.get("inner"), bool) or metric.get("inner") != 1))
+            or (metric.get("id") == "sustained_throughput"
+                and (not isinstance(metric.get("inner"), int) or metric["inner"] <= 1))
+            or payload.get("selection_metric") != metric.get("id")
+            or payload.get("protocol_hash") != metric.get("protocol_hash")):
+        raise ValueError("only a complete frozen score-metric-bound v2 route manifest may be written")
     path = Path(path)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     with tmp.open("w", encoding="utf-8") as handle:

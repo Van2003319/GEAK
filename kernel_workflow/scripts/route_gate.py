@@ -104,7 +104,7 @@ def _algorithm_receipt() -> dict[str, Any]:
         "index_sampler": "next_u64 modulo n",
         "min_pairs": MIN_PAIRS,
         "multiple_endpoints": "intersection-union: every declared endpoint must pass",
-        "catastrophic_statistic": "trimmed-mean point estimate of candidate/control latency change",
+        "catastrophic_statistic": "trimmed-mean point estimate of candidate/control execution-time change",
     }
 
 
@@ -379,8 +379,49 @@ def _measurement_binding(spec: Mapping[str, object], routes: Sequence[str]) -> d
     if (not isinstance(protocol_digest, str) or protocol_digest != recomputed
             or raw.get("protocol_hash") != protocol_digest):
         raise RouteGateError("measurement protocol hash does not match canonical contents")
-    if raw.get("metric_id") != "single_call_latency":
-        raise RouteGateError("promotion measurement must be single_call_latency")
+
+    def metric_binding(value: object, label: str) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or value.get("schema") != "geak.score-metric/v1":
+            raise RouteGateError(f"{label} is missing or not score-metric/v1")
+        metric = dict(value)
+        metric_payload = dict(metric)
+        metric_digest = metric_payload.pop("hash", None)
+        metric_id = metric.get("id")
+        inner = metric.get("inner")
+        metrics = protocol.get("metrics")
+        protocol_metric = metrics.get(metric_id) if isinstance(metrics, Mapping) else None
+        if (isinstance(metric.get("version"), bool) or metric.get("version") != 1
+                or metric_id not in ("single_call_latency", "sustained_throughput")
+                or metric_digest != _input_digest(metric_payload)
+                or metric.get("protocol_hash") != protocol_digest
+                or not isinstance(protocol_metric, Mapping)
+                or protocol_metric.get("id") != metric_id
+                or protocol_metric.get("unit") != metric.get("unit")
+                or protocol_metric.get("inner") != inner
+                or (metric_id == "single_call_latency"
+                    and (isinstance(inner, bool) or inner != 1))
+                or (metric_id == "sustained_throughput" and (
+                    isinstance(inner, bool) or not isinstance(inner, int) or inner <= 1))):
+            raise RouteGateError(f"{label} is malformed or protocol-mismatched")
+        return metric
+
+    score_metric = metric_binding(raw.get("score_metric"), "measurement score_metric")
+    secondary_metric = metric_binding(raw.get("secondary_metric"), "measurement secondary_metric")
+    metric_id, inner = score_metric["id"], score_metric["inner"]
+    if ({metric_id, secondary_metric["id"]}
+            != {"single_call_latency", "sustained_throughput"}
+            or raw.get("metric_id") != metric_id or raw.get("inner") != inner):
+        raise RouteGateError("measurement metric_id/inner differs from score_metric")
+    if metric_id == "sustained_throughput" and (
+            protocol.get("slot_policy") != "semantic_weight_rotation"
+            or protocol.get("cache_policy") != "semantic_weight_rotating"):
+        raise RouteGateError(
+            "sustained throughput promotion requires semantic same-slot weight rotation")
+    paired_rows = spec.get("paired_routes")
+    if (not isinstance(paired_rows, list)
+            or any(not isinstance(row, Mapping) or row.get("metric_id") != metric_id
+                   or row.get("inner") != inner for row in paired_rows)):
+        raise RouteGateError("paired route metric_id/inner differs from measurement binding")
     lock = raw.get("gpu_lock")
     if (not isinstance(lock, Mapping) or lock.get("mode") != "external"
             or not isinstance(lock.get("path"), str) or not lock.get("path")):
@@ -394,13 +435,15 @@ def _measurement_binding(spec: Mapping[str, object], routes: Sequence[str]) -> d
             or isinstance(warmups, bool) or not isinstance(warmups, int) or warmups < 0):
         raise RouteGateError("measurement priming/timer binding is incomplete")
     invariants = raw.get("invariants")
+    metric_invariant = ("single_call_latency_inner_is_one" if metric_id == "single_call_latency"
+                        else "sustained_throughput_inner_gt_one")
     required = (
         "all_arms_in_every_block", "same_slot_within_block",
-        "same_outer_blocks_across_suite", "single_call_latency_inner_is_one",
-        "semantic_slot_policy_bound",
+        "same_outer_blocks_across_suite", "selected_metric_inner_matches",
+        metric_invariant, "semantic_slot_policy_bound",
     )
     if not isinstance(invariants, Mapping) or any(invariants.get(key) is not True for key in required):
-        raise RouteGateError("measurement slot/raw invariants are incomplete")
+        raise RouteGateError("measurement slot/raw/metric invariants are incomplete")
     lifecycle = raw.get("output_lifecycle")
     per_route = lifecycle.get("per_route") if isinstance(lifecycle, Mapping) else None
     if (not isinstance(lifecycle, Mapping) or lifecycle.get("policy") != "bounded-live-ring"
@@ -413,11 +456,13 @@ def _measurement_binding(spec: Mapping[str, object], routes: Sequence[str]) -> d
             raise RouteGateError(f"measurement output lifecycle is missing route {route!r}")
         _lifecycle_row(arms.get("candidate"), f"{route}.candidate output lifecycle")
         _lifecycle_row(arms.get("incumbent"), f"{route}.incumbent output lifecycle")
-    receipt_hashes = raw.get("route_measurement_sha256")
-    if (not isinstance(receipt_hashes, Mapping) or set(receipt_hashes) != set(routes)
-            or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None
-                   for value in receipt_hashes.values())):
-        raise RouteGateError("measurement receipt SHA-256 map does not cover the complete suite")
+    for field in ("route_measurement_sha256", "secondary_route_measurement_sha256"):
+        receipt_hashes = raw.get(field)
+        if (not isinstance(receipt_hashes, Mapping) or set(receipt_hashes) != set(routes)
+                or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None
+                       for value in receipt_hashes.values())):
+            raise RouteGateError(
+                f"measurement {field} map does not cover the complete suite")
     if raw.get("incumbent_unchanged") is not True:
         raise RouteGateError("measurement does not prove the incumbent remained unmodified")
     _hash_record(raw.get("candidate_hashes"), "measurement.candidate_hashes")
@@ -482,7 +527,7 @@ def _route_record(route: PairedRoute, role: str, limit: float,
     estimate_log, lower_log = _estimate(route.log_ratios, f"route:{route.route}")
     estimate_ratio = _receipt_exp(estimate_log, f"route {route.route!r} estimate ratio")
     candidate_over_control = _receipt_exp(
-        -estimate_log, f"route {route.route!r} latency change")
+        -estimate_log, f"route {route.route!r} execution-time change")
     catastrophic = estimate_log < -math.log1p(CATASTROPHIC_REGRESSION)
     passed = lower_log > limit and not catastrophic
     if catastrophic:
@@ -498,7 +543,7 @@ def _route_record(route: PairedRoute, role: str, limit: float,
         "bootstrap_stream_seed": f"0x{_stream_seed(f'route:{route.route}'):016x}",
         "estimate_log_ratio": estimate_log,
         "estimate_ratio": estimate_ratio,
-        "estimate_latency_change": candidate_over_control - 1.0,
+        "estimate_execution_time_change": candidate_over_control - 1.0,
         "ci95_lower_log_ratio": lower_log,
         "ci95_lower_ratio": _receipt_exp(
             lower_log, f"route {route.route!r} lower-bound ratio"),
@@ -725,7 +770,7 @@ def _print_human(receipt: Mapping[str, object]) -> None:
     if isinstance(routes, list):
         for row in routes:
             print("%-24s %-10s estimate=%+.3f%% lower=%+.3f%% %s" % (
-                row["route"], row["role"], row["estimate_latency_change"] * -100,
+                row["route"], row["role"], row["estimate_execution_time_change"] * -100,
                 (1.0 - 1.0 / row["ci95_lower_ratio"]) * 100, row["status"]))
 
 

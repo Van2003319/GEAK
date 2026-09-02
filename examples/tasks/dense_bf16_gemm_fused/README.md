@@ -28,7 +28,7 @@ The historical rocBLAS solution-cache and cached hipBLASLt routes are indexed fo
 
 ## Measurement
 
-The task uses `geak.measurement-protocol/v2`; the formal default rotates semantic weight operand B instead of writing a synthetic 512 MiB buffer before every sample. Candidate, direct rocBLAS and direct hipBLASLt run in the same deterministic paired blocks and consume the same slot. Raw samples, slot/order, output addresses and protocol hash are embedded in the report. Single-call latency (`inner=1`) is the score; sustained throughput (`inner>1`) is a separate non-score metric.
+The task uses `geak.measurement-protocol/v2`; the formal default rotates semantic weight operand B instead of writing a synthetic 512 MiB buffer before every sample. Candidate, direct rocBLAS and direct hipBLASLt run in the same deterministic paired blocks and consume the same slot. Raw samples, slot/order, output addresses and protocol hash are embedded in the report. Fresh task/asm manifests score sustained throughput (`inner=16`); single-call latency (`inner=1`) remains separate secondary evidence. Legacy invocations with no selector still resolve explicitly to latency.
 
 The checked-in route manifest is deliberately untrusted because the historical BF16 oracle had only rocBLAS. Before a new lane, bake and freeze the per-shape best-of under the GPU lock:
 
@@ -40,7 +40,7 @@ cd "$ROOT"
 GEAK_GPU_ALLOWED=2 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 2 \
   bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
   python3 "$ROOT/examples/tasks/dense_bf16_gemm_fused/scripts/task_runner.py" \
-    oracle-bakeoff --confirm-oracle-bakeoff
+    oracle-bakeoff --score-metric sustained_throughput --confirm-oracle-bakeoff
 ```
 
 See `e2e_workflow/MEASUREMENT_PROTOCOL_V2.md` for protocol and adapter limits. A formal performance run fails closed if the route-manifest protocol hash does not match.

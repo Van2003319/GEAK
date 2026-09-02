@@ -24,6 +24,7 @@ from .search_space import (
 TASK_CONTRACT_SCHEMA = "geak.asm-task-contract/v1"
 ROUTE_MANIFEST_SCHEMA = "geak.asm-route-manifest/v1"
 ORACLE_MANIFEST_SCHEMA = "geak.oracle-route-manifest/v2"
+SCORE_METRIC_SCHEMA = "geak.score-metric/v1"
 
 
 class ContractError(RuntimeError):
@@ -98,7 +99,7 @@ def _without_protocol_environment() -> Iterator[None]:
         "GEAK_ROTATION_TARGET_MB", "GEAK_ASSUMED_CACHE_MB", "GEAK_MAX_WEIGHT_SLOTS",
         "GEAK_OUTPUT_RING_SIZE", "HARNESS_TIMING_PRIME_MB", "GEAK_SYNTHETIC_EVICT_MB",
         "HARNESS_CACHE_FLUSH_MB", "GEAK_LATENCY_CYCLES", "GEAK_THROUGHPUT_CYCLES",
-        "GEAK_THROUGHPUT_INNER",
+        "GEAK_THROUGHPUT_INNER", "GEAK_SCORE_METRIC",
     )
     old = {name: os.environ.get(name) for name in names}
     for name in names:
@@ -140,6 +141,7 @@ class TaskContract:
     semantic_hashes: Mapping[str, str]
     binding_hashes: Mapping[str, str]
     protocol: Mapping[str, Any]
+    score_metric: Mapping[str, Any]
     oracle: Mapping[str, Any]
     oracle_sha256: str
     oracle_compatible: bool
@@ -155,6 +157,14 @@ class TaskContract:
     @property
     def adapter(self) -> Any:
         return get_adapter(self.adapter_name)
+
+    @property
+    def score_metric_id(self) -> str:
+        return str(self.score_metric["id"])
+
+    @property
+    def score_metric_inner(self) -> int:
+        return int(self.score_metric["inner"])
 
     @property
     def routes(self) -> Tuple[Route, ...]:
@@ -210,6 +220,9 @@ class TaskContract:
             "binding_hashes": dict(self.binding_hashes),
             "case_ids": [case["id"] for case in self.cases],
             "protocol_hash": self.protocol["hash"],
+            "score_metric": dict(self.score_metric),
+            "score_metric_id": self.score_metric_id,
+            "score_metric_inner": self.score_metric_inner,
             "oracle_manifest_sha256": self.oracle_sha256,
             "oracle_protocol_hash": self.oracle.get("protocol_hash"),
             "oracle_compatible": self.oracle_compatible,
@@ -321,6 +334,18 @@ class TaskContract:
                 protocol.get("hash"), expected_protocol,
             ))
 
+        score_spec = value.get("score_metric")
+        validator = getattr(harness, "validate_score_metric", None)
+        if not isinstance(score_spec, dict) or score_spec.get("schema") != SCORE_METRIC_SCHEMA:
+            raise ContractError("task manifest must declare a versioned score_metric object")
+        if not callable(validator):
+            raise ContractError("task harness has no score_metric validator")
+        try:
+            with _without_protocol_environment():
+                score_metric = validator(dict(score_spec), protocol)
+        except ValueError as exc:
+            raise ContractError("invalid task score_metric: %s" % exc) from exc
+
         oracle_path = root / str(value["oracle_manifest"])
         oracle = read_object(oracle_path)
         if oracle.get("schema") != ORACLE_MANIFEST_SCHEMA or oracle.get("task") != value.get("task"):
@@ -334,14 +359,21 @@ class TaskContract:
                     int(case[k]) for k in ("M", "N", "K")):
                 raise ContractError("oracle shape drift for %s" % case["id"])
         oracle_sha256 = sha256_file(oracle_path)
+        oracle_metric = oracle.get("score_metric")
+        metric_compatible = (
+            oracle_metric == score_metric or
+            (oracle_metric is None and score_metric["id"] == "single_call_latency")
+        )
         oracle_compatible = bool(
             oracle.get("frozen") is True and
-            oracle.get("selection_metric") == "single_call_latency" and
+            oracle.get("selection_metric") == score_metric["id"] and
+            metric_compatible and
             oracle.get("protocol_hash") == protocol.get("hash")
         )
         if require_oracle_compatible and not oracle_compatible:
             raise ContractError(
-                "oracle manifest is not frozen under protocol %s" % protocol.get("hash")
+                "oracle manifest is not frozen under protocol %s and score metric %s; "
+                "re-run oracle-bakeoff" % (protocol.get("hash"), score_metric["id"])
             )
 
         identity_payload = {
@@ -354,12 +386,13 @@ class TaskContract:
             "route_manifest_sha256": sha256_file(route_path),
             "search_space_manifest_sha256": sha256_file(search_path),
             "protocol_hash": protocol["hash"],
+            "score_metric": score_metric,
             "oracle_manifest_sha256": oracle_sha256,
         }
         task_digest = sha256_bytes(canonical_json(identity_payload).encode("utf-8"))
         contract = cls(
             manifest_path, repo_root, root, value, route_manifest, search_space, cases,
-            task_digest, semantic_hashes, binding_hashes, protocol, oracle,
+            task_digest, semantic_hashes, binding_hashes, protocol, score_metric, oracle,
             oracle_sha256, oracle_compatible,
         )
         # Validate declared release variants and materialize the generated legal

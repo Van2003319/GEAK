@@ -4,7 +4,16 @@ You build the immutable measurement infrastructure that EVERY other agent must u
 the whole workflow depends on this being correct and stable. Operate on the canonical `WORKSPACE`.
 
 ## Inputs
-`WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
+`WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, `ANALYSIS` (kernel type, files, existing tests),
+and `SCORE_METRIC_ID`.
+
+**SCORE METRIC IS A CONTRACT.** Run the task benchmark with
+`--score-metric "$SCORE_METRIC_ID"` (or the equivalent checked-in command). Parse its complete hashed
+`geak.score-metric/v1` object and return it unchanged. `execution_time_ms`, per-case optimized/baseline
+milliseconds, speedup, geomeans, and route choice must all use that metric. Keep the other v2 metric
+as `secondary_metric` report-only evidence. Never rank or gate latency and throughput in one table.
+For `sustained_throughput`, require semantic weight rotation and `inner>1`; for
+`single_call_latency`, require `inner=1`.
 
 **WORKLOAD ALIGNMENT.** The real-workload shape/dtype distribution is handled by the immutable
 `unittest.py` oracle itself — the Kernel Extractor bakes the weighted cases (`meta.workload.cases[]`)
@@ -156,7 +165,7 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 - `PROFILE` — `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<cmd that cd's into the workspace>" <out_dir>`.
   If the report shows a `!!! PROFILER FAILED` block, follow the fault-tolerance ladder in
   `knowledge/profiling_guide.md` (override the named env var with the corrected flag, or degrade and say so).
-- `PARSE` — a one-paragraph description of how to extract per-case latency from the output (the
+- `PARSE` — a one-paragraph description of how to extract per-case selected-metric execution time from the output (the
   exact token/regex and the case-id mapping), so verify/profile engineers parse identically.
 - `METRIC` — define the PRIMARY speedup the optimize loop is judged on:
   - **No WORKLOAD_SPEC**: unweighted geomean of per-case speedups (unchanged default).
@@ -173,10 +182,10 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 Run the FULL benchmark **3 times** via gpu_lock. Confirm per-case results are within ~5% across
 runs. If variance is high, investigate (GPU busy? clocks? other procs on this GPU?) and re-run.
 Save `EVAL_DIR/baseline_timing.json` (the `count`/`dims`/`dtypes`/`weight_source` fields appear only
-when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·latency_i`):
+when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·execution_time_i`):
 ```json
 {
-  "test_cases": [{"name": "<case_id>", "latency_ms": 0.0, "params": "...",
+  "test_cases": [{"name": "<case_id>", "execution_time_ms": 0.0, "params": "...",
                   "dims": [[...]], "dtypes": ["..."], "count": 0, "weight_source": "trace"}],
   "geomean_ms": 0.0,
   "workload_aligned": false,
@@ -188,15 +197,23 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
 ```
 
 ## Return JSON
+The example below is the fresh sustained-throughput shape. A legacy latency lane uses
+`single_call_latency`, `inner=1`, and swaps which metric is secondary.
+
 ```json
 {
   "commandment_path": "<EVAL_DIR>/COMMANDMENT.md",
   "correctness_cmd": "<exact>",
   "benchmark_cmd": "<exact full-benchmark cmd, WITHOUT the gpu_lock wrapper>",
   "paired_verify_argv": ["python3", "<absolute TASK_DIR>/scripts/task_runner.py", "paired-verify"],
+  "score_metric": {"schema": "geak.score-metric/v1", "version": 1, "id": "<SCORE_METRIC_ID>", "unit": "ms/call", "inner": 16, "protocol_hash": "<sha256>", "hash": "<sha256>"},
+  "score_metric_id": "<SCORE_METRIC_ID>",
+  "score_metric_inner": 16,
+  "secondary_metric": {"schema": "geak.score-metric/v1", "version": 1, "id": "single_call_latency", "unit": "ms/call", "inner": 1, "protocol_hash": "<same sha256>", "hash": "<sha256>"},
   "profile_cmd": "<exact profile inner cmd>",
-  "parse_hint": "how to extract per-case latency + case ids (and count, when workload-aligned)",
-  "baseline_per_case": [{"name": "...", "latency_ms": 0.0, "samples_ms": [0.0, 0.0, 0.0],
+  "parse_hint": "how to extract score-metric per-case time + case ids (and count, when workload-aligned)",
+  "baseline_per_case": [{"name": "...", "optimized_ms": 0.0, "execution_time_ms": 0.0, "samples_ms": [0.0, 0.0, 0.0],
+                         "score_metric_id": "<SCORE_METRIC_ID>", "score_metric_inner": 16,
                          "dims": [[1,512],[512,512]], "dtypes": ["bf16","bf16"],
                          "count": 0, "weight": 0.0, "weight_source": "trace"}],
   "baseline_geomean_ms": 0.0,
@@ -226,8 +243,10 @@ Baseline `samples_ms` remains useful descriptive calibration and provenance, but
 evidence and is never converted into a confidence interval. In particular, `(max-min)/median` from
 three or five baseline repeats is a legacy spread summary, not a hypothesis test. The live gate uses
 at least eight explicitly paired candidate/control raw blocks collected later by the verifier in one
-session. Do not synthesize baseline repeats; omit them when they were not observed.
+session. The outer producer passes the selected score metric through both CLI and
+`GEAK_SCORE_METRIC`; the task receipt must echo the same metric id and inner count. Do not synthesize
+baseline repeats; omit them when they were not observed.
 
 When `workload_aligned` is true, `baseline_per_case[].count` is the coefficient the time-weighted
-metric uses, and `weight = count·latency_ms` is the case's time share. On an unweighted run omit the
+metric uses, and `weight = count·execution_time_ms` is the case's time share. On an unweighted run omit the
 workload fields entirely (output is identical to before).

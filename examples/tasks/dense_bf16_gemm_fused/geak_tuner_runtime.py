@@ -16,6 +16,8 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 
 _TABLE_SCHEMA = "geak.runtime_table/v2"
+_EXPECTED_SCORE_METRIC_ID = "sustained_throughput"
+_EXPECTED_SCORE_METRIC_INNER = 16
 _TASK_ROOT = Path(__file__).resolve().parent
 _TABLE_PATH = _TASK_ROOT / ".geak_tuner" / "runtime_table.json"
 _LIBRARIES: Dict[str, Any] = {}
@@ -42,6 +44,12 @@ def _sha256(path: Path) -> str:
 def _table_digest(value: Mapping[str, Any]) -> str:
     payload = dict(value)
     payload.pop("table_digest", None)
+    return hashlib.sha256(_canonical(payload)).hexdigest()
+
+
+def _score_metric_digest(value: Mapping[str, Any]) -> str:
+    payload = dict(value)
+    payload.pop("hash", None)
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
@@ -102,6 +110,18 @@ def _load_table() -> Optional[Mapping[str, Any]]:
     protocol = value.get("protocol") or {}
     if protocol.get("schema") != "geak.measurement-protocol/v2" or len(str(protocol.get("hash") or "")) != 64:
         raise TunerDispatchError("runtime table is not bound to measurement protocol v2")
+    score_metric = value.get("score_metric") or {}
+    if (score_metric.get("schema") != "geak.score-metric/v1"
+            or isinstance(score_metric.get("version"), bool) or score_metric.get("version") != 1
+            or score_metric.get("id") != _EXPECTED_SCORE_METRIC_ID
+            or score_metric.get("unit") != "ms/call"
+            or score_metric.get("inner") != _EXPECTED_SCORE_METRIC_INNER
+            or score_metric.get("protocol_hash") != protocol.get("hash")
+            or score_metric.get("hash") != _score_metric_digest(score_metric)):
+        raise TunerDispatchError("runtime table score metric differs from the task contract")
+    ambient_metric = os.environ.get("GEAK_SCORE_METRIC")
+    if ambient_metric is not None and ambient_metric != score_metric["id"]:
+        raise TunerDispatchError("runtime table score metric differs from GEAK_SCORE_METRIC")
     for route_id, row in routes.items():
         entries = row.get("entries") or []
         if not entries:
@@ -109,8 +129,11 @@ def _load_table() -> Optional[Mapping[str, Any]]:
         for rank, entry in enumerate(entries):
             if entry.get("rank") != rank:
                 raise TunerDispatchError("route %s ranks are not contiguous" % route_id)
-            if (entry.get("task_digest") != task.get("digest") or
-                    entry.get("protocol_hash") != protocol.get("hash")):
+            if (entry.get("task_digest") != task.get("digest")
+                    or entry.get("protocol_hash") != protocol.get("hash")
+                    or entry.get("score_metric_hash") != score_metric.get("hash")
+                    or entry.get("metric_id") != score_metric.get("id")
+                    or entry.get("metric_inner") != score_metric.get("inner")):
                 raise TunerDispatchError("route %s rank %d binding mismatch" % (route_id, rank))
     _TABLE = value
     return value
@@ -169,6 +192,9 @@ def _trace(table: Mapping[str, Any], route: str, entry: Mapping[str, Any]) -> No
         "table_digest": table.get("table_digest"),
         "task_digest": table.get("task", {}).get("digest"),
         "protocol_hash": table.get("protocol", {}).get("hash"),
+        "score_metric": table.get("score_metric"),
+        "metric_id": entry.get("metric_id"),
+        "metric_inner": entry.get("metric_inner"),
         "config_id": entry.get("config_id"),
         "symbol": entry.get("symbol"),
         "artifact_sha256": entry.get("artifact_sha256"),

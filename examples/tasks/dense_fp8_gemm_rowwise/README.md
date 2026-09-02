@@ -93,9 +93,9 @@ candidate rebuild from nine device compiles to one.
 
 ## Measurement
 
-The task uses `geak.measurement-protocol/v2`; the formal default rotates real B weights and their rowwise scales. Candidate, aiter CK and hipBLASLt rowwise run in the same deterministic paired block on the same slot. Reports retain raw samples, slot/order, output addresses and protocol hash. Single-call latency (`inner=1`) is the only score metric; sustained throughput (`inner>1`) is reported separately.
+The task uses `geak.measurement-protocol/v2`; the formal default rotates real B weights and their rowwise scales. Candidate, aiter CK and hipBLASLt rowwise run in the same deterministic paired block on the same slot. Reports retain raw samples, slot/order, output addresses and protocol hash. Fresh task/asm manifests score sustained throughput (`inner=16`); single-call latency (`inner=1`) remains separate secondary evidence. Legacy invocations with no selector still resolve explicitly to latency.
 
-The checked-in manifest preserves the historical table above but identifies it as an unversioned write-flush selection. Formal performance therefore requires a locked `oracle-bakeoff` first and fails closed on a stale protocol hash. See `e2e_workflow/MEASUREMENT_PROTOCOL_V2.md`.
+The checked-in manifest preserves the historical table above but identifies it as an unversioned write-flush selection. The checked-in route data remains the latency bake; formal throughput performance requires a locked `oracle-bakeoff --score-metric sustained_throughput` first and fails closed on metric or protocol drift. See `e2e_workflow/MEASUREMENT_PROTOCOL_V2.md`.
 
 ## Gates
 
@@ -113,7 +113,7 @@ GEAK_GPU_ALLOWED=5 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 5 \
 GEAK_GPU_ALLOWED=5 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 5 \
   bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
   python3 "$ROOT/examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py" \
-    oracle-bakeoff --confirm-oracle-bakeoff
+    oracle-bakeoff --score-metric sustained_throughput --confirm-oracle-bakeoff
 ```
 
 Run `performance` through the same lock after the v2 manifest has been baked.

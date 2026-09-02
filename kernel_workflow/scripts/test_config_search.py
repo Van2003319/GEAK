@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from dataclasses import replace
 
 import pytest
 from pathlib import Path
@@ -152,7 +153,14 @@ def test_prepare_orders_search_create_select_materialize_before_engineer(
     tmp_path: Path, monkeypatch,
 ) -> None:
     manifest = Path(__file__).resolve().parents[2] / "asm_tuner/manifests/tasks/dense_bf16_gemm_fused.json"
-    contract = CS.TaskContract.load(manifest, require_oracle_compatible=True)
+    loaded = CS.TaskContract.load(manifest)
+    contract = replace(
+        loaded, oracle_compatible=True,
+        oracle={**loaded.oracle, "selection_metric": loaded.score_metric_id,
+                "score_metric": dict(loaded.score_metric)},
+    )
+    monkeypatch.setattr(CS.TaskContract, "load", classmethod(
+        lambda cls, *args, **kwargs: contract))
     registry = tmp_path / "registry.json"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -164,6 +172,10 @@ def test_prepare_orders_search_create_select_materialize_before_engineer(
             "kind": "asm_tuner_release", "task": contract.task,
             "adapter": contract.adapter_name, "task_digest": contract.task_digest,
             "protocol_hash": contract.protocol["hash"],
+            "score_metric": dict(contract.score_metric),
+            "score_metric_hash": contract.score_metric["hash"],
+            "score_metric_id": contract.score_metric_id,
+            "score_metric_inner": contract.score_metric_inner,
             "oracle_manifest_sha256": contract.oracle_sha256,
             "release_id": "release-unit", "variant": "seed", "priority": 100,
         }

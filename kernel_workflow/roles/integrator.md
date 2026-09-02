@@ -10,7 +10,9 @@ do not invent new optimizations; you compose and reconcile existing ones.
 - `PATCHES` — list of this round's verified patches, each with: id, specialty, strategy summary,
   verified geomean, predeclared `target_routes`, files touched, and the patch path.
 - `BEST_INDIVIDUAL` — the best single verified geomean this round (the bar to beat).
-- `INTEGRATE_DIR` — your private scratch dir. `GPU_ID`, `SKILL_DIR`, COMMANDMENT path, `BASELINE_PER_CASE`.
+- `INTEGRATE_DIR` — your private scratch dir. `GPU_ID`, `SKILL_DIR`, COMMANDMENT path,
+  `BASELINE_PER_CASE`, `SCORE_METRIC_ID`, and the full `SCORE_METRIC`. All combined-candidate timing
+  and comparisons use that exact metric/inner; the secondary metric cannot choose the result.
 - `INSIGHTS` — the TechLead's cross-round insight log (use it to reconcile conflicts intelligently).
 - `ASM_TUNER_MODE`, `ASM_TUNER_MANIFEST`, `ASM_TUNER_CACHE`, `CONFIG_SEARCH_HELPER`, and
   `CONFIG_SEARCH_REGISTRY`; each PATCH also carries its exact `config_selection` registry row.

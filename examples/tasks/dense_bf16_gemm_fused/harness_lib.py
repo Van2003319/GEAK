@@ -506,7 +506,10 @@ def _time_graph(torch, g, warmup, repeats, flush):
 # sample with a deterministic pool of real B operands whose reuse distance exceeds the cache.
 MEASUREMENT_PROTOCOL_SCHEMA = "geak.measurement-protocol/v2"
 MEASUREMENT_RECEIPT_SCHEMA = "geak.measurement-receipt/v2"
+SCORE_METRIC_SCHEMA = "geak.score-metric/v1"
 DEFAULT_MEASUREMENT_PROTOCOL = "semantic_weight_rotating"
+DEFAULT_SCORE_METRIC = "single_call_latency"
+SCORE_METRIC_IDS = ("single_call_latency", "sustained_throughput")
 
 _PROTOCOL_ALIASES = {
     "semantic-weight-rotating": "semantic_weight_rotating",
@@ -644,11 +647,91 @@ def protocol_metric(protocol, metric):
         out = dict(protocol["metrics"][key])
     except KeyError as exc:
         raise ValueError(f"unknown metric {metric!r}") from exc
-    if key == "single_call_latency" and out["inner"] != 1:
-        raise ValueError("single-call latency must use inner=1")
-    if key == "sustained_throughput" and out["inner"] <= 1:
+    if key == "single_call_latency" and (
+            isinstance(out["inner"], bool) or out["inner"] != 1):
+        raise ValueError("single-call latency must use integer inner=1")
+    if key == "sustained_throughput" and (
+            isinstance(out["inner"], bool) or not isinstance(out["inner"], int)
+            or out["inner"] <= 1):
         raise ValueError("sustained throughput must use inner>1")
     return key, out
+
+
+def score_metric_hash(value):
+    """Hash a versioned score-metric binding without its self-referential hash field."""
+    payload = dict(value)
+    payload.pop("hash", None)
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _score_metric_for_id(protocol, metric_id):
+    if metric_id not in SCORE_METRIC_IDS:
+        raise ValueError(
+            f"unknown score metric {metric_id!r}; expected one of {list(SCORE_METRIC_IDS)}")
+    expected_protocol_hash = protocol_hash(protocol)
+    if protocol.get("hash") != expected_protocol_hash:
+        raise ValueError("measurement protocol hash does not match its contents")
+    key, metric = protocol_metric(protocol, metric_id)
+    if key == "sustained_throughput" and (
+            protocol.get("slot_policy") != "semantic_weight_rotation"
+            or protocol.get("cache_policy") != "semantic_weight_rotating"):
+        raise ValueError(
+            "sustained_throughput scoring requires semantic_weight_rotating same-slot rotation")
+    value = {
+        "schema": SCORE_METRIC_SCHEMA,
+        "version": 1,
+        "id": key,
+        "unit": metric["unit"],
+        "inner": int(metric["inner"]),
+        "protocol_hash": expected_protocol_hash,
+    }
+    value["hash"] = score_metric_hash(value)
+    return value
+
+
+def validate_score_metric(value, protocol):
+    """Validate a complete score-metric object against one exact protocol."""
+    if not isinstance(value, dict) or value.get("schema") != SCORE_METRIC_SCHEMA:
+        raise ValueError(f"score_metric must be a {SCORE_METRIC_SCHEMA} object")
+    if isinstance(value.get("version"), bool) or value.get("version") != 1:
+        raise ValueError("score_metric version must be integer 1")
+    if value.get("hash") != score_metric_hash(value):
+        raise ValueError("score_metric hash does not match its contents")
+    expected = _score_metric_for_id(protocol, value.get("id"))
+    if _canonical_json(value) != _canonical_json(expected):
+        raise ValueError("score_metric differs from its measurement protocol metric definition")
+    return dict(expected)
+
+
+def score_metric_config(metric=None, *, protocol=None):
+    """Resolve CLI/config and ``GEAK_SCORE_METRIC`` without allowing conflicting sources.
+
+    An omitted selector retains the historical latency default for old lanes. New lanes should pass
+    the selector explicitly; every returned object is complete, versioned, hashed, and protocol-bound.
+    """
+    protocol = measurement_protocol() if protocol is None else dict(protocol)
+    explicit = metric
+    if isinstance(explicit, dict):
+        validated = validate_score_metric(explicit, protocol)
+        explicit = validated["id"]
+    elif explicit is not None:
+        explicit = str(explicit).strip()
+    env_metric = os.environ.get("GEAK_SCORE_METRIC")
+    if env_metric is not None:
+        env_metric = env_metric.strip()
+        if not env_metric:
+            raise ValueError("GEAK_SCORE_METRIC must not be blank")
+    if explicit and env_metric and explicit != env_metric:
+        raise ValueError(
+            f"score metric conflict: explicit {explicit!r} != GEAK_SCORE_METRIC {env_metric!r}")
+    metric_id = explicit or env_metric or DEFAULT_SCORE_METRIC
+    return _score_metric_for_id(protocol, metric_id)
+
+
+def secondary_score_metric(score_metric, *, protocol):
+    selected = validate_score_metric(dict(score_metric), protocol)
+    other = next(metric_id for metric_id in SCORE_METRIC_IDS if metric_id != selected["id"])
+    return _score_metric_for_id(protocol, other)
 
 
 def derive_measurement_seed(seed, *parts):
@@ -1030,13 +1113,17 @@ def measure_paired_arms(arms, slots, *, protocol=None, metric="single_call_laten
     }
 
 
-def _legacy_timing_leg(receipt, arm):
-    """Collapse raw v2 latency samples into the historical timing-leg shape."""
-    if receipt.get("metric_id") != "single_call_latency":
-        raise ValueError("legacy timing legs may only come from single-call latency")
+def _metric_timing_leg(receipt, arm):
+    """Collapse raw samples from one explicitly identified metric into a timing leg."""
+    metric_id = receipt.get("metric_id")
+    metric = receipt.get("metric") or {}
+    if metric_id not in SCORE_METRIC_IDS or metric.get("id") != metric_id:
+        raise ValueError("timing leg receipt has no supported metric identity")
     samples = [row for row in receipt["samples"] if row["arm"] == arm]
     if not samples:
-        raise KeyError(f"no samples for legacy timing arm {arm!r}")
+        raise KeyError(f"no samples for timing arm {arm!r}")
+    if any(row.get("inner") != metric.get("inner") for row in samples):
+        raise ValueError("timing leg samples disagree with metric inner")
     host_values = [row["host_ms"] for row in samples if row.get("host_ms") is not None]
     wall_values = [row["wall_ms"] for row in samples if row.get("wall_ms") is not None]
     timers = sorted({row.get("timer") for row in samples}, key=str)
@@ -1047,25 +1134,79 @@ def _legacy_timing_leg(receipt, arm):
         "host_ms": _sample_median(host_values),
         "timer": timers[0] if len(timers) == 1 else timers,
         "sample_count": len(samples),
-        "metric_source": "single_call_latency",
+        "metric_source": metric_id,
+        "metric_inner": int(metric["inner"]),
     }
+
+
+def score_timing_aliases(receipt, *, candidate_arm="candidate", baseline_arm="baseline"):
+    """Compatibility time fields sourced exclusively from the selected score receipt."""
+    metric_id = receipt.get("metric_id")
+    if metric_id not in SCORE_METRIC_IDS:
+        raise ValueError("score receipt has no supported metric identity")
+    medians = receipt["medians_ms"]
+    candidate = float(medians[candidate_arm])
+    baseline = float(medians[baseline_arm])
+    return {
+        "baseline_ms": baseline,
+        "candidate_ms": candidate,
+        "execution_time_ms": candidate,
+        "speedup": baseline / candidate,
+        "baseline_timing": _metric_timing_leg(receipt, baseline_arm),
+        "candidate_timing": _metric_timing_leg(receipt, candidate_arm),
+        "score_metric_id": metric_id,
+        "score_metric_inner": int(receipt["metric"]["inner"]),
+    }
+
+
+def _legacy_timing_leg(receipt, arm):
+    """Collapse raw v2 latency samples into the historical timing-leg shape."""
+    if receipt.get("metric_id") != "single_call_latency":
+        raise ValueError("legacy timing legs may only come from single-call latency")
+    return _metric_timing_leg(receipt, arm)
 
 
 def legacy_timing_aliases(receipt, *, candidate_arm="candidate", baseline_arm="baseline"):
     """Old row keys, explicitly identified as aliases of the latency metric only."""
     if receipt.get("metric_id") != "single_call_latency":
         raise ValueError("legacy execution_time_ms aliases may only come from single-call latency")
-    medians = receipt["medians_ms"]
-    candidate = medians[candidate_arm]
-    baseline = medians[baseline_arm]
+    aliases = score_timing_aliases(
+        receipt, candidate_arm=candidate_arm, baseline_arm=baseline_arm)
+    aliases["legacy_metric_source"] = "single_call_latency"
+    return aliases
+
+
+def score_timing_receipt(rows, score_metric):
+    """Top-level compatibility receipt explicitly bound to one score metric."""
+    metric_id = score_metric.get("id") if isinstance(score_metric, dict) else None
+    inner = score_metric.get("inner") if isinstance(score_metric, dict) else None
+    if (not isinstance(score_metric, dict)
+            or score_metric.get("schema") != SCORE_METRIC_SCHEMA
+            or isinstance(score_metric.get("version"), bool) or score_metric.get("version") != 1
+            or score_metric.get("hash") != score_metric_hash(score_metric)
+            or metric_id not in SCORE_METRIC_IDS
+            or isinstance(inner, bool) or not isinstance(inner, int)
+            or (metric_id == "single_call_latency" and inner != 1)
+            or (metric_id == "sustained_throughput" and inner <= 1)):
+        raise ValueError("score timing receipt requires a valid versioned score_metric")
+    if any(row.get("score_metric_id") != metric_id
+           or row.get("score_metric_inner") != inner for row in rows):
+        raise ValueError("score timing rows mix metric identities or inner counts")
+    cases = {
+        row["test_case_id"]: {
+            "baseline": dict(row["baseline_timing"]),
+            "current": dict(row["candidate_timing"]),
+        }
+        for row in rows
+    }
+    legs = [leg for case in cases.values() for leg in case.values()]
     return {
-        "baseline_ms": baseline,
-        "candidate_ms": candidate,
-        "execution_time_ms": candidate,
-        "speedup": baseline / candidate,
-        "baseline_timing": _legacy_timing_leg(receipt, baseline_arm),
-        "candidate_timing": _legacy_timing_leg(receipt, candidate_arm),
-        "legacy_metric_source": "single_call_latency",
+        "all_primed": all(leg.get("primed") is True for leg in legs),
+        "timer_unprimed": any(leg.get("primed") is None for leg in legs),
+        "cases": cases,
+        "score_metric": dict(score_metric),
+        "metric_id": metric_id,
+        "inner": inner,
     }
 
 

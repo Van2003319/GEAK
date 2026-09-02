@@ -1,7 +1,7 @@
 {
   "asm_tuner_runtime": {
     "dispatch_loader": "geak_tuner_runtime.py",
-    "dispatch_loader_sha256": "7d2ee37de34ff77c8093f9988e5e134698688255a615aa3229073e5102099cd8",
+    "dispatch_loader_sha256": "d9ee134a1b50046f2f3b1f0def1d37291994a0ea0024e12a70e2b4a503ca4207",
     "fallback": "canonical for shapes outside the exact CASES suite",
     "required_lane_verification": "materialize + independent rebuild/load/hash + task dispatch smoke",
     "runtime_table": ".geak_tuner/runtime_table.json",
@@ -54,8 +54,9 @@
     "default_protocol": "semantic_weight_rotating",
     "path": "harness_lib.py",
     "protocol_schema": "geak.measurement-protocol/v2",
+    "repin_note_score_metric": "Re-pinned after adding geak.score-metric/v1 resolution and score-sourced timing aliases; measurement-protocol/v2 contents and protocol hash are unchanged.",
     "repin_note_v2": "Re-pinned after synchronizing the common/task harnesses and adding hashed paired semantic-weight rotation, raw receipts, separate latency/throughput metrics, output rings, and GPU-lock handoff.",
-    "sha256": "60fddb6ae5aebd61fb98cd918b0d6a53a5e0a2c0b5d483c9d414854fa69e95f7",
+    "sha256": "9438cf7ede040aecd2cbffd497a6c91c39d49d312f7c17bef36c597965f6678b",
     "timer_contract": "measurement-protocol-v2",
     "write_probe": "two_sentinel"
   },
@@ -73,10 +74,10 @@
       "aiter_ck": "aiter.gemm_a8w8_CK(XQ, WQ, x_scale, w_scale) -- Composable Kernel, used for M <= 16",
       "hipblaslt_rowwise": "torch._scaled_mm(a, b.t(), scale_a, scale_b, out_dtype=bfloat16) -- routes to hipBLASLt rowwise-scaled solutions, used for M >= 32"
     },
-    "sha256": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
+    "sha256": "41f80fffa70817415667780364a55a3f1af77c8a0fa279d513e23748ce162d8c",
     "source_sha256": {
-      "oracle_wrapper.py": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
-      "route_manifest.py": "97ffe7345d60ff6dcf725b0a79dd32fc0367ab192e20c0b28766599ce7d4daa2"
+      "oracle_wrapper.py": "41f80fffa70817415667780364a55a3f1af77c8a0fa279d513e23748ce162d8c",
+      "route_manifest.py": "0ecf122d93054bfea40fab7f6f8a5f8b84d423fa274c0d9a468afb7d59612d5d"
     },
     "validated_by": "scripts/task_runner.py preflight + correctness check both routes against a library-free fp32 dequantisation reference; measured max rel err 0.0 on both.",
     "why_frozen_not_raced": "A runtime race is not reproducible and would let the denominator drift under the candidate between rounds.",
@@ -151,6 +152,12 @@
     "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
     "selection_metric": "single_call_latency",
     "status": "baked_protocol_v2"
+  },
+  "score_metric_migration": {
+    "inner": 16,
+    "oracle_status": "legacy single_call_latency data retained unchanged; re-bake required before fresh lane launch",
+    "schema": "geak.score-metric/v1",
+    "task_contract": "sustained_throughput"
   },
   "seed": {
     "arch_guard": "__gfx942__ || __gfx950__",

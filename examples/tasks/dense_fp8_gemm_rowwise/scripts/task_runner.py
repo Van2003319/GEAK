@@ -350,13 +350,17 @@ def _metric_summary(receipt, route, flops):
     }
 
 
-def run_performance(selected_case=None, protocol_name=None):
+def run_performance(selected_case=None, protocol_name=None, score_metric_id=None):
     from oracle_wrapper import oracle_backends, oracle_route, validate_oracle_routes
 
     protocol = harness.measurement_protocol(protocol_name)
-    trusted, route_errors = validate_oracle_routes(protocol["hash"], CASES)
+    score_metric = harness.score_metric_config(score_metric_id, protocol=protocol)
+    os.environ["GEAK_SCORE_METRIC"] = score_metric["id"]
+    secondary_metric = harness.secondary_score_metric(score_metric, protocol=protocol)
+    trusted, route_errors = validate_oracle_routes(
+        protocol["hash"], score_metric, CASES)
     if not trusted:
-        raise RuntimeError("oracle route manifest is not trusted for this protocol: "
+        raise RuntimeError("oracle route manifest is not trusted for this protocol/score metric: "
                            + "; ".join(route_errors)
                            + ". Run oracle-bakeoff under the GPU lock first.")
     candidate, _ = _load_ops()
@@ -368,56 +372,67 @@ def run_performance(selected_case=None, protocol_name=None):
     for case in cases:
         slots = _make_measurement_slots(case, protocol)
         arms = _measurement_arms(candidate, backends)
-        latency = harness.measure_paired_arms(
-            arms, slots, protocol=protocol, metric="single_call_latency")
-        throughput = harness.measure_paired_arms(
-            arms, slots, protocol=protocol, metric="sustained_throughput")
-        _validate_measurement_receipt(latency)
-        _validate_measurement_receipt(throughput)
+        receipts = {}
+        for metric in (score_metric, secondary_metric):
+            receipt = harness.measure_paired_arms(
+                arms, slots, protocol=protocol, metric=metric["id"])
+            _validate_measurement_receipt(receipt)
+            if (receipt.get("metric_id") != metric["id"]
+                    or receipt.get("metric", {}).get("inner") != metric["inner"]):
+                raise RuntimeError("measurement receipt score metric/inner drift")
+            receipts[metric["id"]] = receipt
         route = oracle_route(case["M"], case["N"], case["K"])
         flops = 2.0 * case["M"] * case["N"] * case["K"]
-        latency_summary = _metric_summary(latency, route, flops)
-        throughput_summary = _metric_summary(throughput, route, flops)
-        legacy = harness.legacy_timing_aliases(
-            latency, candidate_arm="candidate", baseline_arm=route)
+        summaries = {metric_id: _metric_summary(receipt, route, flops)
+                     for metric_id, receipt in receipts.items()}
+        score_receipt = receipts[score_metric["id"]]
+        score_aliases = harness.score_timing_aliases(
+            score_receipt, candidate_arm="candidate", baseline_arm=route)
         row = {
             "test_case_id": case["id"],
             "regime": case["regime"],
             "M": case["M"], "N": case["N"], "K": case["K"],
             "baseline_route": route,
-            "baseline_tflops": flops / (legacy["baseline_ms"] * 1e9),
-            "candidate_tflops": flops / (legacy["candidate_ms"] * 1e9),
-            "score_metric": "single_call_latency",
-            "single_call_latency": latency_summary,
-            "sustained_throughput": throughput_summary,
-            "measurement_receipts": {
-                "single_call_latency": latency,
-                "sustained_throughput": throughput,
-            },
-            **legacy,
+            "baseline_tflops": flops / (score_aliases["baseline_ms"] * 1e9),
+            "candidate_tflops": flops / (score_aliases["candidate_ms"] * 1e9),
+            "score_metric": dict(score_metric),
+            "secondary_metric": dict(secondary_metric),
+            "single_call_latency": summaries["single_call_latency"],
+            "sustained_throughput": summaries["sustained_throughput"],
+            "measurement_receipts": receipts,
+            **score_aliases,
         }
+        if score_metric["id"] == "single_call_latency":
+            row["legacy_metric_source"] = "single_call_latency"
         rows.append(row)
-        print(f"Perf: {legacy['candidate_ms']:.6f} ms ({case['id']})")
+        print(f"Perf[{score_metric['id']}]: {score_aliases['candidate_ms']:.6f} ms/call "
+              f"({case['id']})")
     timing_receipt = {
-        **harness.legacy_timing_receipt(rows),
+        **harness.score_timing_receipt(rows, score_metric),
         "schema": harness.MEASUREMENT_RECEIPT_SCHEMA,
         "protocol_hash": protocol["hash"],
         "raw_receipts_embedded_per_case": True,
     }
+    if score_metric["id"] == "single_call_latency":
+        timing_receipt["legacy_metric_source"] = "single_call_latency"
     report = {
         "status": "ok",
         "protocol": protocol,
         "protocol_hash": protocol["hash"],
-        "score_metric": "single_call_latency",
-        "non_score_metric": "sustained_throughput",
-        "metric_separation": "latency inner=1; throughput inner>1; no mixed aggregate",
+        "score_metric": dict(score_metric),
+        "score_metric_id": score_metric["id"],
+        "secondary_metric": dict(secondary_metric),
+        "non_score_metric": secondary_metric["id"],
+        "metric_separation": "execution_time/speedup use score_metric only; secondary is report-only",
         "baseline": "frozen per-shape best-of aiter CK/hipBLASLt rowwise",
         "test_cases": rows,
-        "geomean_speedup": _geomean([r["single_call_latency"]["speedup"] for r in rows]),
+        "geomean_speedup": _geomean([r[score_metric["id"]]["speedup"] for r in rows]),
         "decode_geomean_speedup": _geomean([
-            r["single_call_latency"]["speedup"] for r in rows if r["regime"] == "decode"]),
+            r[score_metric["id"]]["speedup"] for r in rows if r["regime"] == "decode"]),
         "prefill_geomean_speedup": _geomean([
-            r["single_call_latency"]["speedup"] for r in rows if r["regime"] == "prefill"]),
+            r[score_metric["id"]]["speedup"] for r in rows if r["regime"] == "prefill"]),
+        "single_call_geomean_speedup": _geomean([
+            r["single_call_latency"]["speedup"] for r in rows]),
         "sustained_geomean_speedup": _geomean([
             r["sustained_throughput"]["speedup"] for r in rows]),
         "timing_receipt": timing_receipt,
@@ -454,7 +469,7 @@ def _load_paired_candidate(root, label):
     return ext.dense_fp8_gemm
 
 
-def run_paired_verify(protocol_name=None):
+def run_paired_verify(protocol_name=None, score_metric_id=None):
     """Task-v2 producer: full suite, same slots/blocks, candidate+incumbent+oracle."""
     from oracle_wrapper import oracle_backends, oracle_route, validate_oracle_routes
 
@@ -466,7 +481,10 @@ def run_paired_verify(protocol_name=None):
     if sorted(expected) != sorted(suite):
         raise RuntimeError(f"paired verify requires the complete FP8 suite: {suite}")
     protocol = harness.measurement_protocol(protocol_name)
-    trusted, errors = validate_oracle_routes(protocol["hash"], CASES)
+    score_metric = harness.score_metric_config(score_metric_id, protocol=protocol)
+    os.environ["GEAK_SCORE_METRIC"] = score_metric["id"]
+    secondary_metric = harness.secondary_score_metric(score_metric, protocol=protocol)
+    trusted, errors = validate_oracle_routes(protocol["hash"], score_metric, CASES)
     candidate = _load_paired_candidate(candidate_root, "candidate")
     incumbent = _load_paired_candidate(incumbent_root, "incumbent")
     backends = oracle_backends() if trusted else {}
@@ -487,30 +505,67 @@ def run_paired_verify(protocol_name=None):
             route = oracle_route(case["M"], case["N"], case["K"])
             oracle_arm = f"oracle:{route}"
             arms[oracle_arm] = lambda slot, fn=backends[route]: fn(*slot["args"])
-        receipt = harness.measure_paired_arms(
-            arms, _make_measurement_slots(case, protocol, common_slot_count),
-            protocol=protocol, metric="single_call_latency")
-        _validate_measurement_receipt(receipt)
+        slots = _make_measurement_slots(case, protocol, common_slot_count)
+        receipts = {}
+        for metric in (score_metric, secondary_metric):
+            receipt = harness.measure_paired_arms(
+                arms, slots, protocol=protocol, metric=metric["id"])
+            _validate_measurement_receipt(receipt)
+            if (receipt.get("metric_id") != metric["id"]
+                    or receipt.get("metric", {}).get("inner") != metric["inner"]):
+                raise RuntimeError("paired receipt score metric/inner drift")
+            receipts[metric["id"]] = receipt
+        score_receipt = receipts[score_metric["id"]]
         if trusted:
-            absolute = {"status": "ok", "oracle_arm": oracle_arm,
-                        "candidate_ms": receipt["medians_ms"]["candidate"],
-                        "oracle_ms": receipt["medians_ms"][oracle_arm]}
-        routes.append({"route": case["id"], "measurement_receipt": receipt,
-                       "absolute_report": absolute})
-    raw = {"schema": "geak.paired-measurement-suite/v2",
-           "expected_routes": sorted(suite), "protocol_hash": protocol["hash"],
-           "promotion_control": "incumbent", "oracle_role": "absolute_report_only",
-           "routes": routes}
+            absolute = {
+                "status": "ok",
+                "oracle_arm": oracle_arm,
+                "score_metric": dict(score_metric),
+                "candidate_ms": score_receipt["medians_ms"]["candidate"],
+                "oracle_ms": score_receipt["medians_ms"][oracle_arm],
+                "speedup": (score_receipt["medians_ms"][oracle_arm]
+                            / score_receipt["medians_ms"]["candidate"]),
+                "secondary_metric": dict(secondary_metric),
+                "secondary_candidate_ms": receipts[secondary_metric["id"]]["medians_ms"]["candidate"],
+                "secondary_oracle_ms": receipts[secondary_metric["id"]]["medians_ms"][oracle_arm],
+            }
+        routes.append({
+            "route": case["id"],
+            "score_metric": dict(score_metric),
+            "execution_time_ms": score_receipt["medians_ms"]["candidate"],
+            "incumbent_ms": score_receipt["medians_ms"]["incumbent"],
+            "speedup": (score_receipt["medians_ms"]["incumbent"]
+                        / score_receipt["medians_ms"]["candidate"]),
+            "measurement_receipt": score_receipt,
+            "secondary_metric": dict(secondary_metric),
+            "secondary_measurement_receipt": receipts[secondary_metric["id"]],
+            "absolute_report": absolute,
+        })
+    raw = {
+        "schema": "geak.paired-measurement-suite/v2",
+        "expected_routes": sorted(suite),
+        "protocol_hash": protocol["hash"],
+        "score_metric": dict(score_metric),
+        "metric_id": score_metric["id"],
+        "inner": score_metric["inner"],
+        "secondary_metric": dict(secondary_metric),
+        "promotion_control": "incumbent",
+        "oracle_role": "absolute_report_only",
+        "routes": routes,
+    }
     harness.atomic_write_json(output, raw)
     return True, raw
 
 
-def run_oracle_bakeoff(selected_case=None, protocol_name=None):
-    """Re-select and atomically freeze the FP8 denominator under the requested v2 protocol."""
+def run_oracle_bakeoff(selected_case=None, protocol_name=None, score_metric_id=None):
+    """Re-select and atomically freeze the denominator under one explicit score metric."""
     from oracle_wrapper import oracle_backend_metadata, oracle_backends
     from route_manifest import SCHEMA, write_route_manifest
 
     protocol = harness.measurement_protocol(protocol_name)
+    score_metric = harness.score_metric_config(score_metric_id, protocol=protocol)
+    os.environ["GEAK_SCORE_METRIC"] = score_metric["id"]
+    secondary_metric = harness.secondary_score_metric(score_metric, protocol=protocol)
     cases = [c for c in CASES if selected_case in (None, c["id"])]
     if selected_case is not None and not cases:
         raise ValueError(f"unknown case: {selected_case}")
@@ -531,33 +586,50 @@ def run_oracle_bakeoff(selected_case=None, protocol_name=None):
             if not ok:
                 raise RuntimeError(f"{name} failed correctness for {case['id']}: {err}")
             correctness[name] = {"correct": True, "max_rel_err": err}
+
         arms = {name: (lambda slot, fn=fn: fn(*slot["args"]))
                 for name, fn in backends.items()}
-        receipt = harness.measure_paired_arms(
-            arms, slots, protocol=protocol, metric="single_call_latency")
-        _validate_measurement_receipt(receipt)
-        winner = min(backends, key=lambda name: receipt["medians_ms"][name])
+        metric_receipts = {}
+        for metric in (score_metric, secondary_metric):
+            receipt = harness.measure_paired_arms(
+                arms, slots, protocol=protocol, metric=metric["id"])
+            _validate_measurement_receipt(receipt)
+            if (receipt.get("metric_id") != metric["id"]
+                    or receipt.get("metric", {}).get("inner") != metric["inner"]):
+                raise RuntimeError("oracle bakeoff receipt score metric/inner drift")
+            metric_receipts[metric["id"]] = receipt
+        score_receipt = metric_receipts[score_metric["id"]]
+        secondary_receipt = metric_receipts[secondary_metric["id"]]
+        winner = min(backends, key=lambda name: score_receipt["medians_ms"][name])
         routes[case["id"]] = {
             "M": case["M"], "N": case["N"], "K": case["K"],
             "backend": winner,
             "correctness": correctness,
             "backend_measurements": {
                 name: {
-                    "median_ms": receipt["medians_ms"][name],
-                    "samples_ms": [sample["ms"] for sample in receipt["samples"]
+                    "median_ms": score_receipt["medians_ms"][name],
+                    "samples_ms": [sample["ms"] for sample in score_receipt["samples"]
                                    if sample["arm"] == name],
+                    "score_metric": dict(score_metric),
+                    "secondary": {
+                        "metric": dict(secondary_metric),
+                        "median_ms": secondary_receipt["medians_ms"][name],
+                        "samples_ms": [sample["ms"] for sample in secondary_receipt["samples"]
+                                       if sample["arm"] == name],
+                    },
                     "metadata": metadata[name],
                 }
                 for name in backends
             },
         }
-        receipts[case["id"]] = receipt
+        receipts[case["id"]] = metric_receipts
     manifest = {
         "schema": SCHEMA,
         "task": "dense_fp8_gemm_rowwise",
         "frozen": True,
         "selection_state": "baked",
-        "selection_metric": "single_call_latency",
+        "selection_metric": score_metric["id"],
+        "score_metric": dict(score_metric),
         "protocol_hash": protocol["hash"],
         "protocol": protocol,
         "seed": protocol["seed"],
@@ -571,8 +643,11 @@ def run_oracle_bakeoff(selected_case=None, protocol_name=None):
     }
     path = TASK_DIR / "oracle_routes.v2.json"
     write_route_manifest(path, manifest)
-    report = {"status": "ok", "manifest": str(path), "routes": routes,
-              "protocol_hash": protocol["hash"], "raw_receipts": receipts}
+    report = {
+        "status": "ok", "manifest": str(path), "routes": routes,
+        "protocol_hash": protocol["hash"], "score_metric": dict(score_metric),
+        "secondary_metric": dict(secondary_metric), "raw_receipts": receipts,
+    }
     _write_report("oracle_bakeoff", report)
     return True, report
 
@@ -601,6 +676,7 @@ def main():
     parser.add_argument("--case")
     parser.add_argument("--protocol", choices=["legacy_write_flush", "read_evict", "warm",
                                                 "semantic_weight_rotating"])
+    parser.add_argument("--score-metric", choices=harness.SCORE_METRIC_IDS)
     parser.add_argument("--confirm-oracle-bakeoff", action="store_true")
     parser.add_argument("--impl", choices=["baseline", "candidate"], default="candidate")
     parser.add_argument("--iterations", type=int, default=20)
@@ -614,15 +690,15 @@ def main():
         elif args.mode == "correctness":
             ok, report = run_correctness()
         elif args.mode == "performance":
-            ok, report = run_performance(args.case, args.protocol)
+            ok, report = run_performance(args.case, args.protocol, args.score_metric)
         elif args.mode == "oracle-bakeoff":
             if not args.confirm_oracle_bakeoff:
                 parser.error("oracle-bakeoff requires --confirm-oracle-bakeoff")
-            ok, report = run_oracle_bakeoff(args.case, args.protocol)
+            ok, report = run_oracle_bakeoff(args.case, args.protocol, args.score_metric)
         elif args.mode == "paired-verify":
             if args.case:
                 parser.error("paired-verify is full-suite only; --case is forbidden")
-            ok, report = run_paired_verify(args.protocol)
+            ok, report = run_paired_verify(args.protocol, args.score_metric)
         else:
             if not args.case:
                 parser.error("profile requires --case")

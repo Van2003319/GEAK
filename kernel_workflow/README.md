@@ -53,7 +53,7 @@ pinned: [docs/compiler_grounded_evidence_ladder.md](docs/compiler_grounded_evide
 
 Each round's highest-ranked candidate that passes the commit gate is committed into the canonical
 workspace, so the next round builds on it. Ranking/reporting still carries absolute speedup vs the
-oracle, but oracle latency is report-only. Commitment is decided only against an untouched incumbent
+oracle, but oracle timing is report-only. Commitment is decided only against an untouched incumbent
 measured in the same protocol-v2 outer blocks and one complete-suite GPU-lock scope.
 
 ## Paired producer and commit gate
@@ -62,8 +62,8 @@ The production chain is:
 
 1. The benchmark declares an immutable absolute `paired_verify_argv`. The task adapter reads
    `GEAK_PAIRED_CANDIDATE_ROOT`, `GEAK_PAIRED_INCUMBENT_ROOT`,
-   `GEAK_PAIRED_EXPECTED_ROUTES`, and `GEAK_PAIRED_RAW_RECEIPT`, and writes
-   `geak.paired-measurement-suite/v2`.
+   `GEAK_PAIRED_EXPECTED_ROUTES`, `GEAK_PAIRED_RAW_RECEIPT`, and `GEAK_SCORE_METRIC`, and writes
+   `geak.paired-measurement-suite/v2` with a versioned score/secondary metric pair.
 2. The lane runs `scripts/paired_verify.py produce` under one `gpu_lock.sh` +
    `gpu_fence_run.sh` scope over the entire command. The producer hashes candidate, incumbent, and
    immutable task roots before/after, rejects incumbent or harness mutation, and validates every
@@ -83,7 +83,7 @@ bash kernel_workflow/scripts/gpu_lock.sh <gpu-pool> \
   bash kernel_workflow/scripts/gpu_fence_run.sh \
   python3 kernel_workflow/scripts/paired_verify.py produce \
     --candidate-root <verify/candidate> --incumbent-root <verify/incumbent> \
-    --task-root <immutable-task-root> \
+    --task-root <immutable-task-root> --score-metric sustained_throughput \
     --expected-route <route> ... --output <paired_task_receipt.json> -- \
     python3 <immutable-task-root>/scripts/task_runner.py paired-verify
 

@@ -45,11 +45,13 @@ def grab(pattern: str, name: str, text: str) -> str:
 def spec(gain: float = 0.03) -> dict:
     ids = [f"pair-{i:02d}" for i in range(RG.MIN_PAIRS)]
     routes = []
+    binding = measurement_binding(["target", "guard"])
     for name, route_gain in (("target", gain), ("guard", 0.0)):
         control = [1.0 + i * 0.001 for i in range(RG.MIN_PAIRS)]
         candidate = [value * (1.0 - route_gain) for value in control]
         routes.append({
             "route": name,
+            "metric_id": binding["metric_id"], "inner": binding["inner"],
             "candidate": {"session_id": "session-parity", "pair_ids": list(ids),
                           "samples_ms": candidate},
             "control": {"session_id": "session-parity", "pair_ids": list(ids),
@@ -62,7 +64,7 @@ def spec(gain: float = 0.03) -> dict:
         "expected_route_count": 2,
         "target_routes": ["target"],
         "paired_routes": routes,
-        "measurement": measurement_binding(["target", "guard"]),
+        "measurement": binding,
     }
 
 

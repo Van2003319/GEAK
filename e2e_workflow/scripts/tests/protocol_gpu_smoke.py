@@ -19,7 +19,7 @@ def main() -> None:
         "semantic_weight_rotating",
         seed=7,
         latency_cycles=4,
-        throughput_cycles=3,
+        throughput_cycles=4,
         throughput_inner=2,
         warmup_cycles=1,
         output_ring_size=2,
@@ -39,24 +39,45 @@ def main() -> None:
         "incumbent": lambda slot: torch.add(*slot["args"]),
         "oracle:torch_add": lambda slot: torch.add(*slot["args"]),
     }
+    score_metric = harness.score_metric_config(
+        os.environ.get("GEAK_SCORE_METRIC", "sustained_throughput"), protocol=protocol)
+    secondary_metric = harness.secondary_score_metric(score_metric, protocol=protocol)
     receipt = harness.measure_paired_arms(
-        arms, slots, protocol=protocol, metric="single_call_latency")
+        arms, slots, protocol=protocol, metric=score_metric["id"])
+    secondary = harness.measure_paired_arms(
+        arms, slots, protocol=protocol, metric=secondary_metric["id"])
     assert all(receipt["invariants"].values()), receipt["invariants"]
+    assert all(secondary["invariants"].values()), secondary["invariants"]
     assert all(row["addresses_rotated"] for row in receipt["output_lifecycle"].values())
     assert receipt["gpu_lock"]["mode"] == "external", receipt["gpu_lock"]
+    assert receipt["metric_id"] == score_metric["id"]
+    assert receipt["metric"]["inner"] == score_metric["inner"]
     assert len(receipt["blocks"]) == 8
     assert len(receipt["samples"]) == 24
     expected = json.loads(os.environ.get("GEAK_PAIRED_EXPECTED_ROUTES", '["smoke_512"]'))
     if expected != ["smoke_512"]:
         raise AssertionError(f"smoke producer expected one smoke_512 route, got {expected}")
+    candidate_ms = receipt["medians_ms"]["candidate"]
+    incumbent_ms = receipt["medians_ms"]["incumbent"]
     raw = {
         "schema": "geak.paired-measurement-suite/v2",
         "expected_routes": expected,
         "protocol_hash": receipt["protocol_hash"],
+        "score_metric": score_metric,
+        "metric_id": score_metric["id"],
+        "inner": score_metric["inner"],
+        "secondary_metric": secondary_metric,
         "promotion_control": "incumbent",
         "oracle_role": "absolute_report_only",
-        "routes": [{"route": "smoke_512", "measurement_receipt": receipt,
-                    "absolute_report": {"oracle_arm": "oracle:torch_add"}}],
+        "routes": [{
+            "route": "smoke_512", "score_metric": score_metric,
+            "execution_time_ms": candidate_ms, "incumbent_ms": incumbent_ms,
+            "speedup": incumbent_ms / candidate_ms,
+            "measurement_receipt": receipt,
+            "secondary_metric": secondary_metric,
+            "secondary_measurement_receipt": secondary,
+            "absolute_report": {"oracle_arm": "oracle:torch_add"},
+        }],
     }
     output = os.environ.get("GEAK_PAIRED_RAW_RECEIPT")
     if output:
@@ -64,8 +85,13 @@ def main() -> None:
     print(json.dumps({
         "status": "ok",
         "protocol_hash": receipt["protocol_hash"],
+        "score_metric": score_metric,
         "blocks": len(receipt["blocks"]),
         "samples": len(receipt["samples"]),
+        "aa_medians_ms": {name: receipt["medians_ms"][name]
+                          for name in ("candidate", "incumbent")},
+        "aa_speedup": (receipt["medians_ms"]["incumbent"]
+                       / receipt["medians_ms"]["candidate"]),
         "gpu_lock": receipt["gpu_lock"],
         "invariants": receipt["invariants"],
     }, sort_keys=True))

@@ -16,29 +16,57 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import route_gate as rg
 
 
-def measurement_binding(routes):
-    protocol = {"schema": "geak.measurement-protocol/v2", "version": 2,
-                "name": "semantic_weight_rotating", "warmup_cycles": 1}
+def measurement_binding(routes, metric_id="sustained_throughput"):
+    protocol = {
+        "schema": "geak.measurement-protocol/v2", "version": 2,
+        "name": "semantic_weight_rotating", "warmup_cycles": 1,
+        "slot_policy": "semantic_weight_rotation",
+        "cache_policy": "semantic_weight_rotating",
+        "metrics": {
+            "single_call_latency": {
+                "id": "single_call_latency", "unit": "ms/call", "inner": 1},
+            "sustained_throughput": {
+                "id": "sustained_throughput", "unit": "ms/call", "inner": 4},
+        },
+    }
     protocol["hash"] = rg._input_digest(protocol)
+
+    def metric(metric_name):
+        value = {
+            "schema": "geak.score-metric/v1", "version": 1, "id": metric_name,
+            "unit": "ms/call", "inner": protocol["metrics"][metric_name]["inner"],
+            "protocol_hash": protocol["hash"],
+        }
+        value["hash"] = rg._input_digest(value)
+        return value
+
+    score_metric = metric(metric_id)
+    secondary_id = next(name for name in protocol["metrics"] if name != metric_id)
+    secondary_metric = metric(secondary_id)
     lifecycle = {"ring_size": 3, "observed_addresses": 12,
                  "unique_addresses": 3, "addresses_rotated": True}
     hashes = {kind: {"algorithm": "sha256", "sha256": ({"source": "1", "asm": "a", "binary": "b"}[kind] * 64),
                      "files": 1, "present": True}
               for kind in ("source", "asm", "binary")}
+    metric_invariant = ("single_call_latency_inner_is_one"
+                        if metric_id == "single_call_latency"
+                        else "sustained_throughput_inner_gt_one")
     return {
         "schema": "geak.paired-verify-binding/v2",
         "producer_schema": "geak.paired-verify-task-receipt/v2",
         "promotion_control": "incumbent", "oracle_role": "absolute_report_only",
         "canonical_input_sha256": "c" * 64,
         "protocol": protocol, "protocol_hash": protocol["hash"],
-        "metric_id": "single_call_latency",
+        "score_metric": score_metric, "metric_id": metric_id,
+        "inner": score_metric["inner"], "secondary_metric": secondary_metric,
         "gpu_lock": {"mode": "external", "path": "/tmp/geak-test-gpu.lock"},
         "priming": {"required": True, "all_samples_primed": True,
                     "warmup_cycles": 1, "timer": "cuda_event"},
         "invariants": {"all_arms_in_every_block": True,
                        "same_slot_within_block": True,
                        "same_outer_blocks_across_suite": True,
-                       "single_call_latency_inner_is_one": True,
+                       "selected_metric_inner_matches": True,
+                       metric_invariant: True,
                        "semantic_slot_policy_bound": True},
         "output_lifecycle": {"policy": "bounded-live-ring", "all_arms_rotated": True,
                              "per_route": {route: {"candidate": dict(lifecycle),
@@ -48,11 +76,13 @@ def measurement_binding(routes):
         "task_root": "/immutable/task", "task_hashes": hashes,
         "incumbent_unchanged": True,
         "route_measurement_sha256": {route: "d" * 64 for route in routes},
+        "secondary_route_measurement_sha256": {route: "e" * 64 for route in routes},
     }
 
 
-def make_spec(gains, targets, *, n=12, session="session-1", arm_log_noise=None):
-    """Build complete paired blocks; gain > 0 means lower candidate latency."""
+def make_spec(gains, targets, *, n=12, session="session-1", arm_log_noise=None,
+              metric_id="sustained_throughput"):
+    """Build complete paired blocks; gain > 0 means lower candidate execution time."""
     pair_ids = [f"pair-{i:02d}" for i in range(n)]
     blocks = []
     for route_index, (route, gain) in enumerate(gains.items()):
@@ -63,8 +93,10 @@ def make_spec(gains, targets, *, n=12, session="session-1", arm_log_noise=None):
             noise = arm_log_noise(route, i) if arm_log_noise else 0.0
             control.append(common)
             candidate.append(common * (1.0 - gain) * math.exp(noise))
+        binding = measurement_binding(list(gains), metric_id)
         blocks.append({
             "route": route,
+            "metric_id": binding["metric_id"], "inner": binding["inner"],
             "candidate": {"session_id": session, "pair_ids": list(pair_ids),
                           "samples_ms": candidate},
             "control": {"session_id": session, "pair_ids": list(pair_ids),
@@ -77,7 +109,7 @@ def make_spec(gains, targets, *, n=12, session="session-1", arm_log_noise=None):
         "expected_route_count": len(gains),
         "target_routes": list(targets),
         "paired_routes": blocks,
-        "measurement": measurement_binding(list(gains)),
+        "measurement": measurement_binding(list(gains), metric_id),
     }
 
 
@@ -249,6 +281,26 @@ class FailClosedEvidenceTest(unittest.TestCase):
                 spec = copy.deepcopy(self.spec)
                 mutate(spec["measurement"])
                 self.assertIn(token, invalid(spec)["reason"])
+
+    def test_throughput_and_latency_metric_contracts_are_both_explicit(self):
+        throughput = rg.decide(self.spec)
+        self.assertEqual(throughput["measurement"]["metric_id"], "sustained_throughput")
+        self.assertGreater(throughput["measurement"]["inner"], 1)
+        latency_spec = make_spec({"target": 0.07, "guard": 0.0}, ["target"],
+                                 metric_id="single_call_latency")
+        latency = rg.decide(latency_spec)
+        self.assertEqual(latency["measurement"]["metric_id"], "single_call_latency")
+        self.assertEqual(latency["measurement"]["inner"], 1)
+
+    def test_metric_or_inner_drift_fails_closed(self):
+        for mutate in (
+            lambda spec: spec["measurement"].__setitem__("inner", 1),
+            lambda spec: spec["paired_routes"][0].__setitem__("metric_id", "single_call_latency"),
+            lambda spec: spec["measurement"]["score_metric"].__setitem__("inner", 1),
+        ):
+            spec = copy.deepcopy(self.spec)
+            mutate(spec)
+            self.assertEqual(rg.decide_fail_closed(spec)["decision"], "invalid_evidence")
 
     def test_receipt_losslessly_echoes_measurement_binding(self):
         receipt = rg.decide(self.spec)

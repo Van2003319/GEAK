@@ -101,6 +101,24 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(self.protocol("semantic-weight-rotating")["name"],
                          "semantic_weight_rotating")
 
+    def test_score_metric_is_versioned_env_aware_and_conflict_closed(self):
+        protocol = self.protocol()
+        latency = hl.score_metric_config(protocol=protocol)
+        self.assertEqual(latency["schema"], "geak.score-metric/v1")
+        self.assertEqual(latency["id"], "single_call_latency")
+        self.assertEqual(latency["inner"], 1)
+        self.assertEqual(latency["hash"], hl.score_metric_hash(latency))
+        with mock.patch.dict(os.environ, {"GEAK_SCORE_METRIC": "sustained_throughput"}):
+            throughput = hl.score_metric_config(protocol=protocol)
+            self.assertGreater(throughput["inner"], 1)
+            with self.assertRaisesRegex(ValueError, "score metric conflict"):
+                hl.score_metric_config("single_call_latency", protocol=protocol)
+        with self.assertRaisesRegex(ValueError, "semantic_weight_rotating"):
+            hl.score_metric_config("sustained_throughput", protocol=self.protocol("warm"))
+        stale = dict(throughput, inner=1)
+        with self.assertRaisesRegex(ValueError, "hash does not match"):
+            hl.validate_score_metric(stale, protocol)
+
     def test_three_arms_share_the_exact_slot_in_every_block(self):
         receipt, calls, slots = self.run_receipt()
         self.assertTrue(receipt["invariants"]["all_arms_in_every_block"])
@@ -179,6 +197,12 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(old_receipt["legacy_metric_source"],
                          "single_call_latency")
         self.assertIn("case", old_receipt["cases"])
+        selected = hl.score_timing_aliases(
+            throughput, candidate_arm="candidate", baseline_arm="control")
+        self.assertEqual(selected["execution_time_ms"], 1.0)
+        self.assertEqual(selected["speedup"], 2.0)
+        self.assertEqual(selected["score_metric_id"], "sustained_throughput")
+        self.assertGreater(selected["score_metric_inner"], 1)
         with self.assertRaisesRegex(ValueError, "single-call latency"):
             hl.legacy_timing_aliases(
                 throughput, candidate_arm="candidate", baseline_arm="control")
@@ -213,11 +237,18 @@ class ProtocolTest(unittest.TestCase):
 
 class RouteFreezeTest(unittest.TestCase):
     def payload(self, backend="control"):
+        metric = {
+            "schema": "geak.score-metric/v1", "version": 1,
+            "id": "single_call_latency", "unit": "ms/call", "inner": 1,
+            "protocol_hash": "abc",
+        }
+        metric["hash"] = hl.score_metric_hash(metric)
         return {
             "schema": route_mod.SCHEMA,
             "task": "task",
             "frozen": True,
             "selection_metric": "single_call_latency",
+            "score_metric": metric,
             "protocol_hash": "abc",
             "routes": {"case": {"M": 2, "N": 3, "K": 4, "backend": backend}},
         }
@@ -237,10 +268,27 @@ class RouteFreezeTest(unittest.TestCase):
             path.write_text(json.dumps(self.payload()))
             frozen = route_mod.FrozenRouteManifest(path, "task")
             cases = [{"id": "case", "M": 2, "N": 3, "K": 4}]
-            self.assertEqual(frozen.validate_for("abc", cases), (True, []))
-            ok, errors = frozen.validate_for("different", cases)
+            metric = self.payload()["score_metric"]
+            self.assertEqual(frozen.validate_for("abc", metric, cases), (True, []))
+            ok, errors = frozen.validate_for("different", metric, cases)
             self.assertFalse(ok)
             self.assertIn("protocol hash differs; re-run oracle-bakeoff", errors)
+
+    def test_legacy_latency_manifest_is_readable_but_cannot_be_relabelled_throughput(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routes.json"
+            payload = self.payload()
+            payload.pop("score_metric")
+            path.write_text(json.dumps(payload))
+            frozen = route_mod.FrozenRouteManifest(path, "task")
+            cases = [{"id": "case", "M": 2, "N": 3, "K": 4}]
+            self.assertEqual(frozen.validate_for("abc", cases), (True, []))
+            throughput = dict(self.payload()["score_metric"],
+                              id="sustained_throughput", inner=4)
+            throughput["hash"] = hl.score_metric_hash(throughput)
+            ok, errors = frozen.validate_for("abc", throughput, cases)
+            self.assertFalse(ok)
+            self.assertTrue(any("legacy oracle" in error for error in errors))
 
     def test_atomic_writer_supports_rebake_and_rejects_unfrozen_data(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,6 +318,13 @@ class OracleAdapterContractTest(unittest.TestCase):
         self.assertIn("hipblasLtMatmul", sources)
         for field in ("algo_index", "solution", "kernel", "version", "workspace_bytes"):
             self.assertIn(f'out["{field}"]', sources)
+
+    def test_bf16_rebake_discovers_fresh_algorithms_under_selected_metric(self):
+        runner = (REPO / "examples/tasks/dense_bf16_gemm_fused/scripts/task_runner.py").read_text()
+        bake = runner[runner.index("def run_oracle_bakeoff"):runner.index("def run_profile")]
+        self.assertIn("oracle_backends(frozen_algorithms=False)", bake)
+        self.assertIn('selection_metric": score_metric["id"]', bake)
+        self.assertIn('"secondary": {', bake)
 
     def test_both_task_pins_are_the_common_v2_harness(self):
         common = (REPO / "e2e_workflow/scripts/harness_lib.py").read_bytes()
@@ -330,9 +385,11 @@ class OracleAdapterContractTest(unittest.TestCase):
                         for target in node.targets)
             )
             self.assertEqual(set(payload["routes"]), {case["id"] for case in cases})
-            ok, errors = frozen.validate_for(protocol["hash"], cases)
+            score_metric = hl.score_metric_config(
+                "sustained_throughput", protocol=protocol)
+            ok, errors = frozen.validate_for(protocol["hash"], score_metric, cases)
             self.assertFalse(ok)
-            self.assertTrue(any("protocol hash differs" in error for error in errors))
+            self.assertTrue(any("selection metric differs" in error for error in errors))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

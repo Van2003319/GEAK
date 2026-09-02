@@ -31,6 +31,29 @@ def table_digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
+def _score_metric_digest(value: Mapping[str, Any]) -> str:
+    payload = dict(value)
+    payload.pop("hash", None)
+    return hashlib.sha256(_canonical(payload)).hexdigest()
+
+
+def _validate_score_metric(value: object, protocol: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or value.get("schema") != "geak.score-metric/v1":
+        raise RuntimeTableError("runtime table lacks score-metric/v1")
+    metric_id = value.get("id")
+    inner = value.get("inner")
+    if (isinstance(value.get("version"), bool) or value.get("version") != 1
+            or metric_id not in ("single_call_latency", "sustained_throughput")
+            or value.get("unit") != "ms/call"
+            or isinstance(inner, bool) or not isinstance(inner, int)
+            or (metric_id == "single_call_latency" and inner != 1)
+            or (metric_id == "sustained_throughput" and inner <= 1)
+            or value.get("protocol_hash") != protocol.get("hash")
+            or value.get("hash") != _score_metric_digest(value)):
+        raise RuntimeTableError("runtime table score metric is malformed or protocol-mismatched")
+    return value
+
+
 def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(".%s.tmp.%d.%s" % (path.name, os.getpid(), uuid.uuid4().hex))
@@ -91,10 +114,12 @@ def _validate_v2(value: Mapping[str, Any]) -> None:
         raise RuntimeTableError("suite route_ids do not exactly name the published routes")
     task = value.get("task") or {}
     protocol = value.get("protocol") or {}
+    score_metric = value.get("score_metric") or {}
     if not task.get("name") or len(str(task.get("digest") or "")) != 64:
         raise RuntimeTableError("runtime table lacks a canonical task digest")
     if protocol.get("schema") != "geak.measurement-protocol/v2" or len(str(protocol.get("hash") or "")) != 64:
         raise RuntimeTableError("runtime table lacks measurement protocol v2")
+    _validate_score_metric(score_metric, protocol)
     fallback = value.get("fallback") or {}
     if fallback.get("kind") not in ("canonical", "fail_closed"):
         raise RuntimeTableError("runtime table must declare canonical or fail_closed fallback")
@@ -124,6 +149,10 @@ def _validate_v2(value: Mapping[str, Any]) -> None:
                 raise RuntimeTableError("route %s task digest differs from suite" % route_id)
             if entry.get("protocol_hash") != protocol.get("hash"):
                 raise RuntimeTableError("route %s protocol hash differs from suite" % route_id)
+            if (entry.get("score_metric_hash") != score_metric.get("hash")
+                    or entry.get("metric_id") != score_metric.get("id")
+                    or entry.get("metric_inner") != score_metric.get("inner")):
+                raise RuntimeTableError("route %s score metric differs from suite" % route_id)
 
 
 class RuntimeTableStore:
@@ -146,6 +175,7 @@ class RuntimeTableStore:
             "table_digest": None,
             "task": {},
             "protocol": {},
+            "score_metric": {},
             "oracle": {},
             "fallback": {"kind": "fail_closed", "reason": "no suite published"},
             "suite": {"atomic": True, "complete": False, "route_ids": []},
@@ -181,6 +211,7 @@ class RuntimeTableStore:
             raise RuntimeTableError("suite selection mismatch: missing=%s extra=%s" % (missing, extra))
         task = dict(release.get("task") or {})
         protocol = dict(release.get("protocol") or {})
+        score_metric = dict(release.get("score_metric") or {})
         oracle = dict(release.get("oracle") or {})
         fallback = dict(release.get("fallback") or {})
         search = dict(release.get("search") or {})
@@ -188,6 +219,7 @@ class RuntimeTableStore:
             raise RuntimeTableError("release requires task name and 64-byte digest")
         if protocol.get("schema") != "geak.measurement-protocol/v2" or len(str(protocol.get("hash") or "")) != 64:
             raise RuntimeTableError("release requires measurement protocol v2 hash")
+        _validate_score_metric(score_metric, protocol)
         if fallback.get("kind") not in ("canonical", "fail_closed"):
             raise RuntimeTableError("release requires an explicit fallback")
 
@@ -207,6 +239,9 @@ class RuntimeTableStore:
                         "rank": rank,
                         "task_digest": task["digest"],
                         "protocol_hash": protocol["hash"],
+                        "score_metric_hash": score_metric["hash"],
+                        "metric_id": score_metric["id"],
+                        "metric_inner": score_metric["inner"],
                     })
                     ranked.append(row)
                 table_routes[route.name] = {
@@ -234,6 +269,7 @@ class RuntimeTableStore:
                 "receipts_root": str(receipts_root),
                 "task": task,
                 "protocol": protocol,
+                "score_metric": score_metric,
                 "oracle": oracle,
                 "fallback": fallback,
                 "search": search,

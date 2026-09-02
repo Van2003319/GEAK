@@ -919,7 +919,7 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
 {
   const consume = makeReceiptConsumer();
   const ids = Array.from({ length: 8 }, (_, i) => `pair-${String(i).padStart(2, '0')}`);
-  const protocolHash = '70380c6a6641040cd7b01f0832ab5b5674abfd5c1bed02c9b355ff3230aae6ab';
+  const protocolHash = '4cdec943cb2d207b6a5616b390b9daa49458801487fd438fbc94e97c6679812e';
   const lifecycle = { ring_size: 3, observed_addresses: 8,
     unique_addresses: 3, addresses_rotated: true };
   const measurement = {
@@ -928,20 +928,36 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
     promotion_control: 'incumbent', oracle_role: 'absolute_report_only',
     canonical_input_sha256: 'c'.repeat(64),
     protocol: { schema: 'geak.measurement-protocol/v2', version: 2,
-      name: 'semantic_weight_rotating', warmup_cycles: 1, hash: protocolHash },
-    protocol_hash: protocolHash, metric_id: 'single_call_latency',
+      name: 'semantic_weight_rotating', warmup_cycles: 1,
+      slot_policy: 'semantic_weight_rotation', cache_policy: 'semantic_weight_rotating',
+      metrics: {
+        single_call_latency: { id: 'single_call_latency', unit: 'ms/call', inner: 1 },
+        sustained_throughput: { id: 'sustained_throughput', unit: 'ms/call', inner: 4 },
+      }, hash: protocolHash },
+    protocol_hash: protocolHash,
+    score_metric: { schema: 'geak.score-metric/v1', version: 1,
+      id: 'sustained_throughput', unit: 'ms/call', inner: 4,
+      protocol_hash: protocolHash,
+      hash: '4ee3dded61fda54a6823880442e76d441848a5b5ac7245ec1effef878d68aa78' },
+    metric_id: 'sustained_throughput', inner: 4,
+    secondary_metric: { schema: 'geak.score-metric/v1', version: 1,
+      id: 'single_call_latency', unit: 'ms/call', inner: 1,
+      protocol_hash: protocolHash,
+      hash: '60fa570a3847392db92b72601f1a77bf4ba135b30da54b0aa63beea2f31466fe' },
     gpu_lock: { mode: 'external', path: '/tmp/gpu.lock' },
     priming: { required: true, all_samples_primed: true, warmup_cycles: 1, timer: 'cuda_event' },
     output_lifecycle: { policy: 'bounded-live-ring', all_arms_rotated: true,
       per_route: { a: { candidate: lifecycle, incumbent: lifecycle },
         b: { candidate: lifecycle, incumbent: lifecycle } } },
+    route_measurement_sha256: { a: 'd'.repeat(64), b: 'd'.repeat(64) },
+    secondary_route_measurement_sha256: { a: 'e'.repeat(64), b: 'e'.repeat(64) },
     incumbent_unchanged: true,
   };
   const spec = {
     schema: 'geak.route-gate-input/v2', session_id: 'session-1',
     expected_routes: ['a', 'b'], expected_route_count: 2,
     target_routes: ['a'], measurement,
-    paired_routes: [{ route: 'a', candidate: { pair_ids: ids } }],
+    paired_routes: [{ route: 'a', metric_id: 'sustained_throughput', inner: 4, candidate: { pair_ids: ids } }],
   };
   const routeRow = (route, role, passed) => ({
     route, role, n_pairs: 8, bootstrap_stream_seed: '0x0123456789abcdef',
@@ -963,7 +979,7 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
       rng: 'SplitMix64; stream seed is first 64 bits of SHA256(seed:label), big-endian',
       index_sampler: 'next_u64 modulo n', min_pairs: 8,
       multiple_endpoints: 'intersection-union: every declared endpoint must pass',
-      catastrophic_statistic: 'trimmed-mean point estimate of candidate/control latency change' },
+      catastrophic_statistic: 'trimmed-mean point estimate of candidate/control execution-time change' },
     effective_margins: decision === 'invalid_evidence' ? null : {
       practical_mde: { a: 0.02 }, non_regression_margin: { b: 0.02 },
       suite_non_inferiority_margin: 0.01, catastrophic_regression: 0.10 },
@@ -1448,7 +1464,7 @@ console.log('\n# an argument that does not arrive must not look like a chosen de
   ok(/Effective run configuration \(the knobs that decide what this run ADMITS\):/.test(src),
     'the effective configuration is echoed before the first agent call');
   for (const k of ['min_improve', 'candidate_floor', 'progress_delta', 'max_no_improve', 'budget',
-                   'isa_evidence']) {
+                   'isa_evidence', 'score_metric']) {
     ok(new RegExp(`shown\\('${k}'`).test(src), `the echo names ${k} and its effective value`);
   }
   ok(/\$\{A\[key\] == null \? ' \(default\)' : ''\}/.test(src),

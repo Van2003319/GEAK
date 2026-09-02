@@ -7,7 +7,15 @@ compile_command:
 correctness_command:
 - python3 scripts/task_runner.py correctness
 performance_command:
-- python3 scripts/task_runner.py performance
+- python3 scripts/task_runner.py performance --score-metric sustained_throughput
+score_metric:
+  schema: geak.score-metric/v1
+  version: 1
+  id: sustained_throughput
+  unit: ms/call
+  inner: 16
+  protocol_hash: 6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec
+  hash: c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8
 task_type: hip2hip
 task_result_template: task_result_template_triple_output_perf.yaml
 prompt:

@@ -122,5 +122,6 @@ def oracle_route_manifest() -> dict:
     return _ROUTE_MANIFEST.snapshot()
 
 
-def validate_oracle_routes(protocol_hash: str, cases: list[dict]) -> tuple[bool, list[str]]:
-    return _ROUTE_MANIFEST.validate_for(protocol_hash, cases)
+def validate_oracle_routes(protocol_hash: str, score_metric: dict | str,
+                           cases: list[dict] | None = None) -> tuple[bool, list[str]]:
+    return _ROUTE_MANIFEST.validate_for(protocol_hash, score_metric, cases)

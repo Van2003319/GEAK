@@ -1,6 +1,7 @@
 import contextlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -73,8 +74,11 @@ class FakeHarness:
         names = list(arms)
         for call in arms.values():
             call(slots[0])
+        assert metric == "sustained_throughput"
         return {
             "protocol_hash": protocol["hash"],
+            "metric_id": metric,
+            "metric": dict(protocol["metrics"][metric]),
             "medians_ms": {name: float(index + 1) for index, name in enumerate(reversed(names))},
             "invariants": {"paired": True, "semantic_slots": True},
             "gpu_lock": {"mode": "external"},
@@ -84,7 +88,12 @@ class FakeHarness:
 def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     tmp_path, monkeypatch,
 ):
-    contract = TaskContract.load(MANIFEST, require_oracle_compatible=True)
+    loaded = TaskContract.load(MANIFEST)
+    contract = replace(
+        loaded, oracle_compatible=True,
+        oracle={**loaded.oracle, "selection_metric": loaded.score_metric_id,
+                "score_metric": dict(loaded.score_metric)},
+    )
     monkeypatch.setenv("GEAK_GPU_LOCK_HELD", "1")
     monkeypatch.setenv("GEAK_GPU_FENCE_HELD", "1")
     monkeypatch.setattr(integration, "ShardCompiler", FakeCompiler)

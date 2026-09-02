@@ -1,3 +1,5 @@
+import copy
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -5,9 +7,13 @@ from pathlib import Path
 from asm_tuner.adapters import get_adapter
 from asm_tuner.adapters.base import Measurement
 from asm_tuner.runner import Candidate, SuccessiveHalvingRunner
-from asm_tuner.runtime_table import RuntimeSelector, RuntimeTableStore
+from asm_tuner.runtime_table import (
+    RuntimeSelector, RuntimeTableError, RuntimeTableStore, table_digest,
+)
 from asm_tuner.schema import DType, Route
 from asm_tuner.schema_survival import default_seed
+
+import pytest
 
 
 def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
@@ -44,13 +50,22 @@ def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
             timer={"dispatch_primed": True, "samples": samples},
         )
 
+    protocol = {
+        "schema": "geak.measurement-protocol/v2", "version": 2,
+        "name": "unit", "hash": "b" * 64,
+    }
+    score_metric = {
+        "schema": "geak.score-metric/v1", "version": 1,
+        "id": "sustained_throughput", "unit": "ms/call", "inner": 4,
+        "protocol_hash": protocol["hash"],
+    }
+    score_metric["hash"] = hashlib.sha256(json.dumps(
+        score_metric, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     release = {
         "release_id": "release-test",
         "task": {"name": "unit-task", "adapter": "bf16", "digest": "a" * 64},
-        "protocol": {
-            "schema": "geak.measurement-protocol/v2", "version": 2,
-            "name": "unit", "hash": "b" * 64,
-        },
+        "protocol": protocol,
+        "score_metric": score_metric,
         "oracle": {"manifest_sha256": "c" * 64, "compatible": True},
         "fallback": {"kind": "canonical", "reason": "outside suite"},
     }
@@ -72,6 +87,7 @@ def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
 
     table = RuntimeTableStore(table_path).load()
     assert table["revision"] == 1
+    assert table["score_metric"] == score_metric
     assert table["suite"] == {"atomic": True, "complete": True,
                                "route_ids": ["route_a", "route_b"]}
     assert (tmp_path / "runtime_table.json.v1.json").exists()
@@ -79,6 +95,15 @@ def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
     assert RuntimeSelector(table).select("route_a")["config_id"] == configs[0].config_id
     assert RuntimeSelector(table).select("route_a", rank=1)["config_id"] == configs[1].config_id
     assert RuntimeSelector.from_path(table_path).select_shape(65, 64, 32)["config_id"] == configs[2].config_id
+
+    drifted = copy.deepcopy(table)
+    drifted["score_metric"]["id"] = "single_call_latency"
+    drifted["score_metric"]["inner"] = 1
+    drifted["table_digest"] = table_digest(drifted)
+    drift_path = tmp_path / "metric-drift.json"
+    drift_path.write_text(json.dumps(drifted))
+    with pytest.raises(RuntimeTableError, match="score metric"):
+        RuntimeTableStore(drift_path).load()
 
     receipts = list((tmp_path / "out" / "receipts").rglob("*.json"))
     assert len(receipts) == 10

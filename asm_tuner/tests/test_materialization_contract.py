@@ -1,5 +1,6 @@
 import datetime as dt
 import importlib.util
+import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,20 @@ from asm_tuner.runtime_table import RuntimeTableStore
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "asm_tuner/manifests/tasks/dense_bf16_gemm_fused.json"
+
+
+def rebaked_contract(tmp_path):
+    loaded = TaskContract.load(MANIFEST)
+    task = tmp_path / "rebaked-task"
+    shutil.copytree(loaded.task_root, task,
+                    ignore=shutil.ignore_patterns("build", ".torch_ext", "__pycache__"))
+    oracle_path = task / "oracle_routes.v2.json"
+    oracle = json.loads(oracle_path.read_text())
+    oracle["selection_metric"] = loaded.score_metric_id
+    oracle["score_metric"] = dict(loaded.score_metric)
+    oracle_path.write_text(json.dumps(oracle, indent=2, sort_keys=True) + "\n")
+    return TaskContract.load(
+        MANIFEST, task_root=task, require_oracle_compatible=True)
 
 
 class FakeLibrary:
@@ -56,11 +71,13 @@ def fake_release(contract, tmp_path):
         "schema": integration.RELEASE_SCHEMA,
         "task": contract.identity(),
         "protocol": dict(contract.protocol),
+        "score_metric": dict(contract.score_metric),
         "oracle": {
             "manifest_sha256": contract.oracle_sha256,
             "protocol_hash": contract.protocol["hash"],
             "compatible": True,
-            "selection_metric": "single_call_latency",
+            "selection_metric": contract.score_metric_id,
+            "score_metric": dict(contract.score_metric),
         },
         "fallback": {"kind": "canonical", "reason": "outside suite"},
         "search_space_manifest": contract.value["search_space_manifest"],
@@ -77,7 +94,7 @@ def fake_release(contract, tmp_path):
 
 
 def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(tmp_path, monkeypatch):
-    contract = TaskContract.load(MANIFEST, require_oracle_compatible=True)
+    contract = rebaked_contract(tmp_path)
     release = fake_release(contract, tmp_path)
     workspace = tmp_path / "workspace"
     shutil.copytree(contract.task_root, workspace,
@@ -96,6 +113,10 @@ def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(
                for row in table["routes"].values())
     assert table["fallback"]["kind"] == "canonical"
     assert table["search"]["compiled_candidates"] == 2
+    assert table["score_metric"] == dict(contract.score_metric)
+    assert all(entry["metric_id"] == contract.score_metric_id
+               and entry["metric_inner"] == contract.score_metric_inner
+               for row in table["routes"].values() for entry in row["entries"])
     assert (workspace / "asm_tuner_selection.json").is_file()
 
     spec = importlib.util.spec_from_file_location(
@@ -122,7 +143,7 @@ def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(
 
 
 def test_materialized_source_tamper_fails_closed(tmp_path, monkeypatch):
-    contract = TaskContract.load(MANIFEST, require_oracle_compatible=True)
+    contract = rebaked_contract(tmp_path)
     release = fake_release(contract, tmp_path)
     workspace = tmp_path / "workspace"
     shutil.copytree(contract.task_root, workspace,

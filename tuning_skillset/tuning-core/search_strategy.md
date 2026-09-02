@@ -103,6 +103,19 @@ Most tuners take a multi-process flag (`--mp N`) to race candidates across GPUs.
 Watch for fork storms: some tuners spawn a process per candidate, and a large space × many
 GPUs can overwhelm the host.
 
+## Freeze the score metric before halving
+
+A successive-halving run has one currency. Bind a versioned metric id and launch grouping before the
+first round, include it in every cache key and receipt, and reject a resume if it changes. Do not use
+single-call latency to prune early rounds and sustained throughput to choose the final winner; that is
+two different searches sharing a leaderboard.
+
+For the canonical fresh BF16/FP8 lanes, the score is `sustained_throughput`: semantic weight slots
+rotate beyond the cache assumption, all candidates in a block see the same slot, and each timing event
+contains `inner>1` continuous launches. Candidate, incumbent, and oracle must use this exact metric.
+`single_call_latency` remains a separate diagnostic. Legacy lanes may explicitly retain latency
+(`inner=1`), but a latency registry/runtime table cannot be reused by a throughput task contract.
+
 ## Know your noise floor before believing a ranking
 
 The repeat-measurement spread on this box is ~9% for an unchanged kernel (see

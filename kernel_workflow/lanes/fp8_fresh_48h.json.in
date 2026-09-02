@@ -8,10 +8,20 @@
     "tuner_registry": "@TUNER_REGISTRY@",
     "tuner_table": "@TUNER_TABLE@",
     "hard_end_epoch": "@HARD_END_EPOCH@",
-    "stop_new_round_margin_seconds": 1800
+    "stop_new_round_margin_seconds": 1800,
+    "expected_score_metric": {
+      "schema": "geak.score-metric/v1",
+      "version": 1,
+      "id": "sustained_throughput",
+      "unit": "ms/call",
+      "inner": 16,
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8"
+    }
   },
   "_wave_rules": [
     "oracle_wrapper.py, oracle_routes.v2.json, route_manifest.py, harness_lib.py, and the measurement protocol are immutable for the whole run.",
+    "The sole promotion/search/oracle score is sustained_throughput (inner=16); single_call_latency is secondary report-only evidence.",
     "Candidates may not call or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel, MIOpen, or aiter. rocWMMA headers are allowed.",
     "Every compile, correctness, benchmark, profile, oracle, and tuner GPU command must run through gpu_lock.sh and gpu_fence_run.sh using only this lane's allocated pool.",
     "The run is a fresh cold start: do not import an old state, best tree, KB patch, or a path from another worktree."
@@ -31,7 +41,8 @@
     "gpu_lock_env": "@GPU_LOCK_ENV@",
     "deadline_epoch": "@STOP_NEW_ROUND_EPOCH@",
     "no_stop_s": 900,
-    "max_forced_replans": 6
+    "max_forced_replans": 6,
+    "score_metric": "sustained_throughput"
   },
   "kernel_path": "@ROOT@/examples/tasks/dense_fp8_gemm_rowwise",
   "workflow_dir": "@ROOT@/kernel_workflow",
@@ -52,5 +63,6 @@
   "deadline_epoch": "@STOP_NEW_ROUND_EPOCH@",
   "no_stop_s": 900,
   "max_forced_replans": 6,
-  "task": "Fresh-state rowwise-scaled FP8 GEMM on gfx942. Optimize the 11-case suite against the frozen measurement-protocol/v2 per-shape best-of aiter CK/hipBLASLt rowwise oracle. Use the preflight-validated asm_tuner registry/runtime table before ad-hoc search. Candidate code may not call or link AMD high-performance libraries; the oracle is the only exception."
+  "task": "Fresh-state rowwise-scaled FP8 GEMM on gfx942. Optimize the 11-case suite against the frozen measurement-protocol/v2 sustained-throughput per-shape best-of aiter CK/hipBLASLt rowwise oracle. Use the preflight-validated asm_tuner registry/runtime table before ad-hoc search. Candidate code may not call or link AMD high-performance libraries; the oracle is the only exception.",
+  "score_metric": "sustained_throughput"
 }

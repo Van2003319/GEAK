@@ -85,7 +85,7 @@ const KNOWN_ARGS = new Set([
   'start_phase',
   // Canonical asm_tuner bridge. required means no Engineer may start until
   // search/create/select/materialize has produced a hash-valid suite table.
-  'asm_tuner_manifest', 'asm_tuner_mode',
+  'asm_tuner_manifest', 'asm_tuner_mode', 'score_metric',
   // Dispatcher-owned, forwarded verbatim, unused by the worker.
   'backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script',
 ]);
@@ -123,6 +123,13 @@ const KNOWN_ARGS = new Set([
       'work, where it is still free to fix. Accepted arguments: ' +
       [...KNOWN_ARGS].sort().join(', ') + '.');
   }
+}
+// Omitted only for legacy lane files, whose historical currency is single-call latency. Fresh
+// templates set sustained_throughput explicitly and every receipt below carries the resolved object.
+const SCORE_METRIC_ID = String(A.score_metric == null
+  ? 'single_call_latency' : A.score_metric).trim();
+if (!['single_call_latency', 'sustained_throughput'].includes(SCORE_METRIC_ID)) {
+  throw new Error(`score_metric must be single_call_latency or sustained_throughput, got ${JSON.stringify(SCORE_METRIC_ID)}`);
 }
 // EXP_ROOT = where timestamped run dirs are written. Default: a sibling "exp/" next to the
 // kernel_workflow dir (…/<parent>/kernel_workflow -> …/<parent>/exp). Override with args.exp_root.
@@ -207,7 +214,7 @@ const ROUTE_GATE_ALGORITHM_EFFECTIVE = {
   index_sampler: 'next_u64 modulo n',
   min_pairs: ROUTE_GATE_MIN_PAIRS,
   multiple_endpoints: 'intersection-union: every declared endpoint must pass',
-  catastrophic_statistic: 'trimmed-mean point estimate of candidate/control latency change',
+  catastrophic_statistic: 'trimmed-mean point estimate of candidate/control execution-time change',
 };
 const ROUTE_GATE_CONFIG = {
   ...(A.route_mde != null ? { practical_mde: A.route_mde } : {}),
@@ -262,7 +269,7 @@ const ROUTE_GATE_OUTPUT_SCHEMA = {
         properties: {
           route: { type: 'string' }, role: { type: 'string' }, n_pairs: { type: 'number' },
           bootstrap_stream_seed: { type: 'string' }, estimate_log_ratio: { type: 'number' },
-          estimate_ratio: { type: 'number' }, estimate_latency_change: { type: 'number' },
+          estimate_ratio: { type: 'number' }, estimate_execution_time_change: { type: 'number' },
           ci95_lower_log_ratio: { type: 'number' }, ci95_lower_ratio: { type: 'number' },
           threshold_log_ratio: { type: 'number' }, threshold_kind: { type: 'string' },
           passed: { type: 'boolean' }, catastrophic: { type: 'boolean' }, status: { type: 'string' },
@@ -410,12 +417,16 @@ const PAIRED_TASK_OUTPUT_SCHEMA = {
   properties: {
     schema: { type: 'string' }, source_schema: { type: 'string' },
     expected_routes: { type: 'array', minItems: 1, items: { type: 'string' } },
-    protocol_hash: { type: 'string' }, gpu_lock: { type: 'object', additionalProperties: true },
+    protocol_hash: { type: 'string' }, score_metric: { type: 'object', additionalProperties: true },
+    metric_id: { type: 'string' }, inner: { type: 'number' },
+    secondary_metric: { type: 'object', additionalProperties: true },
+    gpu_lock: { type: 'object', additionalProperties: true },
     incumbent_unchanged: { type: 'boolean' }, canonical_input_sha256: { type: 'string' },
     routes: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: true } },
   },
-  required: ['schema', 'source_schema', 'expected_routes', 'protocol_hash', 'gpu_lock',
-    'incumbent_unchanged', 'canonical_input_sha256', 'routes'],
+  required: ['schema', 'source_schema', 'expected_routes', 'protocol_hash', 'score_metric',
+    'metric_id', 'inner', 'secondary_metric', 'gpu_lock', 'incumbent_unchanged',
+    'canonical_input_sha256', 'routes'],
   additionalProperties: true,
 };
 const ROUTE_GATE_INPUT_OUTPUT_SCHEMA = {
@@ -452,6 +463,11 @@ const validateRouteGateInput = (spec, expected) => {
       || spec.measurement.producer_schema !== PAIRED_VERIFY_TASK_SCHEMA) {
     throw new Error('paired adapter returned no deterministic producer binding');
   }
+  if (!expected.score_metric || !sameCanonical(spec.measurement.score_metric, expected.score_metric)
+      || spec.measurement.metric_id !== expected.score_metric.id
+      || spec.measurement.inner !== expected.score_metric.inner) {
+    throw new Error('paired adapter score metric/inner differs from the lane contract');
+  }
   const rows = Array.isArray(spec.paired_routes) ? spec.paired_routes : [];
   if (rows.length !== expected.expected_routes.length
       || !sameStrings(rows.map(row => row && row.route), expected.expected_routes)) {
@@ -459,6 +475,9 @@ const validateRouteGateInput = (spec, expected) => {
   }
   let pairIds = null;
   for (const row of rows) {
+    if (row.metric_id !== expected.score_metric.id || row.inner !== expected.score_metric.inner) {
+      throw new Error('paired adapter route metric/inner differs from the lane contract');
+    }
     for (const armName of ['candidate', 'control']) {
       const arm = row && row[armName];
       if (!arm || arm.session_id !== expected.session_id || !Array.isArray(arm.pair_ids)
@@ -519,7 +538,13 @@ const validateRouteGateReceipt = (receipt, spec) => {
   const measurement = receipt.measurement;
   if (!measurement || measurement.schema !== PAIRED_VERIFY_BINDING_SCHEMA
       || measurement.producer_schema !== PAIRED_VERIFY_TASK_SCHEMA
-      || measurement.metric_id !== 'single_call_latency'
+      || !measurement.score_metric || measurement.score_metric.schema !== 'geak.score-metric/v1'
+      || measurement.score_metric.version !== 1
+      || measurement.metric_id !== measurement.score_metric.id
+      || measurement.inner !== measurement.score_metric.inner
+      || !['single_call_latency', 'sustained_throughput'].includes(measurement.metric_id)
+      || (measurement.metric_id === 'single_call_latency' && measurement.inner !== 1)
+      || (measurement.metric_id === 'sustained_throughput' && measurement.inner <= 1)
       || measurement.promotion_control !== 'incumbent'
       || measurement.oracle_role !== 'absolute_report_only'
       || measurement.incumbent_unchanged !== true
@@ -543,6 +568,14 @@ const validateRouteGateReceipt = (receipt, spec) => {
   if (protocol.hash !== canonicalSha256(protocolPayload)
       || measurement.protocol_hash !== protocol.hash) {
     throw new Error('receipt measurement protocol hash is not canonical');
+  }
+  const metricPayload = { ...measurement.score_metric }; delete metricPayload.hash;
+  if (measurement.score_metric.hash !== canonicalSha256(metricPayload)
+      || measurement.score_metric.protocol_hash !== protocol.hash
+      || (measurement.metric_id === 'sustained_throughput'
+        && (protocol.slot_policy !== 'semantic_weight_rotation'
+          || protocol.cache_policy !== 'semantic_weight_rotating'))) {
+    throw new Error('receipt score metric hash/protocol/rotation binding is invalid');
   }
   if (!sameCanonical(receipt.algorithm, ROUTE_GATE_ALGORITHM_EFFECTIVE)) {
     throw new Error('receipt algorithm/effective seed does not match the pinned v2 protocol');
@@ -1336,6 +1369,9 @@ const BENCH_SCHEMA = obj({
   // Checked-in task command that emits geak.paired-measurement-suite/v2 when invoked by
   // paired_verify.py. It receives candidate/incumbent roots and output path through GEAK_PAIRED_*.
   paired_verify_argv: { type: 'array', minItems: 1, items: { type: 'string' } },
+  score_metric: { type: 'object', additionalProperties: true },
+  score_metric_id: { type: 'string' }, score_metric_inner: { type: 'number' },
+  secondary_metric: { type: 'object', additionalProperties: true },
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
   baseline_geomean_ms: { type: 'number' }, num_test_cases: { type: 'number' },
   // Workload-aligned outputs: present when a WORKLOAD_SPEC drove case selection + weights.
@@ -1345,7 +1381,8 @@ const BENCH_SCHEMA = obj({
   baseline_weighted_total_ms: { type: 'number' },
   weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
-}, ['commandment_path', 'paired_verify_argv', 'baseline_per_case', 'baseline_geomean_ms',
+}, ['commandment_path', 'paired_verify_argv', 'score_metric', 'score_metric_id',
+  'score_metric_inner', 'secondary_metric', 'baseline_per_case', 'baseline_geomean_ms',
   'num_test_cases']);
 
 const PROFILE_SCHEMA = obj({
@@ -2155,6 +2192,8 @@ phase('Setup');
       `${A.progress_delta == null ? ' (= min_improve)' : ''}`);
   log(`  ${shown('isa_evidence', ISA_MODE)}  ${shown('mode', MODE)}  ` +
       `${shown('gpu_mode', GPU_MODE)}  gpu_ids=${GPU_IDS}`);
+  log(`  ${shown('score_metric', SCORE_METRIC_ID, A.score_metric == null
+    ? '(legacy latency compatibility)' : '(explicit versioned binding follows benchmark setup)')}`);
   log(`  ${shown('ir_diagnostics', IR_DIAGNOSTICS ? 'on' : 'off')}` +
       `  evidence_ladder=${LADDER_ENABLED ? 'L1..L4' : 'L1..L2 (no IR trajectory, so no L3/L4)'}`);
   // Named here because the alternative is that a planner runs without a headroom figure and nobody
@@ -2409,14 +2448,43 @@ phase('Benchmark');
 const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-    ANALYSIS: analysis,
+    ANALYSIS: analysis, SCORE_METRIC_ID,
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
+const SCORE_METRIC = bench.score_metric;
+const SECONDARY_METRIC = bench.secondary_metric;
+const scoreMetricDigest = (metric) => canonicalSha256((() => {
+  const copy = { ...metric }; delete copy.hash; return copy;
+})());
+if (!SCORE_METRIC || SCORE_METRIC.schema !== 'geak.score-metric/v1'
+    || SCORE_METRIC.version !== 1 || SCORE_METRIC.id !== SCORE_METRIC_ID
+    || bench.score_metric_id !== SCORE_METRIC.id
+    || bench.score_metric_inner !== SCORE_METRIC.inner
+    || !Number.isInteger(SCORE_METRIC.inner)
+    || SCORE_METRIC.hash !== scoreMetricDigest(SCORE_METRIC)
+    || typeof SCORE_METRIC.protocol_hash !== 'string'
+    || !/^[0-9a-f]{64}$/.test(SCORE_METRIC.protocol_hash)
+    || (SCORE_METRIC.id === 'single_call_latency' && SCORE_METRIC.inner !== 1)
+    || (SCORE_METRIC.id === 'sustained_throughput' && SCORE_METRIC.inner <= 1)
+    || !SECONDARY_METRIC || SECONDARY_METRIC.schema !== 'geak.score-metric/v1'
+    || SECONDARY_METRIC.version !== 1 || !Number.isInteger(SECONDARY_METRIC.inner)
+    || SECONDARY_METRIC.hash !== scoreMetricDigest(SECONDARY_METRIC)
+    || SECONDARY_METRIC.protocol_hash !== SCORE_METRIC.protocol_hash
+    || new Set([SCORE_METRIC.id, SECONDARY_METRIC.id]).size !== 2
+    || !['single_call_latency', 'sustained_throughput'].includes(SECONDARY_METRIC.id)
+    || (SECONDARY_METRIC.id === 'single_call_latency' && SECONDARY_METRIC.inner !== 1)
+    || (SECONDARY_METRIC.id === 'sustained_throughput' && SECONDARY_METRIC.inner <= 1)) {
+  throw new Error('Benchmark setup returned a stale or mismatched score/secondary metric contract');
+}
 const BASELINE_PER_CASE = bench.baseline_per_case;
+if (BASELINE_PER_CASE.some(row => !row || row.score_metric_id !== SCORE_METRIC.id
+    || row.score_metric_inner !== SCORE_METRIC.inner)) {
+  throw new Error('Benchmark baseline rows mix or omit the selected score metric/inner');
+}
 // "How fast is this candidate compared to the version we already have", as an unweighted geomean
 // over the routes both sides reported. Both halves are absolute milliseconds: the incumbent's from
 // THIS wave's baseline run (measured on CANONICAL at the top of the run) and the candidate's from
@@ -2490,7 +2558,8 @@ ${lockPrefix}bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSO
     `python3 ${JSON.stringify(PAIRED_VERIFY_SCRIPT)} produce ` +
     `--candidate-root ${JSON.stringify(request.candidate_root)} ` +
     `--incumbent-root ${JSON.stringify(request.incumbent_root)} ` +
-    `--task-root ${JSON.stringify(request.task_root)}` + expectedArgs +
+    `--task-root ${JSON.stringify(request.task_root)} ` +
+    `--score-metric ${JSON.stringify(request.score_metric.id)}` + expectedArgs +
     ` --output ${JSON.stringify(request.task_receipt)} -- ${taskArgv}
 \`\`\``;
 };
@@ -2506,7 +2575,10 @@ const producePairedTaskReceipt = async (request, runOpts) => {
       || receipt.canonical_input_sha256 !== canonicalSha256((() => {
         const copy = { ...receipt }; delete copy.canonical_input_sha256; return copy;
       })())
-      || !sameStrings(receipt.expected_routes, request.expected_routes)) {
+      || !sameStrings(receipt.expected_routes, request.expected_routes)
+      || !sameCanonical(receipt.score_metric, request.score_metric)
+      || receipt.metric_id !== request.score_metric.id
+      || receipt.inner !== request.score_metric.inner) {
     throw new Error('paired producer returned a stale, partial, or non-canonical task receipt');
   }
   return receipt;
@@ -2531,6 +2603,7 @@ const routeGateForCandidate = async (cand, runOpts) => {
       session_id: sessionId,
       expected_routes: expectedRoutes,
       target_routes: targetRoutes,
+      score_metric: SCORE_METRIC,
       gate_config: {
         ...ROUTE_GATE_CONFIG,
         ...(GATE_ROUTE_WEIGHTS ? { route_weights: GATE_ROUTE_WEIGHTS } : {}),
@@ -3585,6 +3658,7 @@ ${resolveScript}
             VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
             EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
             GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            SCORE_METRIC, SCORE_METRIC_ID,
             TARGET_ROUTES: Array.isArray(c.target_routes) ? c.target_routes : [],
             // Same gate means the same inputs (see TASK_DIR above). A stored patch from a wave
             // that ran phase2 carries a `.s`, and without this the warm-start arm would time the
@@ -4582,6 +4656,7 @@ worker_result.json structure as StructuredOutput.` +
           ASM_TUNER_MANIFEST, ASM_TUNER_MODE, ASM_TUNER_CACHE: asmTunerCache,
           TASK_DIR: KERNEL_PATH_ORIG,
           GPU_ID: d.gpu_id, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+          SCORE_METRIC, SCORE_METRIC_ID,
           TARGET_ROUTES: Array.isArray(d.target_routes) ? d.target_routes : [],
           // Sent on EVERY round, not only in phase2. Whether the verifier needs it is decided by
           // the PATCH -- an assembly patch can also arrive from a hash-validated journal recovery, or
@@ -4875,6 +4950,7 @@ worker_result.json structure as StructuredOutput.` +
         + `atomically write the exact structured result to ${EVAL_DIR}/round_${round}/integrate/integration_result.json.`, {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         GPU_ID: GPU_POOL, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        SCORE_METRIC, SCORE_METRIC_ID,
         CONFIG_SEARCH_HELPER, CONFIG_SEARCH_REGISTRY: configSearchRegistry,
         ASM_TUNER_MANIFEST, ASM_TUNER_MODE, ASM_TUNER_CACHE: asmTunerCache,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),

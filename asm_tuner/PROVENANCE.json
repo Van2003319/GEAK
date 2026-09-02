@@ -11,13 +11,14 @@
     "materialization": "task-local explicit shared artifact loaded by versioned route table",
     "measurement_protocol": "geak.measurement-protocol/v2",
     "registry_bridge": "kernel_workflow/scripts/config_search.py (geak.config-search/v2)",
-    "runtime_table": "geak.runtime_table/v2; complete-suite atomic top-K publication",
-    "search": "dependent domains + route-static pruning + protocol-v2 per-route successive halving",
+    "runtime_table": "geak.runtime_table/v2; complete-suite atomic top-K publication bound to score metric",
+    "score_metric": "geak.score-metric/v1 sustained_throughput inner=16; protocol-bound hash",
+    "search": "dependent domains + route-static pruning + score-metric-bound protocol-v2 per-route successive halving",
     "task_manifests": [
       "manifests/tasks/dense_bf16_gemm_fused.json",
       "manifests/tasks/dense_fp8_gemm_rowwise.json"
     ],
-    "verifier": "independent workspace source rebuild, ISA/symbol/load and task/source/protocol/oracle/artifact hashes"
+    "verifier": "independent workspace source rebuild, ISA/symbol/load and task/source/protocol/score-metric/oracle/artifact hashes"
   },
   "extracted_algorithmic_sources": [
     {

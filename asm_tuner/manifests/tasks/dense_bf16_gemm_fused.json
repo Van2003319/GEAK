@@ -46,6 +46,15 @@
   },
   "route_manifest": "asm_tuner/manifests/routes/dense_bf16_gemm_fused.json",
   "schema": "geak.asm-task-contract/v1",
+  "score_metric": {
+    "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+    "id": "sustained_throughput",
+    "inner": 16,
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "schema": "geak.score-metric/v1",
+    "unit": "ms/call",
+    "version": 1
+  },
   "search_space_manifest": "asm_tuner/manifests/search_spaces/dense_bf16_gemm_fused_gfx942.json",
   "semantic_files": [
     "config.yaml",

@@ -1,8 +1,9 @@
 # Canonical asm_tuner integration
 
 `asm_tuner` is executable gfx942 infrastructure for the canonical BF16 and FP8 rowwise GEMM tasks.
-The task contracts bind `CASES`, input construction, correctness, measurement-protocol/v2, the
-frozen oracle, route data, and the generated search-space manifest into one task digest.
+The task contracts bind `CASES`, input construction, correctness, measurement-protocol/v2, a
+hashed `geak.score-metric/v1`, the frozen oracle, route data, and the generated search-space manifest
+into one task digest. The canonical BF16/FP8 manifests select `sustained_throughput` (`inner=16`).
 
 ## Generated bounded search
 
@@ -24,9 +25,12 @@ reuse are soft ordering signals only.
   8-kernel shard. BF16
   bootstraps `prefill_m2048_square`; FP8 bootstraps `prefill_m1024_down`.
 
-Every halving round uses the canonical protocol-v2 semantic-weight slots and paired arm ordering.
-Round receipts include artifact/ISA fingerprints and are reusable after interruption; compilation is
-content-addressed. A changed task, protocol, candidate set, binary, or ISA invalidates the cache.
+Every halving round uses the score metric from the task contract: for the fresh tasks this is
+`sustained_throughput`, continuous `inner=16` launch groups over canonical protocol-v2
+semantic-weight slots and paired arm ordering. Round receipts bind metric id/inner as well as
+artifact/ISA fingerprints and are reusable after interruption. A changed task, protocol, score
+metric, candidate set, binary, or ISA invalidates the cache. Ranking never falls back to the other
+metric.
 
 ## PGR2 and resource gates
 
@@ -45,8 +49,15 @@ inactive at `0` and `1`; GSU and StreamK remain unsupported at `1` and `0`. All 
 shards, then performs per-route successive halving under `gpu_lock.sh` and `gpu_fence_run.sh`.
 `materialize` installs immutable artifacts and publishes one complete `geak.runtime_table/v2` with a
 single atomic replace. Each measured route carries its ranked top-K; the task-local bridge validates
-contiguous ranks and task/protocol bindings and dispatches rank zero. Shapes outside the eleven-case
-suite use the declared canonical fallback.
+contiguous ranks and task/protocol/score-metric bindings and dispatches rank zero. Registry rows,
+release manifests, selections, runtime-table entries, dispatch receipts, and independent verification
+all carry the same score object. Shapes outside the eleven-case suite use the declared canonical
+fallback.
+
+The committed oracle files still describe the earlier latency bake and are deliberately incompatible
+with these task contracts. Before `search-asm`, run each task's full-suite `oracle-bakeoff
+--score-metric sustained_throughput --confirm-oracle-bakeoff` under the GPU lock/fence and commit the
+reviewed manifests. Do not edit `selection_metric` by hand.
 
 `verify-materialization --rebuild` independently copies the task, validates every ranked artifact,
 rebuilds source, compares ISA/symbols, and loads the libraries. The bounded BF16/FP8 correctness and

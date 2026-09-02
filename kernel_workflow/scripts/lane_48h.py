@@ -39,6 +39,16 @@ CONFIG_REGISTRY_SCHEMA = "geak.config-search/v1"
 RUNTIME_TABLE_SCHEMA = "geak.runtime_table/v1"
 BASE_COMMIT = "a9876692ed1039b85b2fdafb8c1751548fd13da1"
 EXPECTED_PROTOCOL_HASH = "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec"
+EXPECTED_SCORE_METRIC_ID = "sustained_throughput"
+EXPECTED_SCORE_METRIC = {
+    "schema": "geak.score-metric/v1",
+    "version": 1,
+    "id": EXPECTED_SCORE_METRIC_ID,
+    "unit": "ms/call",
+    "inner": 16,
+    "protocol_hash": EXPECTED_PROTOCOL_HASH,
+    "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+}
 HOURS_DEFAULT = 48.0
 STOP_NEW_ROUND_MARGIN_S = 30 * 60
 SLURM_MARGIN_S = 15 * 60
@@ -51,7 +61,7 @@ PROTOCOL_ENV_VARS = (
     "GEAK_ROTATION_TARGET_MB", "GEAK_ASSUMED_CACHE_MB", "GEAK_MAX_WEIGHT_SLOTS",
     "GEAK_OUTPUT_RING_SIZE", "HARNESS_TIMING_PRIME_MB", "GEAK_SYNTHETIC_EVICT_MB",
     "HARNESS_CACHE_FLUSH_MB", "GEAK_LATENCY_CYCLES", "GEAK_THROUGHPUT_INNER",
-    "GEAK_THROUGHPUT_CYCLES",
+    "GEAK_THROUGHPUT_CYCLES", "GEAK_SCORE_METRIC",
 )
 
 EXIT_CONFIG = 20
@@ -80,6 +90,7 @@ PERMANENT_LOG_RE = re.compile(
     r"manifest is not frozen|oracle route manifest is not trusted|protocol hash differs|"
     r"protocol_hash.*mismatch|unknown argument|is not launchable|path.*outside.*root|"
     r"registry schema mismatch|unsupported runtime table|route inventory.*mismatch|"
+    r"score.?metric.*(?:mismatch|differ|drift)|metric.*drift|"
     r"config payload missing|artifact hash mismatch",
     re.IGNORECASE,
 )
@@ -364,6 +375,8 @@ def build_spec(*, lane: str, root: Path, state_dir: Path, expected_commit: str,
         raise LaunchError("lane template base commit differs from the launcher contract")
     if meta_template.get("expected_protocol_hash") != EXPECTED_PROTOCOL_HASH:
         raise LaunchError("lane template protocol hash differs from the launcher contract")
+    if meta_template.get("expected_score_metric") != EXPECTED_SCORE_METRIC:
+        raise LaunchError("lane template score metric differs from the launcher contract")
     if meta_template.get("stop_new_round_margin_seconds") != STOP_NEW_ROUND_MARGIN_S:
         raise LaunchError("lane template drain margin must be exactly 30 minutes")
     gpu_csv = ",".join(map(str, gpu_ids))
@@ -549,6 +562,11 @@ def check_oracle_manifest(spec: LaunchSpec) -> dict[str, tuple[int, int, int]]:
     if doc.get("selection_state") != "baked":
         raise LaunchError("oracle manifest selection_state must be 'baked'",
                           code=EXIT_MANIFEST, category="manifest")
+    if (doc.get("selection_metric") != EXPECTED_SCORE_METRIC_ID
+            or doc.get("score_metric") != EXPECTED_SCORE_METRIC):
+        raise LaunchError(
+            "oracle score metric is not the fresh-lane sustained_throughput contract; "
+            "re-run oracle-bakeoff", code=EXIT_MANIFEST, category="manifest")
     protocol = doc.get("protocol")
     if not isinstance(protocol, dict):
         raise LaunchError("oracle manifest does not embed its measurement protocol",
@@ -608,9 +626,11 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
     if not isinstance(contract, dict):
         raise LaunchError("tuner registry has no launch_contract binding task/protocol/table",
                           code=EXIT_TUNER, category="tuner")
-    if contract.get("task") != spec.task or contract.get("protocol_hash") != EXPECTED_PROTOCOL_HASH:
-        raise LaunchError("tuner registry task/protocol binding mismatch", code=EXIT_TUNER,
-                          category="tuner")
+    if (contract.get("task") != spec.task
+            or contract.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
+            or contract.get("score_metric") != EXPECTED_SCORE_METRIC):
+        raise LaunchError("tuner registry task/protocol/score-metric binding mismatch",
+                          code=EXIT_TUNER, category="tuner")
     bound_table = Path(str(contract.get("runtime_table") or ""))
     if not bound_table.is_absolute():
         bound_table = spec.tuner_registry.parent / bound_table
@@ -659,7 +679,9 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
         receipt = row.get("build_receipt") or {}
         if not isinstance(identifier, str) or not identifier or not isinstance(receipt, dict):
             continue
-        if receipt.get("task") != spec.task or receipt.get("protocol_hash") != EXPECTED_PROTOCOL_HASH:
+        if (receipt.get("task") != spec.task
+                or receipt.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
+                or receipt.get("score_metric") != EXPECTED_SCORE_METRIC):
             continue
         require_regular(artifact, code=EXIT_TUNER, category="tuner")
         if sha256_file(artifact) != row.get("artifact_sha256"):
@@ -677,8 +699,10 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
     except (TypeError, ValueError) as exc:
         raise LaunchError("tuner runtime-table revision is malformed", code=EXIT_TUNER,
                           category="tuner") from exc
-    if table.get("protocol_hash") != EXPECTED_PROTOCOL_HASH or published_revision < 1:
-        raise LaunchError("tuner runtime table is unpublished or bound to a stale protocol",
+    if (table.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
+            or table.get("score_metric") != EXPECTED_SCORE_METRIC
+            or published_revision < 1):
+        raise LaunchError("tuner runtime table is unpublished or bound to a stale protocol/metric",
                           code=EXIT_TUNER, category="tuner")
     table_routes = table.get("routes")
     if not isinstance(table_routes, dict) or set(table_routes) != set(routes):
@@ -704,9 +728,12 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
             raise LaunchError(f"tuner runtime-table route {name} is incomplete", code=EXIT_TUNER,
                               category="tuner")
         if any(not isinstance(entry, dict) or entry.get("config_id") not in ready
+               or entry.get("metric_id") != EXPECTED_SCORE_METRIC_ID
+               or entry.get("metric_inner") != EXPECTED_SCORE_METRIC["inner"]
                for entry in entries):
-            raise LaunchError(f"tuner runtime-table route {name} references an unready config",
-                              code=EXIT_TUNER, category="tuner")
+            raise LaunchError(
+                f"tuner runtime-table route {name} references an unready or metric-drifted config",
+                code=EXIT_TUNER, category="tuner")
 
 
 def gpu_sample(gpu: int, sysfs_root: Path = Path("/sys/class/drm")) -> dict[str, Any]:
@@ -958,6 +985,7 @@ def perform_preflight(spec: LaunchSpec, *, resume: bool, settings_path: Path | N
             "slurm_end_utc": utc(spec.deadline.slurm_end_epoch),
             "routes": len(routes),
             "protocol_hash": EXPECTED_PROTOCOL_HASH,
+            "score_metric": dict(EXPECTED_SCORE_METRIC),
             "tuner_registry": str(spec.tuner_registry),
             "tuner_table": str(spec.tuner_table),
             "storage": storage,

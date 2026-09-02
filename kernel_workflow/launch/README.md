@@ -1,10 +1,12 @@
 # Fresh BF16/FP8 48-hour launch
 
 `kernel_workflow/scripts/lane_48h.py` is the only supported entry point for these
-fresh lanes. It resolves committed templates against an explicit worktree root,
-then refuses before creating state unless every launch dependency is pinned and
-healthy. `preflight` and `supervise --dry-run` are read-only: they do not create
-the state directory, deadline, rendered config, lock file, or log.
+fresh lanes. It resolves committed templates against an explicit worktree root.
+Both fresh templates explicitly select the hashed `geak.score-metric/v1`
+`sustained_throughput` contract (`inner=16`); omission is reserved for legacy latency lane files.
+The launcher refuses before creating state unless the oracle, tuner registry, runtime table, and
+workflow all bind that same metric and protocol. `preflight` and `supervise --dry-run` are read-only:
+they do not create the state directory, deadline, rendered config, lock file, or log.
 
 ## Required inputs
 
@@ -17,13 +19,13 @@ the sets disjoint, and commit it before calculating `COMMIT`.
 
 The tuner integration must publish, per task, a tracked config-search registry
 and tracked runtime table. The registry must have a `launch_contract` binding
-`task`, protocol hash, root-relative table path, table SHA-256, and the tracked
-workflow consumer plus its SHA-256. Both workflow entry points must accept the
+`task`, protocol hash, full score-metric object, root-relative table path, table SHA-256, and the
+tracked workflow consumer plus its SHA-256. Both workflow entry points must accept the
 exact `tuner_registry` and `tuner_table` arguments; the bound consumer must
 actually reference those arguments, `asm_tuner`, and `runtime_table`. Ready
-entries must bind the same task/protocol in `build_receipt` and point to
-hash-valid artifacts. The table must contain all 11 routes and reference only
-those ready config IDs.
+entries must bind the same task/protocol/score metric in `build_receipt` and point to
+hash-valid artifacts. The table must contain all 11 routes, bind metric id/inner on every entry, and
+reference only those ready config IDs.
 This branch intentionally does not fabricate empty tuner files: preflight stays
 red until the real bridge has published them.
 
@@ -55,18 +57,22 @@ cd "$ROOT"
 GEAK_GPU_ALLOWED=2 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 2 \
   bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
   python3 "$ROOT/examples/tasks/dense_bf16_gemm_fused/scripts/task_runner.py" \
-    oracle-bakeoff --confirm-oracle-bakeoff
+    oracle-bakeoff --score-metric sustained_throughput --confirm-oracle-bakeoff
 GEAK_GPU_ALLOWED=5 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 5 \
   bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
   python3 "$ROOT/examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py" \
-    oracle-bakeoff --confirm-oracle-bakeoff
+    oracle-bakeoff --score-metric sustained_throughput --confirm-oracle-bakeoff
 '
 ```
 
 Review and commit both frozen 11-route manifests (and any required provenance
-updates). Their embedded protocol and all hash fields must equal
-`6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec`.
-Do not bake in one worktree and launch from another.
+updates). Their embedded protocol hash must equal
+`6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec`; their `score_metric` must be
+`sustained_throughput`, `inner=16`, hash
+`c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8`.
+Do not relabel the committed latency measurements, and do not bake in one worktree and launch from
+another. Rebuild/search, register, and materialize tuner releases only after this re-bake so stale
+latency-ranked artifacts cannot enter the throughput lane.
 
 ## Read-only preflight / dry run
 
@@ -89,8 +95,9 @@ python3 "$ROOT/kernel_workflow/scripts/lane_48h.py" preflight \
 
 `supervise --dry-run` runs the identical checks and is also write-free. A green
 report covers root/commit/cleanliness, fresh state, cold-start setting, manifests,
-tuner contracts, authenticated API, credential permissions, user/HOME, lane and
-GPU flocks, GPU idle/VRAM, disk/inodes, SLURM coverage, and non-overlapping GPUs.
+tuner task/protocol/score-metric contracts, authenticated API, credential permissions, user/HOME,
+lane and GPU flocks, GPU idle/VRAM, disk/inodes, SLURM coverage, and non-overlapping GPUs. A metric
+drift is a permanent manifest/configuration failure, not a retryable lane fault.
 
 ## Formal start (operator action only)
 

@@ -155,6 +155,30 @@ def _entry_valid(entry: Mapping[str, Any]) -> tuple[bool, str]:
         return False, "config_id_missing"
     if not isinstance(entry.get("config"), dict) or not entry["config"]:
         return False, "config_payload_missing"
+    config = entry["config"]
+    if config.get("kind") == "asm_tuner_release":
+        metric = config.get("score_metric")
+        metric_payload = dict(metric) if isinstance(metric, dict) else {}
+        metric_digest = metric_payload.pop("hash", None)
+        try:
+            computed_metric_digest = hashlib.sha256(json.dumps(
+                metric_payload, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False).encode("utf-8")).hexdigest()
+        except (TypeError, ValueError):
+            return False, "score_metric_binding_missing_or_stale"
+        if (not isinstance(metric, dict) or metric.get("schema") != "geak.score-metric/v1"
+                or isinstance(metric.get("version"), bool) or metric.get("version") != 1
+                or metric.get("id") not in ("single_call_latency", "sustained_throughput")
+                or isinstance(metric.get("inner"), bool) or not isinstance(metric.get("inner"), int)
+                or (metric.get("id") == "single_call_latency" and metric.get("inner") != 1)
+                or (metric.get("id") == "sustained_throughput" and metric.get("inner") <= 1)
+                or metric.get("unit") != "ms/call"
+                or metric.get("protocol_hash") != config.get("protocol_hash")
+                or metric_digest != computed_metric_digest
+                or metric.get("hash") != config.get("score_metric_hash")
+                or metric.get("id") != config.get("score_metric_id")
+                or metric.get("inner") != config.get("score_metric_inner")):
+            return False, "score_metric_binding_missing_or_stale"
     artifact = Path(str(entry.get("artifact") or ""))
     if not _regular(artifact):
         return False, "artifact_missing"
@@ -416,6 +440,10 @@ def create_asm_config(
         "adapter": contract.adapter_name,
         "task_digest": contract.task_digest,
         "protocol_hash": contract.protocol["hash"],
+        "score_metric": dict(contract.score_metric),
+        "score_metric_hash": contract.score_metric["hash"],
+        "score_metric_id": contract.score_metric_id,
+        "score_metric_inner": contract.score_metric_inner,
         "oracle_manifest_sha256": contract.oracle_sha256,
         "release_id": release["release_id"],
         "variant": chosen,
@@ -432,6 +460,7 @@ def create_asm_config(
             "cache_hit": built["cache_hit"],
             "task_digest": contract.task_digest,
             "protocol_hash": contract.protocol["hash"],
+            "score_metric": dict(contract.score_metric),
         },
         artifact_set=_release_artifact_set(release),
     )
@@ -457,6 +486,10 @@ def search_asm_configs(
         "kind": "asm_tuner_release", "task": contract.task,
         "adapter": contract.adapter_name, "task_digest": contract.task_digest,
         "protocol_hash": contract.protocol["hash"],
+        "score_metric": dict(contract.score_metric),
+        "score_metric_hash": contract.score_metric["hash"],
+        "score_metric_id": contract.score_metric_id,
+        "score_metric_inner": contract.score_metric_inner,
         "oracle_manifest_sha256": contract.oracle_sha256,
         "release_id": release["release_id"], "variant": release["variant"],
         "config_ids": sorted({
@@ -488,6 +521,12 @@ def materialize_asm_config(
     if (entry.get("config") or {}).get("kind") != "asm_tuner_release":
         raise ConfigSearchError("selected registry row is not an asm_tuner release")
     contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
+    config = entry.get("config") or {}
+    if (config.get("score_metric") != dict(contract.score_metric)
+            or config.get("score_metric_hash") != contract.score_metric["hash"]
+            or config.get("score_metric_id") != contract.score_metric_id
+            or config.get("score_metric_inner") != contract.score_metric_inner):
+        raise ConfigSearchError("selected registry row score metric differs from task contract")
     release = load_release(Path(entry["artifact"]), contract)
     receipt = materialize_release(
         contract, release, workspace=Path(workspace), registry_id=str(entry["id"]),
@@ -518,8 +557,9 @@ def prepare_asm_config(
     selection_file = Path(workspace) / "asm_tuner_selection.json"
     if not requested and selection_file.is_file():
         incumbent = _read_object(selection_file)
-        if (incumbent.get("task") == contract.task and
-                incumbent.get("task_digest") == contract.task_digest):
+        if (incumbent.get("task") == contract.task
+                and incumbent.get("task_digest") == contract.task_digest
+                and incumbent.get("score_metric") == dict(contract.score_metric)):
             requested = str(incumbent.get("registry_id") or "").strip()
 
     query = {
@@ -528,6 +568,10 @@ def prepare_asm_config(
         "adapter": contract.adapter_name,
         "task_digest": contract.task_digest,
         "protocol_hash": contract.protocol["hash"],
+        "score_metric": dict(contract.score_metric),
+        "score_metric_hash": contract.score_metric["hash"],
+        "score_metric_id": contract.score_metric_id,
+        "score_metric_inner": contract.score_metric_inner,
         "oracle_manifest_sha256": contract.oracle_sha256,
     }
     found = search_configs(registry_value, query=query)

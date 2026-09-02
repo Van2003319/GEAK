@@ -85,6 +85,10 @@ class TemplateContractTest(unittest.TestCase):
             self.assertEqual("@ROOT@", doc["kernel_path"].split("/examples/")[0])
             self.assertEqual("off", doc["warm_start"])
             self.assertEqual("off", doc["_require"]["warm_start"])
+            self.assertEqual("sustained_throughput", doc["score_metric"])
+            self.assertEqual("sustained_throughput", doc["_require"]["score_metric"])
+            self.assertEqual(L.EXPECTED_SCORE_METRIC,
+                             doc["_launch"]["expected_score_metric"])
             self.assertEqual("@STOP_NEW_ROUND_EPOCH@", doc["deadline_epoch"])
             self.assertIn("sol_shapes", doc)
 
@@ -149,6 +153,8 @@ class ManifestContractTest(unittest.TestCase):
                 "task": "dense_bf16_gemm_fused",
                 "frozen": True,
                 "selection_state": "baked",
+                "selection_metric": L.EXPECTED_SCORE_METRIC_ID,
+                "score_metric": L.EXPECTED_SCORE_METRIC,
                 "protocol_hash": "stale",
                 "protocol": {"schema": "geak.measurement-protocol/v2", "hash": "stale"},
                 "routes": manifest_routes,
@@ -197,11 +203,14 @@ class TunerContractTest(unittest.TestCase):
                 "schema": L.RUNTIME_TABLE_SCHEMA,
                 "task": "dense_bf16_gemm_fused",
                 "protocol_hash": L.EXPECTED_PROTOCOL_HASH,
+                "score_metric": L.EXPECTED_SCORE_METRIC,
                 "revision": 1,
                 "routes": {
                     name: {
                         "shape": {"name": name, "m": shape[0], "n": shape[1], "k": shape[2]},
-                        "entries": [{"config_id": "cfg-ready"}],
+                        "entries": [{"config_id": "cfg-ready",
+                                     "metric_id": L.EXPECTED_SCORE_METRIC_ID,
+                                     "metric_inner": L.EXPECTED_SCORE_METRIC["inner"]}],
                     }
                     for name, shape in routes.items()
                 },
@@ -213,6 +222,7 @@ class TunerContractTest(unittest.TestCase):
                 "launch_contract": {
                     "task": "dense_bf16_gemm_fused",
                     "protocol_hash": L.EXPECTED_PROTOCOL_HASH,
+                    "score_metric": L.EXPECTED_SCORE_METRIC,
                     "runtime_table": str(table),
                     "runtime_table_sha256": L.sha256_file(table),
                     "workflow_consumer": {
@@ -226,6 +236,7 @@ class TunerContractTest(unittest.TestCase):
                     "build_receipt": {
                         "task": "dense_bf16_gemm_fused",
                         "protocol_hash": L.EXPECTED_PROTOCOL_HASH,
+                        "score_metric": L.EXPECTED_SCORE_METRIC,
                     },
                 }],
             }
@@ -241,6 +252,14 @@ class TunerContractTest(unittest.TestCase):
                 meta={}, config_sha256="0" * 64,
             )
             L.check_tuner(spec, routes)
+            registry_doc["launch_contract"]["score_metric"] = {
+                **L.EXPECTED_SCORE_METRIC, "id": "single_call_latency"}
+            registry.write_text(json.dumps(registry_doc))
+            with self.assertRaises(L.LaunchError) as metric_caught:
+                L.check_tuner(spec, routes)
+            self.assertIn("score-metric", str(metric_caught.exception))
+            registry_doc["launch_contract"]["score_metric"] = L.EXPECTED_SCORE_METRIC
+            registry.write_text(json.dumps(registry_doc))
             table_doc["protocol_hash"] = "stale"
             table.write_text(json.dumps(table_doc))
             registry_doc["launch_contract"]["runtime_table_sha256"] = L.sha256_file(table)

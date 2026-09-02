@@ -118,11 +118,13 @@ def create_release(
         "schema": RELEASE_SCHEMA,
         "task": contract.identity(),
         "protocol": dict(contract.protocol),
+        "score_metric": dict(contract.score_metric),
         "oracle": {
             "manifest_sha256": contract.oracle_sha256,
             "protocol_hash": contract.oracle.get("protocol_hash"),
             "compatible": contract.oracle_compatible,
             "selection_metric": contract.oracle.get("selection_metric"),
+            "score_metric": contract.oracle.get("score_metric"),
         },
         "fallback": {
             "kind": "canonical",
@@ -187,6 +189,7 @@ def _search_round_cache(
     candidate_ids: Sequence[str],
     fingerprints: Mapping[str, Mapping[str, str]],
     protocol_hash: str,
+    score_metric: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
@@ -199,7 +202,8 @@ def _search_round_cache(
             int(value.get("round", -1)) != round_index or
             value.get("candidate_ids") != list(candidate_ids) or
             value.get("fingerprints") != dict(fingerprints) or
-            value.get("protocol_hash") != protocol_hash):
+            value.get("protocol_hash") != protocol_hash or
+            value.get("score_metric") != dict(score_metric)):
         return None
     receipt = value.get("receipt") or {}
     medians = receipt.get("medians_ms") or {}
@@ -211,7 +215,9 @@ def _search_round_cache(
             return None
     except (TypeError, ValueError):
         return None
-    if receipt.get("protocol_hash") != protocol_hash:
+    if (receipt.get("protocol_hash") != protocol_hash
+            or receipt.get("metric_id") != score_metric.get("id")
+            or (receipt.get("metric") or {}).get("inner") != score_metric.get("inner")):
         return None
     invariants = receipt.get("invariants") or {}
     if not invariants or not all(bool(value) for value in invariants.values()):
@@ -323,6 +329,7 @@ def search_release(
     search_identity = {
         "task_digest": contract.task_digest,
         "protocol_hash": contract.protocol["hash"],
+        "score_metric": dict(contract.score_metric),
         "policy": policy,
         "bootstrap": bool(bootstrap),
         "routes": {name: [config.config_id for config in plans[name].candidates]
@@ -403,6 +410,7 @@ def search_release(
                     candidate_ids=candidate_ids,
                     fingerprints=fingerprints,
                     protocol_hash=str(contract.protocol["hash"]),
+                    score_metric=contract.score_metric,
                 )
                 round_cache_hit = cached is not None
                 if cached is None:
@@ -432,10 +440,14 @@ def search_release(
                         for config_id in candidate_ids
                     }
                     receipt = harness.measure_paired_arms(
-                        arms, slots, protocol=dict(contract.protocol), metric="single_call_latency",
+                        arms, slots, protocol=dict(contract.protocol),
+                        metric=contract.score_metric_id,
                     )
-                    if receipt.get("protocol_hash") != contract.protocol["hash"]:
-                        raise IntegrationError("measurement receipt protocol hash drift")
+                    if (receipt.get("protocol_hash") != contract.protocol["hash"]
+                            or receipt.get("metric_id") != contract.score_metric_id
+                            or (receipt.get("metric") or {}).get("inner")
+                            != contract.score_metric_inner):
+                        raise IntegrationError("measurement receipt protocol/score metric drift")
                     invariants = receipt.get("invariants") or {}
                     if not invariants or not all(invariants.values()):
                         raise IntegrationError("protocol-v2 receipt invariant failed for %s" % case_id)
@@ -449,6 +461,7 @@ def search_release(
                         "candidate_ids": candidate_ids,
                         "fingerprints": fingerprints,
                         "protocol_hash": contract.protocol["hash"],
+                        "score_metric": dict(contract.score_metric),
                         "correctness": correctness,
                         "receipt": receipt,
                     }
@@ -480,7 +493,7 @@ def search_release(
                     "receipt_sha256": sha256_file(round_path),
                     "cache_hit": round_cache_hit,
                     "protocol_samples_per_arm": len(slots) * int(
-                        contract.protocol["metrics"]["single_call_latency"]["cycles"]
+                        contract.protocol["metrics"][contract.score_metric_id]["cycles"]
                     ),
                 }
                 rounds.append(round_row)
@@ -518,11 +531,13 @@ def search_release(
         "schema": RELEASE_SCHEMA,
         "task": contract.identity(),
         "protocol": dict(contract.protocol),
+        "score_metric": dict(contract.score_metric),
         "oracle": {
             "manifest_sha256": contract.oracle_sha256,
             "protocol_hash": contract.oracle.get("protocol_hash"),
             "compatible": contract.oracle_compatible,
             "selection_metric": contract.oracle.get("selection_metric"),
+            "score_metric": contract.oracle.get("score_metric"),
         },
         "fallback": {"kind": "canonical", "reason": "shape absent from canonical CASES"},
         "search_space_manifest": str(contract.value["search_space_manifest"]),
@@ -556,6 +571,7 @@ def search_release(
         "search_id": search_id,
         "task_digest": contract.task_digest,
         "protocol_hash": contract.protocol["hash"],
+        "score_metric": dict(contract.score_metric),
         "oracle_manifest_sha256": contract.oracle_sha256,
         "measured_routes": sorted(wanted),
         "route_selection": route_selection,
@@ -587,11 +603,15 @@ def validate_release(value: Mapping[str, Any], contract: TaskContract) -> None:
     if (protocol.get("schema") != "geak.measurement-protocol/v2" or
             protocol.get("hash") != contract.protocol.get("hash")):
         raise IntegrationError("release protocol differs from canonical protocol v2")
+    if value.get("score_metric") != dict(contract.score_metric):
+        raise IntegrationError("release score metric differs from canonical task contract")
     oracle = value.get("oracle") or {}
     if (oracle.get("compatible") is not True or
             oracle.get("manifest_sha256") != contract.oracle_sha256 or
-            oracle.get("protocol_hash") != contract.protocol.get("hash")):
-        raise IntegrationError("release oracle manifest is stale or mismatched")
+            oracle.get("protocol_hash") != contract.protocol.get("hash") or
+            oracle.get("selection_metric") != contract.score_metric_id or
+            oracle.get("score_metric") != dict(contract.score_metric)):
+        raise IntegrationError("release oracle manifest is stale or metric-mismatched")
     routes = value.get("route_selection")
     route_names = {route.name for route in contract.routes}
     if not isinstance(routes, dict) or set(routes) != route_names:
@@ -743,6 +763,7 @@ def materialize_release(
             "name": local_contract.protocol["name"],
             "hash": local_contract.protocol["hash"],
         },
+        "score_metric": dict(local_contract.score_metric),
         "oracle": value["oracle"],
         "fallback": value["fallback"],
         "search": dict(value.get("search") or {}),
@@ -761,6 +782,9 @@ def materialize_release(
         "release_id": value["release_id"],
         "registry_id": registry_id,
         "protocol_hash": local_contract.protocol["hash"],
+        "score_metric": dict(local_contract.score_metric),
+        "score_metric_id": local_contract.score_metric_id,
+        "score_metric_inner": local_contract.score_metric_inner,
         "oracle_manifest_sha256": local_contract.oracle_sha256,
         "table_digest": table["table_digest"],
         "config_ids": sorted({
@@ -778,6 +802,9 @@ def materialize_release(
         "table_digest": table["table_digest"],
         "task_digest": local_contract.task_digest,
         "protocol_hash": local_contract.protocol["hash"],
+        "score_metric": dict(local_contract.score_metric),
+        "score_metric_id": local_contract.score_metric_id,
+        "score_metric_inner": local_contract.score_metric_inner,
         "oracle_manifest_sha256": local_contract.oracle_sha256,
         "route_count": len(local_contract.routes),
         "config_ids": selection["config_ids"],
@@ -846,6 +873,8 @@ def _verify_workspace(
         raise IntegrationError("runtime table CASES/input/correctness binding hashes differ")
     if table["protocol"]["hash"] != local.protocol["hash"]:
         raise IntegrationError("runtime table protocol hash differs")
+    if table.get("score_metric") != dict(local.score_metric):
+        raise IntegrationError("runtime table score metric differs")
     oracle = table.get("oracle") or {}
     if oracle.get("manifest_sha256") != local.oracle_sha256 or oracle.get("compatible") is not True:
         raise IntegrationError("runtime table oracle manifest differs")
@@ -890,6 +919,7 @@ def _verify_workspace(
         "task": local.task,
         "task_digest": local.task_digest,
         "protocol_hash": local.protocol["hash"],
+        "score_metric": dict(local.score_metric),
         "oracle_manifest_sha256": local.oracle_sha256,
         "table_digest": table["table_digest"],
         "release_id": table["release_id"],
@@ -998,6 +1028,7 @@ def smoke_materialization(
             "shape": {"m": case["M"], "n": case["N"], "k": case["K"]},
             "task_digest": contract.task_digest,
             "protocol_hash": contract.protocol["hash"],
+            "score_metric": dict(contract.score_metric),
             "table_digest": verification["table_digest"],
             "config_id": dispatch["config_id"],
             "symbol": dispatch["symbol"],
