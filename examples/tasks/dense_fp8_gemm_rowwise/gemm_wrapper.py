@@ -1,6 +1,6 @@
 import torch
 
-from kernel_loader import gemm_ext
+from geak_tuner_runtime import dispatch as _tuner_dispatch
 
 FP8 = torch.float8_e4m3fnuz
 
@@ -35,4 +35,9 @@ def dense_fp8_gemm(a: torch.Tensor, b: torch.Tensor,
                    a_scale: torch.Tensor, b_scale: torch.Tensor) -> torch.Tensor:
     """Compute (A*a_scale) @ (B*b_scale).T in bf16 with the editable HIP candidate."""
     _check_inputs(a, b, a_scale, b_scale)
+    tuned = _tuner_dispatch("fp8_rowwise", (a, b, a_scale, b_scale))
+    if tuned is not None:
+        return tuned
+    # Shapes outside the exact suite use the declared canonical fallback.
+    from kernel_loader import gemm_ext
     return gemm_ext.dense_fp8_gemm(a, b, a_scale, b_scale)

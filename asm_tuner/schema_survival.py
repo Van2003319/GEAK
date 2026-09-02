@@ -8,7 +8,7 @@ from .schema import DType, KernelConfig
 
 
 # Minimal records copied from ROCm 7.2 hipBLASLt gfx942 msgpack databases on
-# 2026-09-02. They are survival fixtures, never members of default_seed() and
+# 2026-09-02. They are schema-survival records, never executable kernels and never members of default_seed() and
 # never read from /opt/rocm or an experiment directory at runtime.
 _RAW: Dict[str, Dict[str, Any]] = {
     "bf16_solution205554": {
@@ -96,7 +96,7 @@ def normalize_vendor_record(record: Mapping[str, Any], dtype: DType) -> KernelCo
         "store": {"mode": "vector"},
         "lds_scratch_bytes": scratch,
         "provenance": {
-            "kind": "vendor_survival_fixture",
+            "kind": "vendor_schema_survival",
             "solution_id": int(record["solution_id"]),
             "database_basename": record["database"],
             "raw_macro_tile": list(raw_mt[:2]),
@@ -113,7 +113,7 @@ def get_fixture(name: str) -> KernelConfig:
 
 
 def default_seed(dtype: DType) -> KernelConfig:
-    """A conservative correctness seed; deliberately not a vendor fixture."""
+    """A conservative correctness seed; deliberately not a schema-survival record."""
 
     if dtype is DType.BF16:
         mfma, bk, width = [16, 16, 16, 1], 32, 8

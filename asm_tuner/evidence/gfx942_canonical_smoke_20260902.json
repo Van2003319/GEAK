@@ -1,0 +1,352 @@
+{
+  "date_utc": "2026-09-02",
+  "dispatch_changed": {
+    "bf16": true,
+    "fp8": true
+  },
+  "environment": {
+    "arch": "gfx942:sramecc+:xnack-",
+    "container": "yxh_geak",
+    "device": "",
+    "hip": "7.2.53211",
+    "host": "tw046",
+    "python": "3.12.13",
+    "torch": "2.11.0+gitd0c8b1f"
+  },
+  "lane_prepare_bootstrap": {
+    "bf16": {
+      "config_ids": [
+        "530289ad76eb74d4579f",
+        "a14258bc3bcfd6622596"
+      ],
+      "operations": [
+        {
+          "operation": "search"
+        },
+        {
+          "mode": "protocol_v2_paired_bootstrap",
+          "operation": "create"
+        },
+        {
+          "operation": "select"
+        },
+        {
+          "operation": "materialize"
+        }
+      ],
+      "prepared_before_engineer": true,
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "route_count": 11,
+      "status": "pass",
+      "task_digest": "4627dcf803c92e12075b7689fccf90290c1717ec6ea7a32a1035352f08dbc083"
+    },
+    "fp8": {
+      "config_ids": [
+        "85c8914408c3ef3917eb",
+        "e731d178e1fc5b1353c9"
+      ],
+      "operations": [
+        {
+          "operation": "search"
+        },
+        {
+          "mode": "protocol_v2_paired_bootstrap",
+          "operation": "create"
+        },
+        {
+          "operation": "select"
+        },
+        {
+          "operation": "materialize"
+        }
+      ],
+      "prepared_before_engineer": true,
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "route_count": 11,
+      "status": "pass",
+      "task_digest": "ce26f886dee68d4ed7457681687111a125b14b26bdb877c5dbcaf727335775c9"
+    }
+  },
+  "oracle_bakeoff": {
+    "bf16": "pass",
+    "fp8": "pass",
+    "gpu_lock_and_fence": true,
+    "selection_metric": "single_call_latency"
+  },
+  "protocol": {
+    "hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "schema": "geak.measurement-protocol/v2"
+  },
+  "protocol_v2_paired_search": {
+    "bf16": {
+      "case": "decode_m2_square",
+      "gpu_lock": {
+        "mode": "external",
+        "path": "/tmp/team_gpu_locks/gpu_2.lock"
+      },
+      "invariants": {
+        "all_arms_in_every_block": true,
+        "arm_positions_balanced_per_slot": true,
+        "same_slot_within_block": true,
+        "semantic_weight_working_set_exceeds_cache": true,
+        "single_call_latency_inner_is_one": true,
+        "sustained_throughput_inner_gt_one": true
+      },
+      "materialized_dispatch": {
+        "config_id": "a14258bc3bcfd6622596",
+        "fallback": {
+          "kind": "canonical",
+          "reason": "shape absent from canonical CASES"
+        },
+        "status": "pass",
+        "suite_atomic": true,
+        "suite_routes": 11,
+        "symbol": "geak_launch_bf16_a14258bc3bcfd6622596",
+        "table_digest": "4e74ace22a4dd3ea9ce629181fc6b026e14a1305429f08dd910db4587adf31f8"
+      },
+      "medians_ms": {
+        "530289ad76eb74d4579f": 0.18636000156402588,
+        "a14258bc3bcfd6622596": 0.1573999971151352
+      },
+      "policy_scan": {
+        "advisory": 0,
+        "elf": 2,
+        "files": 13,
+        "findings": 0,
+        "inspected": 20,
+        "passed": true,
+        "schema": "geak.candidate-policy/v2",
+        "unreadable": 0
+      },
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "receipt_sha256": "6d80fec531ba1ea1e18f71c5c88977c9b3da42d133f601c66999c981fcd0d550",
+      "release_id": "150c8176f7de2709517b3c1ee2f1ea7f2b94ad8e5e86974d8f3e588c771c5f2c",
+      "route_selection": {
+        "decode_m16_square": "530289ad76eb74d4579f",
+        "decode_m2_square": "a14258bc3bcfd6622596",
+        "decode_m32_down": "530289ad76eb74d4579f",
+        "decode_m64_square": "530289ad76eb74d4579f",
+        "decode_m8_up": "530289ad76eb74d4579f",
+        "decode_m96_up": "530289ad76eb74d4579f",
+        "prefill_m1024_down": "530289ad76eb74d4579f",
+        "prefill_m128_square": "530289ad76eb74d4579f",
+        "prefill_m2048_square": "530289ad76eb74d4579f",
+        "prefill_m256_down": "530289ad76eb74d4579f",
+        "prefill_m512_up": "530289ad76eb74d4579f"
+      },
+      "status": "pass",
+      "variants": [
+        "seed",
+        "geometry_m32_n64_w1x4"
+      ],
+      "winner": "a14258bc3bcfd6622596"
+    },
+    "fp8": {
+      "case": "decode_m2_square",
+      "gpu_lock": {
+        "mode": "external",
+        "path": "/tmp/team_gpu_locks/gpu_3.lock"
+      },
+      "invariants": {
+        "all_arms_in_every_block": true,
+        "arm_positions_balanced_per_slot": true,
+        "same_slot_within_block": true,
+        "semantic_weight_working_set_exceeds_cache": true,
+        "single_call_latency_inner_is_one": true,
+        "sustained_throughput_inner_gt_one": true
+      },
+      "materialized_dispatch": {
+        "config_id": "e731d178e1fc5b1353c9",
+        "fallback": {
+          "kind": "canonical",
+          "reason": "shape absent from canonical CASES"
+        },
+        "status": "pass",
+        "suite_atomic": true,
+        "suite_routes": 11,
+        "symbol": "geak_launch_fp8_rowwise_e731d178e1fc5b1353c9",
+        "table_digest": "fc3827a2d3c679f1368c2a64507d270481542bfa042ba837f3cdda2d20511b9d"
+      },
+      "medians_ms": {
+        "85c8914408c3ef3917eb": 0.09813999757170677,
+        "e731d178e1fc5b1353c9": 0.08117999881505966
+      },
+      "policy_scan": {
+        "advisory": 0,
+        "elf": 2,
+        "files": 13,
+        "findings": 0,
+        "inspected": 20,
+        "passed": true,
+        "schema": "geak.candidate-policy/v2",
+        "unreadable": 0
+      },
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "receipt_sha256": "9e37ad1d29d3993f30eeb0a9d7ed52a37153481d07f22fdd3c670d64e4a467d9",
+      "release_id": "11a86cf95dc80095b255d45f131186577eb98fd20bc028c78a981abf6af0b1c5",
+      "route_selection": {
+        "decode_m16_square": "85c8914408c3ef3917eb",
+        "decode_m2_square": "e731d178e1fc5b1353c9",
+        "decode_m32_down": "85c8914408c3ef3917eb",
+        "decode_m64_square": "85c8914408c3ef3917eb",
+        "decode_m8_up": "85c8914408c3ef3917eb",
+        "decode_m96_up": "85c8914408c3ef3917eb",
+        "prefill_m1024_down": "85c8914408c3ef3917eb",
+        "prefill_m128_square": "85c8914408c3ef3917eb",
+        "prefill_m2048_square": "85c8914408c3ef3917eb",
+        "prefill_m256_down": "85c8914408c3ef3917eb",
+        "prefill_m512_up": "85c8914408c3ef3917eb"
+      },
+      "status": "pass",
+      "variants": [
+        "seed",
+        "geometry_m32_n64_w1x4"
+      ],
+      "winner": "e731d178e1fc5b1353c9"
+    }
+  },
+  "schema": "geak.asm-canonical-gpu-smoke/v1",
+  "scope": "One canonical decode route per seed/non-default geometry; no large tuning run.",
+  "smokes": {
+    "bf16_geometry": {
+      "adapter": "bf16",
+      "artifact_sha256": "74dbc95b44fb9ca7b841653ab48b64abd7019743ba0c7fbeff6bee052322434e",
+      "case": "decode_m2_square",
+      "config_id": "a14258bc3bcfd6622596",
+      "correctness": "pass",
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from the exact canonical CASES table"
+      },
+      "gpu_lock_and_fence": true,
+      "independent_rebuild": {
+        "isa_hash": "6b97d4aee2c332dd2a2fe82470929f5c7fa67e51e5370e267bd4876136e46a72",
+        "source_sha256": "4e5be02c31889007cf22a6d7f04fc1cabb83df35102bb2d147626c9ba41e1488",
+        "status": "pass",
+        "symbol": "geak_launch_bf16_a14258bc3bcfd6622596"
+      },
+      "max_relative_error": 0.005646297242492437,
+      "oracle_manifest_sha256": "f5a3aedf91f2f82b087fe66db18cec3f68c08b50a4b0f438c89c6e1e0f5da5be",
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "registry_id": "cfg-0692d20bc580e16e6c7b",
+      "shape": {
+        "K": 4096,
+        "M": 2,
+        "N": 4096
+      },
+      "source_sha256": "4e5be02c31889007cf22a6d7f04fc1cabb83df35102bb2d147626c9ba41e1488",
+      "suite_atomic": true,
+      "suite_routes": 11,
+      "symbol": "geak_launch_bf16_a14258bc3bcfd6622596",
+      "table_digest": "024954802e5ca26bb8b46557f603453a6168c65162dbb3ab244d2c9a9cd93e8d",
+      "task": "dense_bf16_gemm_fused",
+      "task_digest": "4627dcf803c92e12075b7689fccf90290c1717ec6ea7a32a1035352f08dbc083",
+      "variant": "geometry_m32_n64_w1x4"
+    },
+    "bf16_seed": {
+      "adapter": "bf16",
+      "artifact_sha256": "d2c08ecbb17d8b4503217b941faa5c9691d70bdb2d58030446e4e5f9d6281f22",
+      "case": "decode_m2_square",
+      "config_id": "530289ad76eb74d4579f",
+      "correctness": "pass",
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from the exact canonical CASES table"
+      },
+      "gpu_lock_and_fence": true,
+      "independent_rebuild": {
+        "isa_hash": "23a808cd7f3464cadbb3d4492759398df19bc0892fc10ae82197d438dcb0f759",
+        "source_sha256": "027f390dc0b78242377f15f86ae6f0363458bfe999be5886619cc3839dac6c51",
+        "status": "pass",
+        "symbol": "geak_launch_bf16_530289ad76eb74d4579f"
+      },
+      "max_relative_error": 0.005646297242492437,
+      "oracle_manifest_sha256": "f5a3aedf91f2f82b087fe66db18cec3f68c08b50a4b0f438c89c6e1e0f5da5be",
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "registry_id": "cfg-d40a34036c55c2d64e7d",
+      "shape": {
+        "K": 4096,
+        "M": 2,
+        "N": 4096
+      },
+      "source_sha256": "027f390dc0b78242377f15f86ae6f0363458bfe999be5886619cc3839dac6c51",
+      "suite_atomic": true,
+      "suite_routes": 11,
+      "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+      "table_digest": "985a10bf370d0946e0a9b248c768c896881399c390016f4b9f3a3dafd175882f",
+      "task": "dense_bf16_gemm_fused",
+      "task_digest": "4627dcf803c92e12075b7689fccf90290c1717ec6ea7a32a1035352f08dbc083",
+      "variant": "seed"
+    },
+    "fp8_geometry": {
+      "adapter": "fp8_rowwise",
+      "artifact_sha256": "7bcc1970fa54e7adc0621079a4e5dee90af00d37fd9113fd9fae3c9ef812cca6",
+      "case": "decode_m2_square",
+      "config_id": "e731d178e1fc5b1353c9",
+      "correctness": "pass",
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from the exact canonical CASES table"
+      },
+      "gpu_lock_and_fence": true,
+      "independent_rebuild": {
+        "isa_hash": "6cc9c794b4875f95b04d4b6469704e5db50e0869676dcfa71e980aab37ff7b5f",
+        "source_sha256": "72b849780119e8202fd6e1c2263e1fcaa840ff4383bb12d831fe7a1a6f54ee17",
+        "status": "pass",
+        "symbol": "geak_launch_fp8_rowwise_e731d178e1fc5b1353c9"
+      },
+      "max_relative_error": 0.0075537278316915035,
+      "oracle_manifest_sha256": "32532d58ca7c715029a747963faf572b428bc25df71603de7cb2798a706c6689",
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "registry_id": "cfg-15d84ea691c87fc55bd1",
+      "shape": {
+        "K": 4096,
+        "M": 2,
+        "N": 4096
+      },
+      "source_sha256": "72b849780119e8202fd6e1c2263e1fcaa840ff4383bb12d831fe7a1a6f54ee17",
+      "suite_atomic": true,
+      "suite_routes": 11,
+      "symbol": "geak_launch_fp8_rowwise_e731d178e1fc5b1353c9",
+      "table_digest": "8136139a41e782a378147aa19c72f4bc40583907645302d6b2cd8d30103bc293",
+      "task": "dense_fp8_gemm_rowwise",
+      "task_digest": "ce26f886dee68d4ed7457681687111a125b14b26bdb877c5dbcaf727335775c9",
+      "variant": "geometry_m32_n64_w1x4"
+    },
+    "fp8_seed": {
+      "adapter": "fp8_rowwise",
+      "artifact_sha256": "bc6d21276adcea2fafd4b322096a477503a2a798208d3872573c470baccea7dc",
+      "case": "decode_m2_square",
+      "config_id": "85c8914408c3ef3917eb",
+      "correctness": "pass",
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from the exact canonical CASES table"
+      },
+      "gpu_lock_and_fence": true,
+      "independent_rebuild": {
+        "isa_hash": "3f1a3cdcd980e6e9d9589a4fce19a328dbedb6dddc4310cefe83f2fdd1590ea6",
+        "source_sha256": "a12565498a06b6cf3c37b6b4424d9307fa85b3c66477a723274ec17e5e68526b",
+        "status": "pass",
+        "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb"
+      },
+      "max_relative_error": 0.0075537278316915035,
+      "oracle_manifest_sha256": "32532d58ca7c715029a747963faf572b428bc25df71603de7cb2798a706c6689",
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "registry_id": "cfg-7c6433e52fd62c9ec463",
+      "shape": {
+        "K": 4096,
+        "M": 2,
+        "N": 4096
+      },
+      "source_sha256": "a12565498a06b6cf3c37b6b4424d9307fa85b3c66477a723274ec17e5e68526b",
+      "suite_atomic": true,
+      "suite_routes": 11,
+      "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+      "table_digest": "15c62e1f492794553791b2914a123bacdade0f6955d5b4e5f908ba33821d9d64",
+      "task": "dense_fp8_gemm_rowwise",
+      "task_digest": "ce26f886dee68d4ed7457681687111a125b14b26bdb877c5dbcaf727335775c9",
+      "variant": "seed"
+    }
+  }
+}

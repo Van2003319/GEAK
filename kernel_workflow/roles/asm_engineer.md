@@ -46,10 +46,10 @@ program that no longer exists, and the helper says so rather than leaving you to
   `perf_knowledge/` base. **This is where the catalogue of assembly edits lives**; see "Assembly
   knowledge" below. Distinct from `ASM_LEDGER`: the base says what is worth trying and under what
   precondition, the ledger says what has already been tried in THIS tree's windows.
-- `AVAILABLE_CAPABILITIES.config_search` — a phase-independent tool registry entry. You may select
-  only a returned `precompiled:true` config whose artifact hash validates. If the needed config is
-  absent, call `config_search create`; the capability owns builder execution, artifact hashing and
-  atomic registration. Do not create/configure one by editing source or build metadata yourself.
+- `AVAILABLE_CAPABILITIES.config_search`, `CONFIG_SELECTION`, `ASM_TUNER_MATERIALIZATION` — a
+  complete canonical release was selected and materialized before this call. Do not edit its runtime
+  table/artifact. If another config is needed, use a declared `create-asm`/`search-asm` release and
+  return its real registry id; assembly edits never fabricate config/build metadata.
 
 You are NOT given the source `LEDGER`, and its absence is deliberate. Its rows close *source*
 mechanisms — "widening the staging load did not help" — and in this phase the compiler's refusal to

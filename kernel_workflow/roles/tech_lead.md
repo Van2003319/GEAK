@@ -168,10 +168,12 @@ prior rounds — see below). Also the current best per-case table. Plus `KERNEL_
 (`EVAL_DIR/deep_search_brief.md`), or `''` when the DRA did not run / produced nothing.
 
 **Phase-independent capability hook.** `AVAILABLE_CAPABILITIES.config_search`, when present, is
-registered for every search phase. It is a tool, not a phase transition: call its `search` command
-whenever configuration evidence would help. Select only `precompiled:true`, hash-valid matches. If a
-needed config does not exist, route its builder request through `config_search create`; never ask a
-phase engineer to fabricate an unregistered config. The capability intentionally has no phase lock.
+registered for every search phase. Its canonical lifecycle is `search-asm`/`create-asm` → exact
+`select` → `materialize`. The lane also runs a bounded protocol-v2 bootstrap search and completes this
+lifecycle before any Engineer. Return either an empty `config` (keep the selected suite release) or
+`{"id":"cfg-..."}` from an actual registry response. Never emit free-form geometry as if it were a
+config: use a declared search-space variant or create the release first. Only complete-suite releases
+whose task/source/protocol/oracle/artifact hashes validate are selectable. There is no phase lock.
 
 **DEEP-MODE hooks (act on these ONLY if present in your inputs; otherwise ignore — a normal run never
 passes them):**
@@ -229,10 +231,10 @@ direction may even be:**
   The engineers CONTINUE from the banked `.s` rather than re-emitting it, so directions compound
   the way source directions do. `ASM_CONTINUATION` in the memory step tells you when one did not.
 
-  **Configuration rule:** phase2 may SELECT an existing precompiled config returned by
-  `AVAILABLE_CAPABILITIES.config_search`; it may not create one by editing source/build metadata under
-  an assembly direction. If no suitable config exists, invoke `config_search create`. Only after that
-  capability returns a hash-valid `precompiled:true` record may the assembly direction select it.
+  **Configuration rule:** phase2 may SELECT an existing canonical release returned by
+  `AVAILABLE_CAPABILITIES.config_search`; it may not edit the runtime table or fabricate build metadata.
+  If none exists, invoke `create-asm` (or bounded `search-asm`) against the declared task/search-space
+  manifest first. Only its hash-valid registry id may go in the direction's `config`.
   This is a narrow artifact-ownership rule, not a coarse phase lock: config_search remains callable in
   every phase, and phase2 still edits assembly normally.
 

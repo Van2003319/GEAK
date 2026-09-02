@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import math
 import os
@@ -86,6 +87,7 @@ class SuccessiveHalvingRunner:
         warmups: int = 2,
         device: int = 0,
         measure: Optional[MeasureFn] = None,
+        release: Optional[Mapping[str, Any]] = None,
     ) -> None:
         if not budgets or any(value < 1 for value in budgets):
             raise ValueError("budgets must contain positive sample counts")
@@ -102,6 +104,9 @@ class SuccessiveHalvingRunner:
         self.warmups = warmups
         self.device = device
         self._measure = measure
+        self.release = dict(release or {})
+        if not self.release:
+            raise ValueError("runner requires canonical task/protocol release metadata")
 
     def _default_measure(self, candidate: Candidate, route: Route, samples: int, check: bool) -> Measurement:
         return self.adapter.measure(
@@ -134,6 +139,7 @@ class SuccessiveHalvingRunner:
             "environment": {"python": platform.python_version(), "platform": platform.platform()},
         }
 
+        selected_by_route: Dict[str, Sequence[Mapping[str, Any]]] = {}
         for route in routes:
             survivors = list(candidates)
             last_scores: Dict[str, Tuple[float, Path]] = {}
@@ -188,20 +194,33 @@ class SuccessiveHalvingRunner:
             selected = []
             for candidate in sorted(survivors, key=lambda item: (last_scores[item.config_id][0], item.config_id))[:self.top_k]:
                 median_us, receipt_path = last_scores[candidate.config_id]
+                compile_manifest = json.loads(candidate.manifest_path.read_text(encoding="utf-8"))
+                source_path = candidate.manifest_path.parent / compile_manifest["artifacts"]["source"]
                 selected.append({
                     "config_id": candidate.config_id,
                     "median_us": median_us,
                     "isa_hash": candidate.kernel["isa_hash"],
                     "kernel": candidate.kernel["kernel"],
+                    "symbol": self.adapter.launch_name(candidate.config),
                     "cache_key": candidate.cache_key,
                     "compile_manifest": str(candidate.manifest_path),
-                    "shared_object": str(candidate.shared_object),
+                    "artifact": str(candidate.shared_object),
+                    "artifact_sha256": hashlib.sha256(candidate.shared_object.read_bytes()).hexdigest(),
+                    "source": str(source_path),
+                    "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
                     "receipt": str(receipt_path),
                     "config": candidate.config.to_dict(include_derived=True),
                 })
-            table = self.runtime_table.update_route(route, selected, run_id, receipt_root)
-            summary["routes"][route.name] = {"rounds": rounds, "selected": selected, "table_revision": table["revision"]}
+            selected_by_route[route.name] = selected
+            summary["routes"][route.name] = {"rounds": rounds, "selected": selected}
 
+        table = self.runtime_table.publish_suite(
+            routes, selected_by_route, run_id=run_id, receipts_root=receipt_root,
+            release=self.release,
+        )
+        for route in routes:
+            summary["routes"][route.name]["table_revision"] = table["revision"]
+        summary["table_digest"] = table["table_digest"]
         summary["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         summary_path = self.output_dir / "runs" / (run_id + ".json")
         _atomic_json(summary_path, summary)

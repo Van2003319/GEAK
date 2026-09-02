@@ -21,8 +21,27 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-SCHEMA = "geak.config-search/v1"
-SCHEMA_VERSION = 1
+# The helper is executed by absolute path from task workspaces, where the repo
+# root is not otherwise importable.  The bridge must load the exact asm_tuner
+# implementation beside this workflow, never an ambient wheel.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from asm_tuner.contracts import ContractError, TaskContract
+from asm_tuner.integration import (
+    IntegrationError,
+    create_release,
+    load_release,
+    materialize_release,
+    search_release,
+    smoke_materialization,
+    verify_materialization,
+)
+
+SCHEMA = "geak.config-search/v2"
+LEGACY_SCHEMA = "geak.config-search/v1"
+SCHEMA_VERSION = 2
 
 
 class ConfigSearchError(RuntimeError):
@@ -99,7 +118,15 @@ def _load_registry(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"schema": SCHEMA, "schema_version": SCHEMA_VERSION, "configs": []}
     value = _read_object(path)
-    if value.get("schema") != SCHEMA or value.get("schema_version") != SCHEMA_VERSION:
+    # v1 rows were single-artifact generic configs.  Their bytes remain valid,
+    # but they are not canonical asm releases and can never satisfy a v2 task
+    # query.  Migrate the envelope explicitly instead of silently discarding them.
+    if value.get("schema") == LEGACY_SCHEMA and value.get("schema_version") == 1:
+        value = dict(value)
+        value["schema"] = SCHEMA
+        value["schema_version"] = SCHEMA_VERSION
+        value["migrated_from"] = LEGACY_SCHEMA
+    elif value.get("schema") != SCHEMA or value.get("schema_version") != SCHEMA_VERSION:
         raise ConfigSearchError("registry schema mismatch; refusing to reinterpret entries")
     if not isinstance(value.get("configs"), list):
         raise ConfigSearchError("registry configs must be an array")
@@ -134,6 +161,17 @@ def _entry_valid(entry: Mapping[str, Any]) -> tuple[bool, str]:
     actual = _sha256(artifact)
     if actual != entry.get("artifact_sha256"):
         return False, f"artifact_hash_mismatch(expected={entry.get('artifact_sha256')},actual={actual})"
+    artifact_set = entry.get("artifact_set") or []
+    if not isinstance(artifact_set, list):
+        return False, "artifact_set_not_array"
+    for row in artifact_set:
+        path = Path(str((row or {}).get("path") or ""))
+        expected = str((row or {}).get("sha256") or "")
+        if not _regular(path):
+            return False, "nested_artifact_missing(%s)" % path
+        nested_actual = _sha256(path)
+        if nested_actual != expected:
+            return False, "nested_artifact_hash_mismatch(%s)" % path
     return True, ""
 
 
@@ -144,6 +182,7 @@ def register_config(
     artifact: os.PathLike[str] | str,
     mechanism: str = "",
     build_receipt: Mapping[str, Any] | None = None,
+    artifact_set: Sequence[Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     registry_path = _registry_path(registry_value)
     artifact_path = Path(artifact).resolve()
@@ -162,6 +201,7 @@ def register_config(
         "status": "ready",
         "created_unix_ns": now,
         "build_receipt": dict(build_receipt or {}),
+        "artifact_set": [dict(row) for row in (artifact_set or [])],
     }
     with _locked(registry_path):
         registry = _load_registry(registry_path)
@@ -338,6 +378,234 @@ def create_config(
     return result
 
 
+def _require_lane_gpu_boundary() -> None:
+    if os.environ.get("GEAK_GPU_LOCK_HELD") != "1":
+        raise ConfigSearchError("asm_tuner lane preparation requires gpu_lock.sh")
+    if os.environ.get("GEAK_GPU_FENCE_HELD") != "1":
+        raise ConfigSearchError("asm_tuner lane preparation requires gpu_fence_run.sh")
+
+
+def _release_artifact_set(release: Mapping[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for artifact in release.get("artifacts") or []:
+        for key, hash_key in (("artifact", "artifact_sha256"),
+                              ("source", "source_sha256"),
+                              ("compile_manifest", "compile_manifest_sha256")):
+            rows.append({"kind": key, "path": str(artifact[key]),
+                         "sha256": str(artifact[hash_key])})
+    return rows
+
+
+def create_asm_config(
+    registry_value: os.PathLike[str] | str,
+    *,
+    task_manifest: os.PathLike[str] | str,
+    cache: os.PathLike[str] | str,
+    variant: str = "",
+    require_gpu_boundary: bool = True,
+) -> dict[str, Any]:
+    if require_gpu_boundary:
+        _require_lane_gpu_boundary()
+    contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
+    chosen = variant or str(contract.search_space["default_variant"])
+    built = create_release(contract, cache_root=Path(cache), variant=chosen)
+    release = built["release"]
+    registry_config = {
+        "kind": "asm_tuner_release",
+        "task": contract.task,
+        "adapter": contract.adapter_name,
+        "task_digest": contract.task_digest,
+        "protocol_hash": contract.protocol["hash"],
+        "oracle_manifest_sha256": contract.oracle_sha256,
+        "release_id": release["release_id"],
+        "variant": chosen,
+        "config_ids": sorted(set(release["route_selection"].values())),
+        "priority": 100 if chosen == contract.search_space["default_variant"] else 200,
+    }
+    result = register_config(
+        registry_value,
+        config=registry_config,
+        artifact=built["manifest"],
+        mechanism="canonical asm_tuner compile/materialize",
+        build_receipt={
+            "kind": "asm_tuner_release",
+            "cache_hit": built["cache_hit"],
+            "task_digest": contract.task_digest,
+            "protocol_hash": contract.protocol["hash"],
+        },
+        artifact_set=_release_artifact_set(release),
+    )
+    result["release_manifest"] = built["manifest"]
+    result["release_id"] = release["release_id"]
+    return result
+
+
+def search_asm_configs(
+    registry_value: os.PathLike[str] | str,
+    *, task_manifest: os.PathLike[str] | str, cache: os.PathLike[str] | str,
+    output: os.PathLike[str] | str, variants: Sequence[str], cases: Sequence[str],
+) -> dict[str, Any]:
+    _require_lane_gpu_boundary()
+    contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
+    searched = search_release(
+        contract, cache_root=Path(cache), output_dir=Path(output),
+        variants=variants, case_ids=cases or None,
+    )
+    release = searched["release"]
+    registry_config = {
+        "kind": "asm_tuner_release", "task": contract.task,
+        "adapter": contract.adapter_name, "task_digest": contract.task_digest,
+        "protocol_hash": contract.protocol["hash"],
+        "oracle_manifest_sha256": contract.oracle_sha256,
+        "release_id": release["release_id"], "variant": release["variant"],
+        "config_ids": sorted(set(release["route_selection"].values())),
+        "priority": 0,
+    }
+    registered = register_config(
+        registry_value, config=registry_config, artifact=searched["manifest"],
+        mechanism="canonical protocol-v2 paired search",
+        build_receipt=searched["summary"], artifact_set=_release_artifact_set(release),
+    )
+    registered["search"] = searched["summary"]
+    return registered
+
+
+def materialize_asm_config(
+    registry_value: os.PathLike[str] | str,
+    *,
+    config_id: str,
+    task_manifest: os.PathLike[str] | str,
+    workspace: os.PathLike[str] | str,
+) -> dict[str, Any]:
+    selected = select_config(registry_value, config_id=config_id)
+    if not selected.get("ok"):
+        return selected
+    entry = selected["config"]
+    if (entry.get("config") or {}).get("kind") != "asm_tuner_release":
+        raise ConfigSearchError("selected registry row is not an asm_tuner release")
+    contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
+    release = load_release(Path(entry["artifact"]), contract)
+    receipt = materialize_release(
+        contract, release, workspace=Path(workspace), registry_id=str(entry["id"]),
+    )
+    return {
+        "ok": True,
+        "schema": SCHEMA,
+        "phase_independent": True,
+        "selection_contract": "precompiled-hash-valid-canonical-suite-only",
+        "config": dict(entry),
+        "materialization": receipt,
+    }
+
+
+def prepare_asm_config(
+    registry_value: os.PathLike[str] | str,
+    *,
+    task_manifest: os.PathLike[str] | str,
+    workspace: os.PathLike[str] | str,
+    cache: os.PathLike[str] | str,
+    config_id: str = "",
+) -> dict[str, Any]:
+    """Deterministic search -> create(if absent) -> select -> materialize barrier."""
+    _require_lane_gpu_boundary()
+    contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
+    operations: list[dict[str, Any]] = []
+    requested = config_id.strip()
+    selection_file = Path(workspace) / "asm_tuner_selection.json"
+    if not requested and selection_file.is_file():
+        incumbent = _read_object(selection_file)
+        if (incumbent.get("task") == contract.task and
+                incumbent.get("task_digest") == contract.task_digest):
+            requested = str(incumbent.get("registry_id") or "").strip()
+
+    query = {
+        "kind": "asm_tuner_release",
+        "task": contract.task,
+        "adapter": contract.adapter_name,
+        "task_digest": contract.task_digest,
+        "protocol_hash": contract.protocol["hash"],
+        "oracle_manifest_sha256": contract.oracle_sha256,
+    }
+    found = search_configs(registry_value, query=query)
+    operations.append({"operation": "search", "matches": len(found["matches"]),
+                       "invalidated": found["invalidated"]})
+    matches = sorted(found["matches"], key=lambda row: (
+        int((row.get("config") or {}).get("priority", 1000000)), str(row.get("id") or "")))
+    if requested:
+        if not any(row.get("id") == requested for row in matches):
+            exact = select_config(registry_value, config_id=requested)
+            operations.append({"operation": "select_requested", "id": requested,
+                               "ok": bool(exact.get("ok")), "reason": exact.get("reason")})
+            if not exact.get("ok"):
+                return {"ok": False, "schema": SCHEMA, "phase_independent": True,
+                        "reason": "requested_config_not_viable", "operations": operations}
+        selected_id = requested
+    elif matches:
+        selected_id = str(matches[0]["id"])
+    else:
+        bootstrap = contract.search_space.get("bootstrap_search") or {}
+        variants = list(bootstrap.get("variants") or [])
+        cases = list(bootstrap.get("cases") or [])
+        if variants:
+            created = search_asm_configs(
+                registry_value, task_manifest=task_manifest, cache=cache,
+                output=_registry_path(registry_value).parent / "bootstrap_search",
+                variants=variants, cases=cases,
+            )
+            create_mode = "protocol_v2_paired_bootstrap"
+        else:
+            created = create_asm_config(
+                registry_value, task_manifest=task_manifest, cache=cache,
+                require_gpu_boundary=False,
+            )
+            create_mode = "declared_seed"
+        operations.append({"operation": "create", "mode": create_mode,
+                           "ok": bool(created.get("ok")),
+                           "id": (created.get("config") or {}).get("id")})
+        if not created.get("ok"):
+            return {"ok": False, "schema": SCHEMA, "phase_independent": True,
+                    "reason": "create_failed", "operations": operations}
+        selected_id = str(created["config"]["id"])
+
+    selected = select_config(registry_value, config_id=selected_id)
+    operations.append({"operation": "select", "id": selected_id,
+                       "ok": bool(selected.get("ok")), "reason": selected.get("reason")})
+    if not selected.get("ok"):
+        return {"ok": False, "schema": SCHEMA, "phase_independent": True,
+                "reason": "selection_failed", "operations": operations}
+    materialized = materialize_asm_config(
+        registry_value, config_id=selected_id, task_manifest=task_manifest,
+        workspace=workspace,
+    )
+    operations.append({"operation": "materialize", "id": selected_id,
+                       "ok": bool(materialized.get("ok")),
+                       "table_digest": (materialized.get("materialization") or {}).get("table_digest")})
+    materialized["operations"] = operations
+    materialized["prepared_before_engineer"] = True
+    return materialized
+
+
+def verify_asm_materialization(
+    *, task_manifest: os.PathLike[str] | str, workspace: os.PathLike[str] | str,
+    rebuild: bool, cache: os.PathLike[str] | str | None = None,
+    independent: bool = True,
+) -> dict[str, Any]:
+    contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
+    return verify_materialization(
+        contract, workspace=Path(workspace), rebuild=rebuild,
+        cache_root=Path(cache) if cache else None, independent=independent,
+    )
+
+
+def smoke_asm_materialization(
+    *, task_manifest: os.PathLike[str] | str, workspace: os.PathLike[str] | str,
+    case_id: str = "",
+) -> dict[str, Any]:
+    _require_lane_gpu_boundary()
+    contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
+    return smoke_materialization(contract, workspace=Path(workspace), case_id=case_id)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -361,6 +629,45 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--request-file", required=True)
     create.add_argument("--workspace", required=True)
     create.add_argument("--timeout", type=int, default=1800)
+
+    search_asm = sub.add_parser("search-asm")
+    search_asm.add_argument("--registry", required=True)
+    search_asm.add_argument("--task-manifest", required=True)
+    search_asm.add_argument("--cache", required=True)
+    search_asm.add_argument("--output", required=True)
+    search_asm.add_argument("--variant", action="append", required=True)
+    search_asm.add_argument("--case", action="append", default=[])
+
+    create_asm = sub.add_parser("create-asm")
+    create_asm.add_argument("--registry", required=True)
+    create_asm.add_argument("--task-manifest", required=True)
+    create_asm.add_argument("--cache", required=True)
+    create_asm.add_argument("--variant", default="")
+
+    materialize = sub.add_parser("materialize")
+    materialize.add_argument("--registry", required=True)
+    materialize.add_argument("--id", required=True)
+    materialize.add_argument("--task-manifest", required=True)
+    materialize.add_argument("--workspace", required=True)
+
+    prepare = sub.add_parser("prepare")
+    prepare.add_argument("--registry", required=True)
+    prepare.add_argument("--task-manifest", required=True)
+    prepare.add_argument("--workspace", required=True)
+    prepare.add_argument("--cache", required=True)
+    prepare.add_argument("--id", default="")
+
+    verify = sub.add_parser("verify-materialization")
+    verify.add_argument("--task-manifest", required=True)
+    verify.add_argument("--workspace", required=True)
+    verify.add_argument("--cache", default="")
+    verify.add_argument("--rebuild", action="store_true")
+    verify.add_argument("--in-place", action="store_true")
+
+    smoke = sub.add_parser("smoke")
+    smoke.add_argument("--task-manifest", required=True)
+    smoke.add_argument("--workspace", required=True)
+    smoke.add_argument("--case", default="")
     return parser
 
 
@@ -376,12 +683,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             config = _read_object(Path(args.config_file))
             result = register_config(args.registry, config=config, artifact=args.artifact,
                                      mechanism=args.mechanism)
-        else:
+        elif args.command == "create":
             result = create_config(args.registry, request_file=args.request_file,
                                    workspace=args.workspace, timeout=args.timeout)
+        elif args.command == "search-asm":
+            result = search_asm_configs(
+                args.registry, task_manifest=args.task_manifest, cache=args.cache,
+                output=args.output, variants=args.variant, cases=args.case,
+            )
+        elif args.command == "create-asm":
+            result = create_asm_config(
+                args.registry, task_manifest=args.task_manifest, cache=args.cache,
+                variant=args.variant,
+            )
+        elif args.command == "materialize":
+            result = materialize_asm_config(
+                args.registry, config_id=args.id, task_manifest=args.task_manifest,
+                workspace=args.workspace,
+            )
+        elif args.command == "prepare":
+            result = prepare_asm_config(
+                args.registry, task_manifest=args.task_manifest,
+                workspace=args.workspace, cache=args.cache, config_id=args.id,
+            )
+        elif args.command == "verify-materialization":
+            result = verify_asm_materialization(
+                task_manifest=args.task_manifest, workspace=args.workspace,
+                rebuild=args.rebuild, cache=args.cache or None,
+                independent=not args.in_place,
+            )
+        else:
+            result = smoke_asm_materialization(
+                task_manifest=args.task_manifest, workspace=args.workspace,
+                case_id=args.case,
+            )
         sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
         return 0 if result.get("ok") else 2
-    except ConfigSearchError as exc:
+    except (ConfigSearchError, ContractError, IntegrationError, OSError, ValueError) as exc:
         sys.stdout.write(json.dumps({"ok": False, "schema": SCHEMA, "error": str(exc)},
                                     sort_keys=True, separators=(",", ":")) + "\n")
         return 2

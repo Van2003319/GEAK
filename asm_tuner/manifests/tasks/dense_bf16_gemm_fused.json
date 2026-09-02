@@ -1,0 +1,61 @@
+{
+  "adapter": "bf16",
+  "bindings": {
+    "cases": {
+      "path": "scripts/task_runner.py",
+      "symbol": "CASES"
+    },
+    "correctness": {
+      "path": "harness_lib.py",
+      "symbol": "correct"
+    },
+    "entrypoint": {
+      "path": "gemm_wrapper.py",
+      "symbol": "dense_bf16_gemm"
+    },
+    "input_builder": {
+      "path": "scripts/task_runner.py",
+      "symbol": "_make_inputs"
+    }
+  },
+  "materialization": {
+    "dispatch_module": "geak_tuner_runtime.py",
+    "fallback": "canonical",
+    "runtime_table": ".geak_tuner/runtime_table.json",
+    "selection_file": "asm_tuner_selection.json"
+  },
+  "oracle_manifest": "oracle_routes.v2.json",
+  "protocol": {
+    "arguments": {
+      "assumed_cache_mb": 256,
+      "latency_cycles": 6,
+      "max_slots": 32,
+      "output_ring_size": 3,
+      "rotation_target_mb": 384,
+      "seed": 20260902,
+      "synthetic_evict_mb": 512,
+      "throughput_cycles": 3,
+      "throughput_inner": 16,
+      "timing_prime_mb": 4,
+      "warmup_cycles": 1
+    },
+    "hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "name": "semantic_weight_rotating",
+    "path": "harness_lib.py",
+    "symbol": "measurement_protocol"
+  },
+  "route_manifest": "asm_tuner/manifests/routes/dense_bf16_gemm_fused.json",
+  "schema": "geak.asm-task-contract/v1",
+  "search_space_manifest": "asm_tuner/manifests/search_spaces/dense_bf16_gemm_fused_gfx942.json",
+  "semantic_files": [
+    "config.yaml",
+    "scripts/task_runner.py",
+    "harness_lib.py",
+    "oracle_wrapper.py",
+    "route_manifest.py",
+    "geak_tuner_runtime.py"
+  ],
+  "task": "dense_bf16_gemm_fused",
+  "task_root": "examples/tasks/dense_bf16_gemm_fused",
+  "tolerance": 0.02
+}

@@ -1,0 +1,100 @@
+{
+  "adapter": "bf16",
+  "case_source": "scripts/task_runner.py:CASES",
+  "fallback": {
+    "kind": "canonical",
+    "scope": "shapes outside this exact CASES suite"
+  },
+  "routes": [
+    {
+      "K": 4096,
+      "M": 2,
+      "N": 4096,
+      "id": "decode_m2_square",
+      "regime": "decode",
+      "seed": 101
+    },
+    {
+      "K": 4096,
+      "M": 8,
+      "N": 11008,
+      "id": "decode_m8_up",
+      "regime": "decode",
+      "seed": 102
+    },
+    {
+      "K": 4096,
+      "M": 16,
+      "N": 4096,
+      "id": "decode_m16_square",
+      "regime": "decode",
+      "seed": 108
+    },
+    {
+      "K": 11008,
+      "M": 32,
+      "N": 4096,
+      "id": "decode_m32_down",
+      "regime": "decode",
+      "seed": 103
+    },
+    {
+      "K": 8192,
+      "M": 64,
+      "N": 8192,
+      "id": "decode_m64_square",
+      "regime": "decode",
+      "seed": 104
+    },
+    {
+      "K": 4096,
+      "M": 96,
+      "N": 11008,
+      "id": "decode_m96_up",
+      "regime": "decode",
+      "seed": 109
+    },
+    {
+      "K": 4096,
+      "M": 128,
+      "N": 4096,
+      "id": "prefill_m128_square",
+      "regime": "prefill",
+      "seed": 105
+    },
+    {
+      "K": 11008,
+      "M": 256,
+      "N": 4096,
+      "id": "prefill_m256_down",
+      "regime": "prefill",
+      "seed": 110
+    },
+    {
+      "K": 4096,
+      "M": 512,
+      "N": 11008,
+      "id": "prefill_m512_up",
+      "regime": "prefill",
+      "seed": 106
+    },
+    {
+      "K": 11008,
+      "M": 1024,
+      "N": 4096,
+      "id": "prefill_m1024_down",
+      "regime": "prefill",
+      "seed": 107
+    },
+    {
+      "K": 4096,
+      "M": 2048,
+      "N": 4096,
+      "id": "prefill_m2048_square",
+      "regime": "prefill",
+      "seed": 111
+    }
+  ],
+  "schema": "geak.asm-route-manifest/v1",
+  "task": "dense_bf16_gemm_fused"
+}

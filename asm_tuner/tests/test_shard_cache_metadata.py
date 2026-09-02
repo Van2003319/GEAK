@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from asm_tuner.adapters import get_adapter
 from asm_tuner.compiler import ShardCompiler, shard_configs
 from asm_tuner.schema import DType
-from asm_tuner.vendor_fixtures import default_seed
+from asm_tuner.schema_survival import default_seed
 
 
 def _assembly(names, lds):

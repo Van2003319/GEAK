@@ -1,0 +1,187 @@
+{
+  "adapter": "bf16",
+  "arch": "gfx942",
+  "axis_status": {
+    "a_lds": {
+      "reason": "independent A slots and row pad",
+      "state": "active"
+    },
+    "b_lds": {
+      "reason": "independent B slots and row pad",
+      "state": "active"
+    },
+    "bk": {
+      "reason": "compile-time K stage",
+      "state": "active"
+    },
+    "bm": {
+      "reason": "compile-time macro-tile M",
+      "state": "active"
+    },
+    "bn": {
+      "reason": "compile-time macro-tile N",
+      "state": "active"
+    },
+    "gsu": {
+      "reason": "workspace reduction is not implemented; only GSU=1 is executable",
+      "state": "unsupported"
+    },
+    "pgr": {
+      "reason": "global-read prefetch distance is recorded but this MVP body is synchronous",
+      "state": "inactive"
+    },
+    "plr": {
+      "reason": "local-read prefetch distance is recorded but this MVP body is synchronous",
+      "state": "inactive"
+    },
+    "stagger": {
+      "reason": "rotates the semantic K-stage order",
+      "state": "active"
+    },
+    "store": {
+      "reason": "vector or non-temporal epilogue",
+      "state": "active"
+    },
+    "stream_k": {
+      "reason": "StreamK counters/workspace are not implemented; only StreamK=0 is executable",
+      "state": "unsupported"
+    },
+    "vector_widths": {
+      "reason": "typed global loads and output stores",
+      "state": "active"
+    },
+    "wave_grid": {
+      "reason": "compile-time 2-D wave ownership",
+      "state": "active"
+    },
+    "wgm": {
+      "reason": "bijective 1-D workgroup remapping",
+      "state": "active"
+    },
+    "xcc": {
+      "reason": "XCC-affine remapping is not implemented; do not search it",
+      "state": "inactive"
+    }
+  },
+  "bootstrap_search": {
+    "cases": [
+      "decode_m2_square"
+    ],
+    "purpose": "bounded protocol-v2 lane bootstrap; not a full-suite tune",
+    "variants": [
+      "seed",
+      "geometry_m32_n64_w1x4"
+    ]
+  },
+  "default_variant": "seed",
+  "fail_closed": {
+    "inactive_neutral_values": {
+      "pgr": 1,
+      "plr": 0,
+      "xcc": 1
+    },
+    "unsupported": {
+      "gsu": 1,
+      "stream_k": 0
+    }
+  },
+  "schema": "geak.asm-search-space/v1",
+  "search_policy": "declared points only; no Cartesian expansion of inactive axes",
+  "task": "dense_bf16_gemm_fused",
+  "variants": {
+    "geometry_m32_n64_w1x4": {
+      "a_lds": {
+        "buffers": 1,
+        "pad_elements": 0
+      },
+      "arch": "gfx942",
+      "b_lds": {
+        "buffers": 1,
+        "pad_elements": 0
+      },
+      "bk": 32,
+      "bm": 32,
+      "bn": 64,
+      "dtype": "bf16",
+      "gsu": 1,
+      "layout": "a_mk_b_nk",
+      "lds_scratch_bytes": 4096,
+      "mfma": {
+        "blocks": 1,
+        "k": 16,
+        "m": 16,
+        "n": 16
+      },
+      "pgr": 1,
+      "plr": 0,
+      "provenance": {
+        "kind": "canonical_nondefault_geometry",
+        "vendor_default": false
+      },
+      "schema": "geak.asm_config/v1",
+      "stagger": 0,
+      "store": {
+        "mode": "vector"
+      },
+      "stream_k": 0,
+      "vector_widths": {
+        "a": 8,
+        "b": 8,
+        "store": 4
+      },
+      "wave_grid": {
+        "m": 1,
+        "n": 4
+      },
+      "wgm": 1,
+      "xcc": 1
+    },
+    "seed": {
+      "a_lds": {
+        "buffers": 1,
+        "pad_elements": 0
+      },
+      "arch": "gfx942",
+      "b_lds": {
+        "buffers": 1,
+        "pad_elements": 0
+      },
+      "bk": 32,
+      "bm": 64,
+      "bn": 64,
+      "dtype": "bf16",
+      "gsu": 1,
+      "layout": "a_mk_b_nk",
+      "lds_scratch_bytes": 4096,
+      "mfma": {
+        "blocks": 1,
+        "k": 16,
+        "m": 16,
+        "n": 16
+      },
+      "pgr": 1,
+      "plr": 0,
+      "provenance": {
+        "kind": "mvp_correctness_seed",
+        "vendor_default": false
+      },
+      "schema": "geak.asm_config/v1",
+      "stagger": 0,
+      "store": {
+        "mode": "vector"
+      },
+      "stream_k": 0,
+      "vector_widths": {
+        "a": 8,
+        "b": 8,
+        "store": 4
+      },
+      "wave_grid": {
+        "m": 2,
+        "n": 2
+      },
+      "wgm": 1,
+      "xcc": 1
+    }
+  }
+}

@@ -2,7 +2,7 @@ import json
 
 from asm_tuner.cli import main
 from asm_tuner.schema import DType
-from asm_tuner.vendor_fixtures import default_seed
+from asm_tuner.schema_survival import default_seed
 
 
 def test_fixture_and_seed_commands_are_phase_independent(capsys):

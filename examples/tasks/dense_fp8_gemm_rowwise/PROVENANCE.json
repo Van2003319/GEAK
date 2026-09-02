@@ -1,32 +1,27 @@
 {
-  "task": "dense_fp8_gemm_rowwise",
-  "sibling_task": "examples/tasks/dense_bf16_gemm_fused",
-  "created": "2026-08-27",
-  "canonical_compile_source": "src/dense_fp8_gemm.hip",
-  "operator": {
-    "expression": "C[M,N] bf16 = (A[M,K] * a_scale[M]) @ (B[N,K] * b_scale[N])^T",
-    "input_dtype": "float8_e4m3fnuz",
-    "why_fnuz": "gfx942's native fp8 variant and the one v_mfma_f32_16x16x32_fp8_fp8 consumes. e4m3fn (the non-fnuz OCP variant) is a different encoding and would need conversion.",
-    "scale_layout": "per-token on A (M values), per-channel on B (N values), both fp32, both flat and contiguous",
-    "why_rowwise": "What fp8 serving actually ships, and the layout both baseline libraries expect. Per-tensor scaling was measured and rejected: these tensors are quantised per row, so one scalar cannot dequantise them (max rel err ~1.0)."
+  "asm_tuner_runtime": {
+    "dispatch_loader": "geak_tuner_runtime.py",
+    "dispatch_loader_sha256": "7d2ee37de34ff77c8093f9988e5e134698688255a615aa3229073e5102099cd8",
+    "fallback": "canonical for shapes outside the exact CASES suite",
+    "required_lane_verification": "materialize + independent rebuild/load/hash + task dispatch smoke",
+    "runtime_table": ".geak_tuner/runtime_table.json",
+    "selection_file": "asm_tuner_selection.json",
+    "task_manifest": "asm_tuner/manifests/tasks/dense_fp8_gemm_rowwise.json"
   },
   "build": {
+    "half_conversion_undef": "src/custom_fp8_gemm.hip must #undef __HIP_NO_HALF_OPERATORS__ and __HIP_NO_HALF_CONVERSIONS__ before including rocwmma. torch.utils.cpp_extension defines both, which deletes the __half conversions rocWMMA's vector registration needs (static_cast<hfloat16_t>(0.0f) in vector_impl.hpp), and rocWMMA then fails to compile even though this kernel touches no fp16.",
     "offload_arch": "pinned by kernel_loader.py to the detected device (gfx942 on this box)",
-    "why_pinned": "This image exports PYTORCH_ROCM_ARCH as a nine-target fan-out (gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151). rocWMMA's fp8 16x16x32 fragment fails an internal AccessT/StorageT size assertion for gfx950, so the build died on a target this box does not have -- and succeeded only when the caller happened to export a single arch. A multi-target value is treated as an image default and overridden; a single-target value is honoured. Also cuts every candidate rebuild from nine device compiles to one.",
-    "half_conversion_undef": "src/custom_fp8_gemm.hip must #undef __HIP_NO_HALF_OPERATORS__ and __HIP_NO_HALF_CONVERSIONS__ before including rocwmma. torch.utils.cpp_extension defines both, which deletes the __half conversions rocWMMA's vector registration needs (static_cast<hfloat16_t>(0.0f) in vector_impl.hpp), and rocWMMA then fails to compile even though this kernel touches no fp16."
+    "why_pinned": "This image exports PYTORCH_ROCM_ARCH as a nine-target fan-out (gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151). rocWMMA's fp8 16x16x32 fragment fails an internal AccessT/StorageT size assertion for gfx950, so the build died on a target this box does not have -- and succeeded only when the caller happened to export a single arch. A multi-target value is treated as an image default and overridden; a single-target value is honoured. Also cuts every candidate rebuild from nine device compiles to one."
   },
   "candidate_library_policy": {
-    "amd_high_performance_libraries": "forbidden",
-    "baseline_oracle_exception": true,
-    "oracle_paths_to_exempt": [
-      "oracle_wrapper.py"
-    ],
     "allowed_candidate_primitives": [
       "HIP runtime",
       "HIP language and compiler intrinsics",
       "AMD ISA intrinsics including MFMA",
       "rocWMMA header-only fragment abstraction"
     ],
+    "amd_high_performance_libraries": "forbidden",
+    "baseline_oracle_exception": true,
     "forbidden_candidate_dependencies": [
       "rocBLAS",
       "hipBLAS",
@@ -35,90 +30,34 @@
       "Composable Kernel",
       "MIOpen",
       "aiter"
-    ]
-  },
-  "frozen_harness": {
-    "path": "harness_lib.py",
-    "sha256": "60fddb6ae5aebd61fb98cd918b0d6a53a5e0a2c0b5d483c9d414854fa69e95f7",
-    "copied_from": "e2e_workflow/scripts/harness_lib.py",
-    "timer_contract": "measurement-protocol-v2",
-    "contains_write_probe": true,
-    "write_probe": "two_sentinel",
-    "protocol_schema": "geak.measurement-protocol/v2",
-    "default_protocol": "semantic_weight_rotating",
-    "repin_note_v2": "Re-pinned after synchronizing the common/task harnesses and adding hashed paired semantic-weight rotation, raw receipts, separate latency/throughput metrics, output rings, and GPU-lock handoff."
-  },
-  "immutable_oracle": {
-    "path": "oracle_wrapper.py",
-    "sha256": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
-    "source_sha256": {
-      "oracle_wrapper.py": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
-      "route_manifest.py": "97ffe7345d60ff6dcf725b0a79dd32fc0367ab192e20c0b28766599ce7d4daa2"
-    },
-    "kind": "per-shape best-of over two vendor libraries, choice frozen from measurement",
-    "routes": {
-      "aiter_ck": "aiter.gemm_a8w8_CK(XQ, WQ, x_scale, w_scale) -- Composable Kernel, used for M <= 16",
-      "hipblaslt_rowwise": "torch._scaled_mm(a, b.t(), scale_a, scale_b, out_dtype=bfloat16) -- routes to hipBLASLt rowwise-scaled solutions, used for M >= 32"
-    },
-    "why_not_one_library": "Neither wins across the suite. hipBLASLt-only would soften the baseline by 5% geomean; aiter-only by 30%. An easy baseline turns every later speedup into a lie.",
-    "why_frozen_not_raced": "A runtime race is not reproducible and would let the denominator drift under the candidate between rounds.",
-    "validated_by": "scripts/task_runner.py preflight + correctness check both routes against a library-free fp32 dequantisation reference; measured max rel err 0.0 on both."
-  },
-  "oracle_selection": {
-    "method": "Same eleven shapes as the bf16 suite. Identical quantised inputs to every candidate path. Warmup 10, 30 repeats, 256 MB cache flush before each sample, cuda-event device timing, median. Two full independent passes on an idle GPU 1; the per-shape winner was IDENTICAL in both passes.",
-    "script": "fp8_baseline_bench.py (run from the jump host into the container)",
-    "geomean_us": {
-      "per_shape_best_of_ORACLE": 43.0,
-      "scaled_mm_rowwise_hipblaslt": 44.3,
-      "aiter_gemm_a8w8_CK": 54.9,
-      "aiter_gemm_a8w8_tuned_dispatch": 55.5,
-      "bf16_torch_matmul_for_context": 69.2,
-      "aiter_bpreshuffle_ck_weight_cached": 42.0,
-      "aiter_bpreshuffle_ck_shuffle_inline": 88.0
-    },
-    "per_shape_winner": {
-      "decode_m2_square": "aiter_ck",
-      "decode_m8_up": "aiter_ck",
-      "decode_m16_square": "aiter_ck",
-      "decode_m32_down": "hipblaslt_rowwise",
-      "decode_m64_square": "hipblaslt_rowwise",
-      "decode_m96_up": "hipblaslt_rowwise",
-      "prefill_m128_square": "hipblaslt_rowwise",
-      "prefill_m256_down": "hipblaslt_rowwise",
-      "prefill_m512_up": "hipblaslt_rowwise",
-      "prefill_m1024_down": "hipblaslt_rowwise",
-      "prefill_m2048_square": "hipblaslt_rowwise"
-    },
-    "measured_and_rejected": {
-      "aiter.gemm_a8w8_bpreshuffle_ck": "FASTEST path on the box (42.0 us geomean) but only with the weight shuffled once and kept across calls. This task hands both arms a plain contiguous B every call and lets neither cache anything, so scoring the oracle on a pre-shuffled weight compares two different contracts. With the shuffle inside the timed region the same kernel is the SLOWEST path measured (88.0 us, 2.1x worse), which settles it. REPORT 42.0 us as the harder production reference: a win over this task's oracle is not automatically a win over aiter's pre-shuffled path.",
-      "aiter.gemm_a8w8_bpreshuffle_cktile": "Same pre-shuffled-weight contract. Won 3 shapes when its shuffle was excluded; excluded for the same reason.",
-      "aiter.gemm_a8w8_bpreshuffle_ck with layout (32,16)": "Runs, and is fast, but computes garbage (max rel err ~1.4). The ck bpreshuffle instantiation wants (16,16). A fast wrong answer is the most dangerous kind of baseline candidate, which is why every path here is correctness-screened against dequantised fp32 truth before its time is allowed to count.",
-      "aiter.gemm_a8w8_ASM": "Rejected by this aiter build: 'get_cfg Unsupported input_type: fp8, out_type: bf16' (aiter_meta/csrc/py_itfs_cu/asm_gemm_a8w8.cu:52). The hand-asm a8w8 kernel here is int8-only.",
-      "per_tensor_scaled_mm": "Same speed as rowwise but cannot dequantise per-row-quantised data (max rel err ~1.0). Not a correctness failure of hipBLASLt -- a wrong pairing of scale granularity to data."
-    },
-    "environment": {
-      "torch": "2.11.0+gitd0c8b1f",
-      "hip": "7.2.53211",
-      "rocm": "7.2.3",
-      "device": "gfx942 (MI300X class, 304 CU)",
-      "aiter": "installed, module_gemm_a8w8 prebuilt in the image",
-      "aiter_tuned_db": "no tuned config for any of the eleven shapes ('not found tuned config in a8w8_tuned_gemm.csv, will use default config'), which is why gemm_a8w8 and gemm_a8w8_CK measure the same"
+    ],
+    "oracle_paths_to_exempt": [
+      "oracle_wrapper.py"
+    ],
+    "trusted_tuner_loader_exception": {
+      "does_not_exempt": [
+        ".geak_tuner/runtime_table.json",
+        "generated source",
+        "selected ELF",
+        "any other dynamic loader"
+      ],
+      "guard": "task digest + independent materialization verifier + task dispatch smoke",
+      "path": "geak_tuner_runtime.py",
+      "scope": "load only the hash-pinned artifact named by runtime_table/v2"
     }
   },
-  "seed": {
-    "source": "src/custom_fp8_gemm.hip",
-    "mechanism": "rocWMMA 16x16x32 fp8 fragments; one workgroup computes four adjacent 16x16 output tiles, staging one A tile plus four B tiles in LDS on a synchronous schedule; rowwise dequantisation fused into the epilogue",
-    "fragment_note": "16x16x32, NOT 16x16x16. At BlockK=16 rocWMMA emits the same v_mfma_f32_16x16x32_fp8_fp8 with half its K lanes idle, so a direct translation of the bf16 seed's fragment shape would waste half the MFMA. Verified by reading the emitted ISA, not by trusting the type.",
-    "arch_guard": "__gfx942__ || __gfx950__",
-    "arch_guard_note": "Guarding on the wrong macro compiles the body to nothing -- a no-op that returns an allocator-recycled buffer and scores an unbounded fake speedup. That happened on the bf16 task. The poison write probe is the gate that catches it; it reports 'ok' conclusively on all eleven shapes for this seed.",
-    "seed_control_geomean_speedup": 0.437,
-    "seed_control_measurements": [
-      0.4384,
-      0.436
-    ],
-    "seed_control_min_shape": 0.238,
-    "seed_control_note": "Two full performance runs, 0.55% apart. Comparable to the bf16 task's seed control at 0.3353 against its own rocBLAS oracle, so the two tasks start from a similar distance.",
-    "headroom": "209 TFLOP/s on prefill_m2048_square against the oracle's 622; MI300X fp8 dense peak is near 2600."
+  "canonical_compile_source": "src/dense_fp8_gemm.hip",
+  "created": "2026-08-27",
+  "frozen_harness": {
+    "contains_write_probe": true,
+    "copied_from": "e2e_workflow/scripts/harness_lib.py",
+    "default_protocol": "semantic_weight_rotating",
+    "path": "harness_lib.py",
+    "protocol_schema": "geak.measurement-protocol/v2",
+    "repin_note_v2": "Re-pinned after synchronizing the common/task harnesses and adding hashed paired semantic-weight rotation, raw receipts, separate latency/throughput metrics, output rings, and GPU-lock handoff.",
+    "sha256": "60fddb6ae5aebd61fb98cd918b0d6a53a5e0a2c0b5d483c9d414854fa69e95f7",
+    "timer_contract": "measurement-protocol-v2",
+    "write_probe": "two_sentinel"
   },
   "gates_at_creation": {
     "compile": "PASS",
@@ -126,14 +65,108 @@
     "performance": "PASS -- timing receipt all_primed=true, timer_unprimed=false"
   },
   "historical_experiments": [],
+  "immutable_oracle": {
+    "kind": "per-shape best-of over two vendor libraries, choice frozen from measurement",
+    "path": "oracle_wrapper.py",
+    "route_manifest_note": "Frozen by a locked measurement-protocol/v2 full-suite bakeoff on 2026-09-02.",
+    "routes": {
+      "aiter_ck": "aiter.gemm_a8w8_CK(XQ, WQ, x_scale, w_scale) -- Composable Kernel, used for M <= 16",
+      "hipblaslt_rowwise": "torch._scaled_mm(a, b.t(), scale_a, scale_b, out_dtype=bfloat16) -- routes to hipBLASLt rowwise-scaled solutions, used for M >= 32"
+    },
+    "sha256": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
+    "source_sha256": {
+      "oracle_wrapper.py": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
+      "route_manifest.py": "97ffe7345d60ff6dcf725b0a79dd32fc0367ab192e20c0b28766599ce7d4daa2"
+    },
+    "validated_by": "scripts/task_runner.py preflight + correctness check both routes against a library-free fp32 dequantisation reference; measured max rel err 0.0 on both.",
+    "why_frozen_not_raced": "A runtime race is not reproducible and would let the denominator drift under the candidate between rounds.",
+    "why_not_one_library": "Neither wins across the suite. hipBLASLt-only would soften the baseline by 5% geomean; aiter-only by 30%. An easy baseline turns every later speedup into a lie."
+  },
+  "operator": {
+    "expression": "C[M,N] bf16 = (A[M,K] * a_scale[M]) @ (B[N,K] * b_scale[N])^T",
+    "input_dtype": "float8_e4m3fnuz",
+    "scale_layout": "per-token on A (M values), per-channel on B (N values), both fp32, both flat and contiguous",
+    "why_fnuz": "gfx942's native fp8 variant and the one v_mfma_f32_16x16x32_fp8_fp8 consumes. e4m3fn (the non-fnuz OCP variant) is a different encoding and would need conversion.",
+    "why_rowwise": "What fp8 serving actually ships, and the layout both baseline libraries expect. Per-tensor scaling was measured and rejected: these tensors are quantised per row, so one scalar cannot dequantise them (max rel err ~1.0)."
+  },
+  "oracle_selection": {
+    "environment": {
+      "aiter": "installed, module_gemm_a8w8 prebuilt in the image",
+      "aiter_tuned_db": "no tuned config for any of the eleven shapes ('not found tuned config in a8w8_tuned_gemm.csv, will use default config'), which is why gemm_a8w8 and gemm_a8w8_CK measure the same",
+      "device": "gfx942 (MI300X class, 304 CU)",
+      "hip": "7.2.53211",
+      "rocm": "7.2.3",
+      "torch": "2.11.0+gitd0c8b1f"
+    },
+    "geomean_us": {
+      "aiter_bpreshuffle_ck_shuffle_inline": 88.0,
+      "aiter_bpreshuffle_ck_weight_cached": 42.0,
+      "aiter_gemm_a8w8_CK": 54.9,
+      "aiter_gemm_a8w8_tuned_dispatch": 55.5,
+      "bf16_torch_matmul_for_context": 69.2,
+      "per_shape_best_of_ORACLE": 43.0,
+      "scaled_mm_rowwise_hipblaslt": 44.3
+    },
+    "measured_and_rejected": {
+      "aiter.gemm_a8w8_ASM": "Rejected by this aiter build: 'get_cfg Unsupported input_type: fp8, out_type: bf16' (aiter_meta/csrc/py_itfs_cu/asm_gemm_a8w8.cu:52). The hand-asm a8w8 kernel here is int8-only.",
+      "aiter.gemm_a8w8_bpreshuffle_ck": "FASTEST path on the box (42.0 us geomean) but only with the weight shuffled once and kept across calls. This task hands both arms a plain contiguous B every call and lets neither cache anything, so scoring the oracle on a pre-shuffled weight compares two different contracts. With the shuffle inside the timed region the same kernel is the SLOWEST path measured (88.0 us, 2.1x worse), which settles it. REPORT 42.0 us as the harder production reference: a win over this task's oracle is not automatically a win over aiter's pre-shuffled path.",
+      "aiter.gemm_a8w8_bpreshuffle_ck with layout (32,16)": "Runs, and is fast, but computes garbage (max rel err ~1.4). The ck bpreshuffle instantiation wants (16,16). A fast wrong answer is the most dangerous kind of baseline candidate, which is why every path here is correctness-screened against dequantised fp32 truth before its time is allowed to count.",
+      "aiter.gemm_a8w8_bpreshuffle_cktile": "Same pre-shuffled-weight contract. Won 3 shapes when its shuffle was excluded; excluded for the same reason.",
+      "per_tensor_scaled_mm": "Same speed as rowwise but cannot dequantise per-row-quantised data (max rel err ~1.0). Not a correctness failure of hipBLASLt -- a wrong pairing of scale granularity to data."
+    },
+    "method": "Same eleven shapes as the bf16 suite. Identical quantised inputs to every candidate path. Warmup 10, 30 repeats, 256 MB cache flush before each sample, cuda-event device timing, median. Two full independent passes on an idle GPU 1; the per-shape winner was IDENTICAL in both passes.",
+    "per_shape_winner": {
+      "decode_m16_square": "aiter_ck",
+      "decode_m2_square": "aiter_ck",
+      "decode_m32_down": "hipblaslt_rowwise",
+      "decode_m64_square": "hipblaslt_rowwise",
+      "decode_m8_up": "aiter_ck",
+      "decode_m96_up": "hipblaslt_rowwise",
+      "prefill_m1024_down": "hipblaslt_rowwise",
+      "prefill_m128_square": "hipblaslt_rowwise",
+      "prefill_m2048_square": "hipblaslt_rowwise",
+      "prefill_m256_down": "hipblaslt_rowwise",
+      "prefill_m512_up": "hipblaslt_rowwise"
+    },
+    "script": "fp8_baseline_bench.py (run from the jump host into the container)"
+  },
   "oracle_selection_v2": {
-    "status": "legacy_routes_require_v2_rebake",
+    "created_at_utc": "2026-09-02T15:06:15.547772+00:00",
+    "frozen": true,
     "manifest": "oracle_routes.v2.json",
-    "backends": [
-      "aiter_ck",
-      "hipblaslt_rowwise"
-    ],
+    "manifest_sha256": "32532d58ca7c715029a747963faf572b428bc25df71603de7cb2798a706c6689",
+    "per_shape_backend": {
+      "decode_m16_square": "aiter_ck",
+      "decode_m2_square": "hipblaslt_rowwise",
+      "decode_m32_down": "hipblaslt_rowwise",
+      "decode_m64_square": "hipblaslt_rowwise",
+      "decode_m8_up": "aiter_ck",
+      "decode_m96_up": "hipblaslt_rowwise",
+      "prefill_m1024_down": "hipblaslt_rowwise",
+      "prefill_m128_square": "hipblaslt_rowwise",
+      "prefill_m2048_square": "hipblaslt_rowwise",
+      "prefill_m256_down": "hipblaslt_rowwise",
+      "prefill_m512_up": "hipblaslt_rowwise"
+    },
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
     "selection_metric": "single_call_latency",
-    "checked_in_route_note": "Historical winners are retained but their protocol hash is intentionally stale; formal performance fails until a locked full-suite bakeoff."
-  }
+    "status": "baked_protocol_v2"
+  },
+  "seed": {
+    "arch_guard": "__gfx942__ || __gfx950__",
+    "arch_guard_note": "Guarding on the wrong macro compiles the body to nothing -- a no-op that returns an allocator-recycled buffer and scores an unbounded fake speedup. That happened on the bf16 task. The poison write probe is the gate that catches it; it reports 'ok' conclusively on all eleven shapes for this seed.",
+    "fragment_note": "16x16x32, NOT 16x16x16. At BlockK=16 rocWMMA emits the same v_mfma_f32_16x16x32_fp8_fp8 with half its K lanes idle, so a direct translation of the bf16 seed's fragment shape would waste half the MFMA. Verified by reading the emitted ISA, not by trusting the type.",
+    "headroom": "209 TFLOP/s on prefill_m2048_square against the oracle's 622; MI300X fp8 dense peak is near 2600.",
+    "mechanism": "rocWMMA 16x16x32 fp8 fragments; one workgroup computes four adjacent 16x16 output tiles, staging one A tile plus four B tiles in LDS on a synchronous schedule; rowwise dequantisation fused into the epilogue",
+    "seed_control_geomean_speedup": 0.437,
+    "seed_control_measurements": [
+      0.4384,
+      0.436
+    ],
+    "seed_control_min_shape": 0.238,
+    "seed_control_note": "Two full performance runs, 0.55% apart. Comparable to the bf16 task's seed control at 0.3353 against its own rocBLAS oracle, so the two tasks start from a similar distance.",
+    "source": "src/custom_fp8_gemm.hip"
+  },
+  "sibling_task": "examples/tasks/dense_bf16_gemm_fused",
+  "task": "dense_fp8_gemm_rowwise"
 }

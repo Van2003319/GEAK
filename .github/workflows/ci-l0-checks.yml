@@ -123,9 +123,11 @@ jobs:
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             asm_tuner/tests/test_schema.py \
             asm_tuner/tests/test_pruning.py \
-            asm_tuner/tests/test_vendor_fixture_survival.py \
+            asm_tuner/tests/test_schema_survival.py \
             asm_tuner/tests/test_shard_cache_metadata.py \
             asm_tuner/tests/test_table_selector_runner.py \
+            asm_tuner/tests/test_canonical_contract.py \
+            asm_tuner/tests/test_materialization_contract.py \
             asm_tuner/tests/test_cli.py \
             geak/test_bootstrap.py \
             kernel_workflow/scripts/test_ir_capture.py \
@@ -135,6 +137,7 @@ jobs:
             kernel_workflow/scripts/test_workflow_state.py \
             kernel_workflow/scripts/test_round_journal.py \
             kernel_workflow/scripts/test_config_search.py \
+            kernel_workflow/scripts/test_asm_tuner_bridge.py \
             kernel_workflow/scripts/test_workflow_resume_contract.py \
             kernel_workflow/scripts/test_script_conventions.py \
             kernel_workflow/scripts/test_role_script_references.py

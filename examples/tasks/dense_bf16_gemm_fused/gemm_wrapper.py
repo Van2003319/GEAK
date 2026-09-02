@@ -1,6 +1,6 @@
 import torch
 
-from kernel_loader import gemm_ext
+from geak_tuner_runtime import dispatch as _tuner_dispatch
 
 
 def _check_inputs(a: torch.Tensor, b: torch.Tensor) -> None:
@@ -23,4 +23,10 @@ def _check_inputs(a: torch.Tensor, b: torch.Tensor) -> None:
 def dense_bf16_gemm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Compute A[M,K] @ B[N,K].T with the editable HIP candidate."""
     _check_inputs(a, b)
+    tuned = _tuner_dispatch("bf16", (a, b))
+    if tuned is not None:
+        return tuned
+    # Keep the canonical extension lazy: when a complete tuner table owns this
+    # shape, task dispatch loads only the selected artifact and symbol.
+    from kernel_loader import gemm_ext
     return gemm_ext.dense_bf16_gemm(a, b)

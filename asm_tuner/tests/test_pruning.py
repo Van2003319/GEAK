@@ -1,6 +1,6 @@
 from asm_tuner.pruning import rank_for_route, static_prune
 from asm_tuner.schema import DType, KernelConfig, Route
-from asm_tuner.vendor_fixtures import default_seed
+from asm_tuner.schema_survival import default_seed
 
 
 def test_grid_smaller_than_cu_is_ranked_not_pruned():

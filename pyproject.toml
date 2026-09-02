@@ -33,7 +33,12 @@ geak-asm-tuner = "asm_tuner.cli:main"
 packages = ["geak", "asm_tuner", "asm_tuner.adapters"]
 
 [tool.setuptools.package-data]
-asm_tuner = ["PROVENANCE.json"]
+asm_tuner = [
+    "PROVENANCE.json",
+    "manifests/tasks/*.json",
+    "manifests/routes/*.json",
+    "manifests/search_spaces/*.json",
+]
 
 # NOTE: metadata + deps live here (PEP 621). setup.py stays only because a
 # [project] table can't express the build-time bootstrap hook (clone repo +

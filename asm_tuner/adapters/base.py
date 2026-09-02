@@ -67,6 +67,12 @@ class TaskAdapter(ABC):
     dtype: DType
     source_version = "rocwmma-mvp-v1"
 
+    # An INACTIVE axis may remain present in the schema so old records survive,
+    # but executable candidates must use its one neutral value.  Accepting PGR=2
+    # in a single-config shard would otherwise make a fake search look real: the
+    # generated synchronous body never reads PGR.
+    inactive_neutral_values: Mapping[str, Any] = {"pgr": 1, "plr": 0, "xcc": 1}
+
     axis_capabilities: Mapping[str, AxisCapability] = {
         "bm": AxisCapability(AxisState.ACTIVE, "compile-time macro-tile M"),
         "bn": AxisCapability(AxisState.ACTIVE, "compile-time macro-tile N"),
@@ -116,6 +122,14 @@ class TaskAdapter(ABC):
             raise ConfigError("adapter executable boundary is GSU=1")
         if config.stream_k != 0:
             raise ConfigError("adapter executable boundary is StreamK=0")
+        for axis, neutral in self.inactive_neutral_values.items():
+            capability = self.axis_capabilities[axis]
+            actual = _axis_value(config, axis)
+            if actual != neutral:
+                raise InactiveAxisError(
+                    "%s cannot execute %s=%r; the axis is %s and its only honest value is %r: %s"
+                    % (self.name, axis, actual, capability.state.value, neutral, capability.reason)
+                )
 
     def validate_axis_variation(self, configs: Sequence[KernelConfig]) -> None:
         for config in configs:

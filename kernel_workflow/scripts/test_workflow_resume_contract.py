@@ -66,8 +66,8 @@ def test_config_search_is_registered_without_a_phase_lock() -> None:
     assert "phase_independent: true" in LANE
     assert "AVAILABLE_CAPABILITIES: availableCapabilities()" in LANE
     assert "config_search may be" in LANE and "ANY search phase" in LANE
-    assert "phase2 may SELECT an existing precompiled config" in TECH_LEAD
-    assert "config_search create" in ASM
+    assert "phase2 may SELECT an existing canonical release" in TECH_LEAD
+    assert "create-asm" in ASM
     assert "coarse phase lock" not in ASM.lower()
 
 

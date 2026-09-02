@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 from asm_tuner.schema import DType, KernelConfig, validate_config
-from asm_tuner.vendor_fixtures import default_seed, get_fixture
+from asm_tuner.schema_survival import default_seed, get_fixture
 
 
 def test_bf16_fixture_derives_logical_wave_tile_and_miwt():

@@ -1,22 +1,65 @@
 {
-  "schema": "geak.adapter_provenance/v1",
-  "runtime_dependency_on_experiments": false,
+  "canonical_integration": {
+    "gpu_evidence": "evidence/gfx942_canonical_smoke_20260902.json",
+    "materialization": "task-local explicit shared artifact loaded by versioned route table",
+    "measurement_protocol": "geak.measurement-protocol/v2",
+    "registry_bridge": "kernel_workflow/scripts/config_search.py (geak.config-search/v2)",
+    "runtime_table": "geak.runtime_table/v2; complete-suite atomic publication",
+    "task_manifests": [
+      "manifests/tasks/dense_bf16_gemm_fused.json",
+      "manifests/tasks/dense_fp8_gemm_rowwise.json"
+    ],
+    "verifier": "independent workspace source rebuild, ISA/symbol/load and task/source/protocol/oracle/artifact hashes"
+  },
   "extracted_algorithmic_sources": [
     {
-      "task": "dense_bf16_gemm_fused",
       "reference": "state_asmopt_bf16_20260827/best/src/custom_gemm.hip",
+      "scope": "rocWMMA tiled LDS staging and masked edge behavior",
       "sha256": "cee50ce62e2b90b77f96bb8569f4555fd2de94d9cefbe9264a0401451c7483c7",
-      "scope": "rocWMMA tiled LDS staging and masked edge behavior"
+      "task": "dense_bf16_gemm_fused"
     },
     {
-      "task": "dense_fp8_gemm_rowwise",
       "reference": "state_fp8_rowwise_20260827/best/src/custom_fp8_gemm.hip",
+      "scope": "fp8 fnuz MFMA shape, rowwise-scale epilogue, ragged edge behavior",
       "sha256": "f0c5aeda1e43cb092b8d28e3904ef79276425dc3774f29ffeb4ff73dfaafc8f1",
-      "scope": "fp8 fnuz MFMA shape, rowwise-scale epilogue, ragged edge behavior"
+      "task": "dense_fp8_gemm_rowwise"
     }
   ],
-  "vendor_fixtures": [
-    {"solution_id": 205554, "raw_macro_tile": [224, 128], "raw_miwt": [7, 4]},
-    {"solution_id": 262788, "raw_macro_tile": [128, 128], "raw_miwt": [4, 4]}
-  ]
+  "runtime_dependency_on_experiments": false,
+  "schema": "geak.adapter_provenance/v2",
+  "schema_survival_records": [
+    {
+      "executable": false,
+      "purpose": "normalization/schema survival only; inactive axes are rejected by adapters",
+      "raw_macro_tile": [
+        224,
+        128
+      ],
+      "raw_miwt": [
+        7,
+        4
+      ],
+      "solution_id": 205554
+    },
+    {
+      "executable": false,
+      "purpose": "normalization/schema survival only; inactive axes are rejected by adapters",
+      "raw_macro_tile": [
+        128,
+        128
+      ],
+      "raw_miwt": [
+        4,
+        4
+      ],
+      "solution_id": 262788
+    }
+  ],
+  "unsupported_axes_fail_closed": {
+    "gsu": 1,
+    "pgr": 1,
+    "plr": 0,
+    "stream_k": 0,
+    "xcc": 1
+  }
 }

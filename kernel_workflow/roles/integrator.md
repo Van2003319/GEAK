@@ -12,6 +12,8 @@ do not invent new optimizations; you compose and reconcile existing ones.
 - `BEST_INDIVIDUAL` — the best single verified geomean this round (the bar to beat).
 - `INTEGRATE_DIR` — your private scratch dir. `GPU_ID`, `SKILL_DIR`, COMMANDMENT path, `BASELINE_PER_CASE`.
 - `INSIGHTS` — the TechLead's cross-round insight log (use it to reconcile conflicts intelligently).
+- `ASM_TUNER_MODE`, `ASM_TUNER_MANIFEST`, `ASM_TUNER_CACHE`, `CONFIG_SEARCH_HELPER`, and
+  `CONFIG_SEARCH_REGISTRY`; each PATCH also carries its exact `config_selection` registry row.
 
 ## Candidate policy (mandatory)
 
@@ -55,6 +57,20 @@ Every combined or hand-written result is a new candidate and must be independent
    `python3 $SKILL_DIR/scripts/asm_roundtrip.py restore --source-root <your ws src dir>`, then
    re-run correctness and only then benchmark. Without it every arm you time is the source-compiled
    program and the whole comparison is between identical binaries.
+
+1c. **A config selection is executable candidate state.** In `ASM_TUNER_MODE=required`, never
+   combine two `asm_tuner_selection.json` files textually. Choose the registry id belonging to the
+   best parent in the stack; if another parent's mechanism requires a different release, test that
+   as a separate stack. After applying each stack, run `config_search materialize` for that exact id,
+   then `verify-materialization --rebuild --in-place`, then `smoke`, all under `gpu_lock.sh` plus
+   `gpu_fence_run.sh`, exactly as verify_engineer does. A mismatch or missing id rejects that stack.
+   Return the three verbatim objects as
+   `config_materialization:{"ok":true,"materialize":...,"verify":...,"smoke":...}`.
+
+   `geak_tuner_runtime.py` is the only loader that may be immutable-exempted from the policy scan,
+   and only after its task digest verifies. Scan the runtime table, generated source and selected ELF.
+   If the unpatched control carries `asm_tuner_selection.json`, materialize its own registry id too;
+   never time a fallback control against a materialized candidate.
 
 2. Sort patches by verified speedup (best first). Check compatibility using
    `optimization_strategies.md` (compatible: template+launch-bounds, tiling+coalescing, warp-coop +
@@ -135,6 +151,7 @@ cd "$WS" && git add -A && git diff --cached --binary > "$INTEGRATE_DIR/integrate
             "target_routes": ["predeclared route(s); never empty"]},
   "improved_over_best_individual": true,
   "policy_pass": true,
+  "config_materialization": {"ok": true, "materialize": {}, "verify": {"ok": true}, "smoke": {"ok": true}},
   "policy_receipts": {"prebuild": "path/to/prebuild.json", "postbuild": "path/to/postbuild.json"},
   "policy_postbuild": {"schema": "...", "passed": true, "findings": 0, "advisory": 0,
     "inspected": 0, "files": 0, "elf": 0, "unreadable": 0},

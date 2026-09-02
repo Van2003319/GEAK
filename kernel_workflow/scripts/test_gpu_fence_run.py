@@ -67,6 +67,11 @@ class FenceTest(unittest.TestCase):
         self.assertIn("hello", proc.stdout)
         self.assertNotIn("WARNING", proc.stderr)
 
+    def test_payload_can_prove_it_is_inside_the_process_fence(self):
+        proc = run_fence('printf "%s" "${GEAK_GPU_FENCE_HELD:-}"')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual("1", proc.stdout)
+
     def test_an_orphan_that_outlives_the_payload_is_reaped(self):
         """The defect, reproduced: a payload that backgrounds GPU-shaped work and
         returns immediately. Before this script that process kept running with no

@@ -12,10 +12,9 @@ import yaml
 from .adapters import get_adapter
 from .compiler import ShardCompiler
 from .pruning import shape_sort_key, static_prune
-from .runner import SuccessiveHalvingRunner, candidates_from_compile_results
-from .runtime_table import RuntimeSelector, RuntimeTableStore
+from .runtime_table import RuntimeSelector
 from .schema import DType, KernelConfig, Route, validate_config
-from .vendor_fixtures import default_seed, get_fixture
+from .schema_survival import default_seed, get_fixture
 
 
 def _document(path: Path) -> Any:
@@ -119,23 +118,10 @@ def _cmd_compile(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    adapter = get_adapter(args.adapter)
-    results = _compile(args, shared=True)
-    candidates = candidates_from_compile_results(results)
-    budgets = tuple(int(value) for value in args.budgets.split(",") if value)
-    table = RuntimeTableStore(args.table)
-    runner = SuccessiveHalvingRunner(
-        adapter=adapter,
-        output_dir=args.output,
-        runtime_table=table,
-        budgets=budgets,
-        eta=args.eta,
-        top_k=args.top_k,
-        warmups=args.warmups,
-        device=args.device,
+    raise RuntimeError(
+        "the legacy standalone runner used synthetic inputs and cannot publish runtime_table/v2; "
+        "use kernel_workflow/scripts/config_search.py search-asm with a canonical task manifest"
     )
-    _print(runner.run(candidates, _routes(args.routes)))
-    return 0
 
 
 def _cmd_select(args: argparse.Namespace) -> int:
@@ -147,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="geak-asm-tuner", description="Phase-independent AMD GEMM config compile and selection tool")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    fixture = sub.add_parser("fixture", help="emit an immutable vendor survival fixture")
+    fixture = sub.add_parser("fixture", help="emit a vendor schema-survival record (not executable)")
     fixture.add_argument("name", choices=("bf16_solution205554", "fp8_solution262788"))
     fixture.set_defaults(func=_cmd_fixture)
 
@@ -179,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     compile_cmd.add_argument("--shared", action="store_true", help="also build executable task adapter .so")
     compile_cmd.set_defaults(func=_cmd_compile)
 
-    run = sub.add_parser("run", help="compile and run per-route successive halving")
+    run = sub.add_parser("run", help="compile and legacy synthetic runner (fails closed; use search-asm)")
     add_compile_flags(run)
     run.add_argument("--routes", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)

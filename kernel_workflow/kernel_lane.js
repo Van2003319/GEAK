@@ -83,6 +83,9 @@ const KNOWN_ARGS = new Set([
   // script has no `process`, so the read threw at init and killed the lane before its first
   // agent. An argument is the only channel that crosses into the sandbox.
   'start_phase',
+  // Canonical asm_tuner bridge. required means no Engineer may start until
+  // search/create/select/materialize has produced a hash-valid suite table.
+  'asm_tuner_manifest', 'asm_tuner_mode',
   // Dispatcher-owned, forwarded verbatim, unused by the worker.
   'backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script',
 ]);
@@ -1735,6 +1738,8 @@ const VERIFY_SCHEMA = obj({
   policy_receipts: { type: 'object', additionalProperties: true },
   // (69): the summary of `$VERIFY_DIR/policy_postbuild.json`, the scan that sees the ELFs.
   policy_postbuild: POLICY_SUMMARY_SCHEMA,
+  // Canonical asm_tuner materialize + independent rebuild/load + task dispatch receipts.
+  config_materialization: { type: 'object', additionalProperties: true },
   // (87): `hip_twin_sync.py` over the measured tree -- did ninja compile what was edited?
   hip_twin_sync: HIP_TWIN_SCHEMA,
   // The next question: did the mechanism survive the compiler? Present only when
@@ -1754,6 +1759,7 @@ const INTEGRATE_SCHEMA = obj({
   improved_over_best_individual: { type: 'boolean' },
   policy_pass: { type: 'boolean' }, policy_receipts: { type: 'object', additionalProperties: true },
   policy_postbuild: POLICY_SUMMARY_SCHEMA,   // (69)
+  config_materialization: { type: 'object', additionalProperties: true },
   hip_twin_sync: HIP_TWIN_SCHEMA,            // (87)
   conclusion: { type: 'string' }, notes: { type: 'string' },
 }, ['attempted', 'conclusion', 'policy_pass']);
@@ -1806,6 +1812,7 @@ const VALIDATE_SCHEMA = obj({
   // failure at the last phase would throw away the whole run's GPU work over a missing label, and
   // director.md already fixes the safe default itself — "Absence is not evidence of priming."
   timing_basis: { type: 'string' },
+  config_materialization: { type: 'object', additionalProperties: true },
   oracle_digest: { type: 'string' },   // (67): the arbiter's own recomputation of the pinned oracle
 }, ['director_verified_speedup_geomean', 'validation_status']);
 
@@ -1906,6 +1913,14 @@ const CONFIG_SELECT_SCHEMA = obj({
   selection_contract: { type: 'string' }, reason: { type: 'string' }, config_id: { type: 'string' },
   config: { type: 'object', additionalProperties: true },
 }, ['ok']);
+const CONFIG_PREPARE_SCHEMA = obj({
+  ok: { type: 'boolean' }, schema: { type: 'string' }, phase_independent: { type: 'boolean' },
+  selection_contract: { type: 'string' }, reason: { type: 'string' },
+  prepared_before_engineer: { type: 'boolean' },
+  config: { type: 'object', additionalProperties: true },
+  materialization: { type: 'object', additionalProperties: true },
+  operations: { type: 'array', items: { type: 'object', additionalProperties: true } },
+}, ['ok']);
 
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
@@ -1917,18 +1932,32 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 const WORKFLOW_STATE_HELPER = `${WORKFLOW_DIR}/scripts/workflow_state.py`;
 const ROUND_JOURNAL_HELPER = `${WORKFLOW_DIR}/scripts/round_journal.py`;
 const CONFIG_SEARCH_HELPER = `${WORKFLOW_DIR}/scripts/config_search.py`;
+const ASM_TUNER_MANIFEST = String(A.asm_tuner_manifest || '').trim();
+const ASM_TUNER_MODE = String(A.asm_tuner_mode || (ASM_TUNER_MANIFEST ? 'required' : 'off'))
+  .trim().toLowerCase();
+if (!['off', 'optional', 'required'].includes(ASM_TUNER_MODE)) {
+  throw new Error(`asm_tuner_mode must be off|optional|required, got ${ASM_TUNER_MODE}`);
+}
+if (ASM_TUNER_MODE === 'required' && !ASM_TUNER_MANIFEST) {
+  throw new Error('asm_tuner_mode=required needs args.asm_tuner_manifest');
+}
 // Registered before Setup so the capability truly is phase-independent. STATE_DIR makes it
 // continuation-local; standalone runs share an explicit EXP_ROOT/kernel/language registry.
 let configSearchRegistry = STATE_DIR
   ? `${STATE_DIR}/config_search/registry.json`
   : `${EXP_ROOT}/config_search/${kebab(KERNEL_NAME_HINT)}-${kebab(TARGET_LANGUAGE || 'default')}/registry.json`;
+const asmTunerCache = configSearchRegistry.replace(/\/registry\.json$/, '/cache');
 const availableCapabilities = () => ({
   config_search: {
-    schema: 'geak.config-search/v1', phase_independent: true,
+    schema: 'geak.config-search/v2', phase_independent: true,
     command: `python3 ${CONFIG_SEARCH_HELPER}`,
     registry: configSearchRegistry,
-    selection_contract: 'select only precompiled=true entries whose artifact hash validates; '
-      + 'new configs must be created through config_search create, never fabricated in a phase role',
+    task_manifest: ASM_TUNER_MANIFEST,
+    cache: asmTunerCache,
+    mode: ASM_TUNER_MODE,
+    lifecycle: ['search', 'create', 'select', 'materialize'],
+    selection_contract: 'before Engineer: select only a complete canonical-suite release whose task, '
+      + 'source, protocol, oracle and artifact hashes validate; materialize its versioned runtime table',
   },
 });
 // Stable enough for direction identity: recursively sort object keys so semantically identical config
@@ -2198,6 +2227,42 @@ if (!hasBaseline) {
     eval_dir: EVAL_DIR, kernel_name: KERNEL_NAME,
     final_geomean: 0, final_patch: '', validation_status: 'no_baseline', reason,
   };
+}
+
+// Canonical tuner bootstrap. On a fresh state this performs one bounded protocol-v2 paired
+// search over the declared seed/non-default geometry; on continuation it selects the exact registry
+// id in asm_tuner_selection.json. Either way the baseline, profile and every Engineer now execute the
+// same versioned table instead of introducing tuner bytes only after the baseline was measured.
+let canonicalTunerPreparation = null;
+if (ASM_TUNER_MODE !== 'off' && ASM_TUNER_MANIFEST) {
+  canonicalTunerPreparation = await agentT(
+    `Run EXACTLY this script under the allocated GPU lock and process fence. Commit only the small ` +
+    `reviewable selection file (the .geak_tuner bundle stays ignored), then return the captured JSON ` +
+    `stdout verbatim:\n\`\`\`bash\nset +e\nOUT=$(` +
+    `${GPU_LOCK_ENV ? `${GPU_LOCK_ENV} ` : ''}GEAK_GPU_ALLOWED=${JSON.stringify(GPU_IDS)} ` +
+    `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSON.stringify(GPU_POOL)} ` +
+    `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_fence_run.sh`)} ` +
+    `python3 ${JSON.stringify(CONFIG_SEARCH_HELPER)} prepare ` +
+    `--registry ${JSON.stringify(configSearchRegistry)} ` +
+    `--task-manifest ${JSON.stringify(ASM_TUNER_MANIFEST)} ` +
+    `--cache ${JSON.stringify(asmTunerCache)} --workspace ${JSON.stringify(CANONICAL)})\n` +
+    `RC=$?\nset -e\nif [ "$RC" -eq 0 ]; then\n` +
+    `  cd ${JSON.stringify(CANONICAL)}\n` +
+    `  git -c user.email=team@workflow -c user.name=team add asm_tuner_selection.json\n` +
+    `  if ! git diff --cached --quiet -- asm_tuner_selection.json; then\n` +
+    `    git -c user.email=team@workflow -c user.name=team commit -q -m "asm_tuner: select canonical suite release"\n` +
+    `  fi\nfi\nprintf '%s\\n' "$OUT"\nexit "$RC"\n\`\`\``,
+    { phase: 'Setup', label: 'config_search:prepare canonical', schema: CONFIG_PREPARE_SCHEMA });
+  if (!(canonicalTunerPreparation && canonicalTunerPreparation.ok)) {
+    const reason = canonicalTunerPreparation && canonicalTunerPreparation.reason
+      ? canonicalTunerPreparation.reason : 'canonical tuner preparation returned nothing';
+    if (ASM_TUNER_MODE === 'required') throw new Error(`asm_tuner required setup failed: ${reason}`);
+    log(`  [asm_tuner] optional canonical preparation failed: ${reason}; using canonical fallback.`);
+  } else {
+    log(`  [asm_tuner] canonical suite materialized before baseline: ` +
+      `table=${canonicalTunerPreparation.materialization.table_digest} ` +
+      `configs=${canonicalTunerPreparation.materialization.config_ids.join(',')}.`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2725,9 +2790,10 @@ let phaseStall = 0;
 //
 // `run_lane.sh` still exports GEAK_START_PHASE, so the env stays as a fallback for any non-sandbox
 // invocation, behind a typeof guard that cannot throw.
-const START_PHASE_ENV = (typeof process !== 'undefined' && process && process.env)
+const GEAK_START_PHASE = (typeof process !== 'undefined' && process && process.env)
   ? String(process.env.GEAK_START_PHASE || '')
   : '';
+const START_PHASE_ENV = GEAK_START_PHASE;
 const START_PHASE_RAW = String(
   A.start_phase != null && String(A.start_phase).trim() !== '' ? A.start_phase : START_PHASE_ENV,
 ).trim().toLowerCase();
@@ -3514,6 +3580,8 @@ ${resolveScript}
             // warm-start call omitted it, so the historical patch would have been verified against
             // whatever the agent guessed the oracle was. Caught by test_oracle_digest.
             TASK_DIR: KERNEL_PATH_ORIG,
+            CONFIG_SEARCH_HELPER, CONFIG_SEARCH_REGISTRY: configSearchRegistry,
+            ASM_TUNER_MANIFEST, ASM_TUNER_MODE, ASM_TUNER_CACHE: asmTunerCache,
             VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
             EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
             GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
@@ -4221,13 +4289,64 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
     directions,
-    (d) => {
+    async (d) => {
       if (d.recovered_entry) {
         // The engineer already completed in an earlier wave; its immutable journal receipt is the
         // authority. Re-running the engineer would create different bytes under the old identity.
-        return Promise.resolve({ d, eng: d.recovered_entry.worker_result || null,
-          journal: { registered: true, entry: d.recovered_entry }, recoveredJournal: true });
+        return { d, eng: d.recovered_entry.worker_result || null,
+          journal: { registered: true, entry: d.recovered_entry }, recoveredJournal: true };
       }
+
+      // Workspace creation and the complete tuner lifecycle are one deterministic barrier. The
+      // Engineer cannot race ahead of create/select or materialize guessed bytes itself.
+      const requestedConfig = nonEmptyObject(d.config) ? d.config : {};
+      const requestedConfigId = typeof requestedConfig.id === 'string'
+        ? requestedConfig.id.trim() : '';
+      const malformedRequestedConfig = nonEmptyObject(requestedConfig) && !requestedConfigId;
+      const prepareTail = ASM_TUNER_MODE !== 'off' && ASM_TUNER_MANIFEST
+        ? `${GPU_LOCK_ENV ? `${GPU_LOCK_ENV} ` : ''}`
+          + `GEAK_GPU_ALLOWED=${JSON.stringify(GPU_IDS)} `
+          + `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSON.stringify(d.gpu_id)} `
+          + `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_fence_run.sh`)} `
+          + `python3 ${JSON.stringify(CONFIG_SEARCH_HELPER)} prepare `
+          + `--registry ${JSON.stringify(configSearchRegistry)} `
+          + `--task-manifest ${JSON.stringify(ASM_TUNER_MANIFEST)} `
+          + `--cache ${JSON.stringify(asmTunerCache)} `
+          + `--workspace ${JSON.stringify(`${d.out_dir}/workspace`)}`
+          + (requestedConfigId ? ` --id ${JSON.stringify(requestedConfigId)}` : '')
+        : `python3 -c ${JSON.stringify("import json; print(json.dumps({'ok': True, 'schema': 'geak.config-search/v2', 'phase_independent': True, 'prepared_before_engineer': True}))")}`;
+      const prepared = await agentT(
+        `Run EXACTLY this script and return only the final single-line JSON object. The workspace ` +
+        `baseline commit MUST happen before materialization so asm_tuner_selection.json is a real ` +
+        `candidate change; .geak_tuner is ignored immutable runtime state:\n\`\`\`bash\n` +
+        `mkdir -p ${d.out_dir}/workspace\n` +
+        `( cd ${d.seed_dir} && tar --exclude=./.git --exclude='*/.git' ` +
+        `--exclude=./build --exclude='*/build' --exclude=./.geak_tuner ` +
+        `--exclude='*/.geak_tuner' --exclude=./__pycache__ --exclude='*/__pycache__' ` +
+        `--exclude=./.torch_ext --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' ` +
+        `-cf - . ) | ( cd ${d.out_dir}/workspace && tar -xf - )\n` +
+        `( cd ${d.out_dir}/workspace && git init -q && ` +
+        `git -c user.email=team@workflow -c user.name=team add -A && ` +
+        `git -c user.email=team@workflow -c user.name=team commit -q --allow-empty ` +
+        `-m workspace_baseline ) || exit 1\n${prepareTail}\n\`\`\``,
+        { phase: 'Optimize', label: `config_search:prepare ${d.id}`,
+          schema: CONFIG_PREPARE_SCHEMA });
+      let configSelection = prepared
+        ? { ...prepared, required: ASM_TUNER_MODE === 'required' }
+        : { ok: false, required: ASM_TUNER_MODE === 'required',
+            reason: 'pre-engineer config lifecycle returned nothing' };
+      if (malformedRequestedConfig) {
+        configSelection = { ok: false, required: true,
+          reason: 'planner config has fields but no config_search id; create must run before Engineer' };
+      }
+      if (configSelection.required && !configSelection.ok) {
+        log(`Round ${round} dir ${d.id}: Engineer NOT started: ${configSelection.reason || 'asm_tuner prepare failed'}.`);
+        return { d, eng: null, journal: null, configSelection };
+      }
+      const selectedDirectionConfig = configSelection.config
+        ? { ...(configSelection.config.config || {}), id: configSelection.config.id || '' }
+        : requestedConfig;
+
       // The PHASE decides which contract an engineer reads, and it outranks the specialty: in
       // phase2 there is no source direction to implement, so a specialty label would send the
       // engineer to a role that edits the wrong artifact.
@@ -4263,24 +4382,11 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
           `loop and push to the TARGET; keep the best correct version.`
         : `Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the ` +
           `knowledge files for your specialty, and follow them.`;
-      return agentT(
+      const eng = await agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
-First create YOUR private workspace, then optimize.
-\`\`\`bash
-# Fresh, ISOLATED workspace via tar-copy that EXCLUDES build artifacts (.git/build/__pycache__/.torch_ext/
-# *.so/*.o) — no 'rm' anywhere. Each engineer's out_dir is unique per (round,engineer), so the workspace
-# is clean on creation; the tar excludes mean no stale build cache is ever inherited (torch .torch_ext
-# stores ABSOLUTE paths, so excluding it forces each workspace to build its own fresh). The big immutable
-# golden (reference_io.pt, when present) lives in the selected parent as an absolute symlink; this tar
-# carries the symlink verbatim, so every workspace shares the one physical file — NEVER add -h/--dereference here.
-mkdir -p ${d.out_dir}/workspace
-( cd ${d.seed_dir} && tar --exclude=./.git --exclude='*/.git' --exclude=./build --exclude='*/build' \\
-    --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \\
-    --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd ${d.out_dir}/workspace && tar -xf - )
-( cd ${d.out_dir}/workspace && git init -q && \\
-    git -c user.email=team@workflow -c user.name=team add -A && \\
-    git -c user.email=team@workflow -c user.name=team commit -q --allow-empty -m workspace_baseline ) || exit 1
-\`\`\`
+Your private workspace already exists at ${d.out_dir}/workspace. When asm_tuner is enabled, its
+search/create/select/materialize receipt completed before this call; do not replace its artifact or
+hand-edit the versioned runtime table.
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; never go below baseline).
@@ -4290,7 +4396,7 @@ Save best_patch.diff via \`cd <KERNEL_PATH> && git add -A && git diff --cached -
 ${cfg({
         SPECIALTY: d.specialty,
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [],
-          mechanism: d.mechanism || '', config: d.config || {},
+          mechanism: d.mechanism || '', config: selectedDirectionConfig,
           expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: d.expected_speedup ? `reach ${d.expected_speedup}x (or ~90% of the roofline ceiling), whichever is the harder bar` : 'reach ~90% of the roofline ceiling' } : {}),
         KERNEL_PATH: `${d.out_dir}/workspace`,
@@ -4329,6 +4435,8 @@ ${cfg({
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
         ...KB_INPUTS,
         AVAILABLE_CAPABILITIES: availableCapabilities(),
+        CONFIG_SELECTION: configSelection.config || {},
+        ASM_TUNER_MATERIALIZATION: configSelection.materialization || {},
       })}
 
 Before returning, atomically write the EXACT same JSON object to ${d.out_dir}/worker_result.json
@@ -4340,7 +4448,7 @@ worker_result.json structure as StructuredOutput.` +
       { phase: 'Optimize',
         label: `${isAsm ? 'asm' : isDeep ? 'deep' : 'eng'} ${d.id}:${isAsm ? 'assembly' : d.specialty}`,
         schema: ENG_SCHEMA }
-    ).then(async (eng) => {
+    );
       const candidateId = `r${round}:${d.id}`;
       const journal = await agentT(
         `Run EXACTLY this command once the engineer call has completed. Return its JSON stdout ` +
@@ -4360,32 +4468,9 @@ worker_result.json structure as StructuredOutput.` +
 \`\`\``,
         { phase: 'Optimize', label: `round_journal:register ${d.id}`,
           schema: JOURNAL_REGISTER_SCHEMA });
-      const requestedConfig = effectiveDirectionRecord(d, { d, eng, journal }).config;
-      let configSelection = { ok: true, required: false };
-      if (nonEmptyObject(requestedConfig)) {
-        const configId = typeof requestedConfig.id === 'string' ? requestedConfig.id.trim() : '';
-        if (!configId) {
-          configSelection = { ok: false, required: true,
-            reason: 'selected config has no config_search id' };
-        } else {
-          const selected = await agentT(
-            `Run EXACTLY this command and return its single JSON stdout object verbatim, including ` +
-            `when it exits 2. This is the admission check for a selected config:
-\`\`\`bash
-` +
-            `python3 ${JSON.stringify(CONFIG_SEARCH_HELPER)} select ` +
-            `--registry ${JSON.stringify(configSearchRegistry)} --id ${JSON.stringify(configId)}
-\`\`\``,
-            { phase: 'Optimize', label: `config_search:select ${d.id}`,
-              schema: CONFIG_SELECT_SCHEMA });
-          configSelection = selected
-            ? { ...selected, required: true }
-            : { ok: false, required: true, reason: 'config selection capability returned nothing',
-                config_id: configId };
-        }
-      }
+      // Selection was validated and materialized before Engineer; post-hoc selection would
+      // admit bytes different from those the worker actually executed.
       return { d, eng, journal, configSelection };
-    });
     },
 
     async (prev) => {
@@ -4398,7 +4483,9 @@ worker_result.json structure as StructuredOutput.` +
       // Live candidates already carry the same receipt from config_search:select.
       if (!configSelection) {
         const requestedConfig = effectiveDirectionRecord(d, { d, eng, journal }).config;
-        configSelection = { ok: true, required: false };
+        configSelection = ASM_TUNER_MODE === 'required'
+          ? { ok: false, required: true, reason: 'recovered candidate has no selected tuner config id' }
+          : { ok: true, required: false };
         if (nonEmptyObject(requestedConfig)) {
           const configId = typeof requestedConfig.id === 'string' ? requestedConfig.id.trim() : '';
           if (!configId) {
@@ -4481,8 +4568,8 @@ worker_result.json structure as StructuredOutput.` +
         log(`Round ${round} dir ${d.id}: engineer return FAILED but complete — self-reported `
           + `geomean ${primSpeedup(eng)}, worst case `
           + `${worst === null ? 'not reported' : worst.toFixed(4)} over ${ratios.length} case(s). `
-          + `Self-reports do not suppress an independent measurement; sending to verify `
-          + `(oracle decides).`);
+          + `Self-reports do not suppress an independent measurement; sending to verify. `
+          + `Oracle decides correctness only; paired untouched incumbent controls promotion.`);
       }
       return agentT(
         roleAgent('verify_engineer', 'verify',
@@ -4491,6 +4578,8 @@ worker_result.json structure as StructuredOutput.` +
           CANONICAL, PATCH: patch, VERIFY_DIR: d.verify_dir,
           CONFIG_SELECTION: configSelection && configSelection.required
             ? configSelection.config || { id: configSelection.config_id || '', invalid: true } : {},
+          CONFIG_SEARCH_HELPER, CONFIG_SEARCH_REGISTRY: configSearchRegistry,
+          ASM_TUNER_MANIFEST, ASM_TUNER_MODE, ASM_TUNER_CACHE: asmTunerCache,
           TASK_DIR: KERNEL_PATH_ORIG,
           GPU_ID: d.gpu_id, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           TARGET_ROUTES: Array.isArray(d.target_routes) ? d.target_routes : [],
@@ -4540,8 +4629,12 @@ worker_result.json structure as StructuredOutput.` +
         let journalVerification = null;
         if (ver && journal && journal.registered) {
           const candidateId = d.journal_candidate_id || `r${round}:${d.id}`;
+          const tunerVerified = !(configSelection && configSelection.required)
+            || !!(ver.config_materialization && ver.config_materialization.ok === true
+              && ver.config_materialization.verify && ver.config_materialization.verify.ok === true
+              && ver.config_materialization.smoke && ver.config_materialization.smoke.ok === true);
           const verifiedOK = ver.policy_pass === true && says(ver.status, 'verified')
-            && says(ver.correctness, 'pass');
+            && says(ver.correctness, 'pass') && tunerVerified;
           journalVerification = await agentT(
             `Run EXACTLY this command and return its JSON stdout verbatim:
 \`\`\`bash
@@ -4713,9 +4806,18 @@ worker_result.json structure as StructuredOutput.` +
     // above is pinned lexically -- but note this one is NOT mode-gated: see
     // `asmRestoreReject`.
     const asmReason = asmRestoreReject(r.ver, null, roundPhase === PHASE_ASM);
+    const tunerReason = r.configSelection && r.configSelection.required
+      && !(r.ver.config_materialization && r.ver.config_materialization.ok === true
+        && r.ver.config_materialization.verify && r.ver.config_materialization.verify.ok === true
+        && r.ver.config_materialization.smoke && r.ver.config_materialization.smoke.ok === true)
+      ? 'asm_tuner:independent_materialization_or_dispatch_unverified' : null;
     if (metricReason || isaReason || asmReason) {
       log(`  ${r.d && r.d.id ? r.d.id : 'candidate'} verified but not a candidate: `
         + `${metricReason || isaReason || asmReason}`);
+      return false;
+    }
+    if (tunerReason) {
+      log(`  ${r.d && r.d.id ? r.d.id : 'candidate'} verified but not a candidate: ${tunerReason}`);
       return false;
     }
     // Same screen, same currency: milliseconds against the incumbent, so admission cannot be
@@ -4753,6 +4855,9 @@ worker_result.json structure as StructuredOutput.` +
     // than trust the pairing.
     isa_source_hash: r.ver.isa_evidence && typeof r.ver.isa_evidence.source_hash === 'string'
       ? r.ver.isa_evidence.source_hash : null,
+    config_selection: r.configSelection && r.configSelection.config
+      ? r.configSelection.config : null,
+    config_materialization: r.ver.config_materialization || null,
     journal: r.journal || null,
     // Fixed verifier roots are prepared from candidate and untouched canonical bytes. The lane
     // invokes paired_verify.py over them; verifier-authored session/pair fields are ignored.
@@ -4770,6 +4875,8 @@ worker_result.json structure as StructuredOutput.` +
         + `atomically write the exact structured result to ${EVAL_DIR}/round_${round}/integrate/integration_result.json.`, {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         GPU_ID: GPU_POOL, ...GPU_LOCK_INPUT, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        CONFIG_SEARCH_HELPER, CONFIG_SEARCH_REGISTRY: configSearchRegistry,
+        ASM_TUNER_MANIFEST, ASM_TUNER_MODE, ASM_TUNER_CACHE: asmTunerCache,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         // See integrator.md 1b. A `.s` is a whole-file alternative rendering of one translation
         // unit's machine code, not a diff against the source, so two of them for one unit do not
@@ -4779,7 +4886,9 @@ worker_result.json structure as StructuredOutput.` +
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
           target_routes: Array.isArray(r.d.target_routes) ? r.d.target_routes : [],
-          files: r.d.focus_files || [], patch: r.patch })),
+          files: r.d.focus_files || [], patch: r.patch,
+          config_selection: r.configSelection && r.configSelection.config
+            ? r.configSelection.config : null })),
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
@@ -4829,6 +4938,15 @@ worker_result.json structure as StructuredOutput.` +
     const integPolicyReason = integrate && integrate.policy_pass === true
       ? (policyReject(integrate, 'integrate') || twinReject(integrate, 'integrate')) : null;
     if (integPolicyReason) log(`  integrate r${round} result discarded: ${integPolicyReason}`);
+    const integTunerReason = ASM_TUNER_MODE === 'required'
+      && !(integrate && integrate.config_materialization
+        && integrate.config_materialization.ok === true
+        && integrate.config_materialization.verify
+        && integrate.config_materialization.verify.ok === true
+        && integrate.config_materialization.smoke
+        && integrate.config_materialization.smoke.ok === true)
+      ? 'asm_tuner:integrated_materialization_unverified' : null;
+    if (integTunerReason) log(`  integrate r${round} result discarded: ${integTunerReason}`);
     // An integrated program inherits the UNION of the planner-owned targets of the patches it
     // actually combined. The integrator reports that union for audit, but cannot relabel it after
     // seeing timings. Unknown/duplicate parents, an empty parent target, or a mismatched echo is
@@ -4842,6 +4960,7 @@ worker_result.json structure as StructuredOutput.` +
       && integrateJournal.entry && integrateJournal.entry.artifact
       && integrateJournal.entry.artifact.present === true);
     const integrationEligible = !!(integrate && integrate.policy_pass === true && !integPolicyReason
+      && !integTunerReason
       && integrate.conclusion === 'improved' && integratedArtifactRegistered && integrate.best
       && integPrim > Math.max(...candidates.map(c => c.geomean)));
     if (integrateJournal && integrateJournal.registered) {
@@ -5139,6 +5258,23 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
     // (measured at up to 17% between rocprofv3 invocations on this lane) and steers the next round
     // off it.
     if (commitOK) {
+      if (ASM_TUNER_MODE !== 'off' && ASM_TUNER_MANIFEST) {
+        const refreshedTuner = await agentT(
+          `The canonical commit may have changed asm_tuner_selection.json. Run EXACTLY this command ` +
+          `before any reprofile and return its JSON stdout verbatim:\n\`\`\`bash\n` +
+          `${GPU_LOCK_ENV ? `${GPU_LOCK_ENV} ` : ''}GEAK_GPU_ALLOWED=${JSON.stringify(GPU_IDS)} ` +
+          `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSON.stringify(GPU_POOL)} ` +
+          `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_fence_run.sh`)} ` +
+          `python3 ${JSON.stringify(CONFIG_SEARCH_HELPER)} prepare ` +
+          `--registry ${JSON.stringify(configSearchRegistry)} ` +
+          `--task-manifest ${JSON.stringify(ASM_TUNER_MANIFEST)} ` +
+          `--cache ${JSON.stringify(asmTunerCache)} --workspace ${JSON.stringify(CANONICAL)}\n\`\`\``,
+          { phase: 'Optimize', label: `config_search:refresh canonical r${round}`,
+            schema: CONFIG_PREPARE_SCHEMA });
+        if (!(refreshedTuner && refreshedTuner.ok) && ASM_TUNER_MODE === 'required') {
+          throw new Error(`committed tuner selection could not be materialized before reprofile r${round}`);
+        }
+      }
       profileSummary = await agentT(
         roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
           WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
@@ -5641,6 +5777,8 @@ const validation = await agentT(
     KERNEL_PATH_ORIG, TASK_DIR: KERNEL_PATH_ORIG,
     EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT,
+    CONFIG_SEARCH_HELPER, CONFIG_SEARCH_REGISTRY: configSearchRegistry,
+    ASM_TUNER_MANIFEST, ASM_TUNER_MODE, ASM_TUNER_CACHE: asmTunerCache,
     FINAL_PATCH: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
     TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,
     ...(HAS_WORKLOAD && report && report.final_speedup_weighted != null
@@ -5668,6 +5806,15 @@ const validationVerdict = (v, oraclePinned) => {
     return { trust: 'flagged', basis: 'unknown',
       reason: 'oracle:unpinned(setup recorded no oracle digest, so no measurement in this run can be '
         + 'shown to share a denominator with any other, in this run or in the archive it writes to)' };
+  }
+  const tunerRequired = typeof ASM_TUNER_MODE !== 'undefined' && ASM_TUNER_MODE === 'required';
+  if (tunerRequired
+      && !(v && v.config_materialization && v.config_materialization.ok === true
+        && v.config_materialization.verify && v.config_materialization.verify.ok === true
+        && v.config_materialization.smoke && v.config_materialization.smoke.ok === true)) {
+    return { trust: 'refused', basis: 'unknown',
+      reason: 'asm_tuner:final_materialization_unverified(the final task did not rebuild/load/hash and '
+        + 'dispatch the selected versioned runtime table in the Director workspace)' };
   }
   // Absent arbitration is not a slow kernel and not a fast one -- it is no measurement at all.
   if (!v) {

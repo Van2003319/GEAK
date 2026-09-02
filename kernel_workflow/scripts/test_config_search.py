@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("config_search.py")
@@ -144,3 +146,58 @@ def test_reregister_repairs_stale_content_addressed_row_without_duplicate_id(
     rows = json.loads(registry.read_text(encoding="utf-8"))["configs"]
     assert [row["id"] for row in rows] == [config_id]
     assert CS.select_config(registry, config_id=config_id)["ok"] is True
+
+
+def test_prepare_orders_search_create_select_materialize_before_engineer(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    manifest = Path(__file__).resolve().parents[2] / "asm_tuner/manifests/tasks/dense_bf16_gemm_fused.json"
+    contract = CS.TaskContract.load(manifest, require_oracle_compatible=True)
+    registry = tmp_path / "registry.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release_manifest = tmp_path / "release.json"
+    release_manifest.write_text("{}\n")
+
+    def fake_create(registry_value, **kwargs):
+        config = {
+            "kind": "asm_tuner_release", "task": contract.task,
+            "adapter": contract.adapter_name, "task_digest": contract.task_digest,
+            "protocol_hash": contract.protocol["hash"],
+            "oracle_manifest_sha256": contract.oracle_sha256,
+            "release_id": "release-unit", "variant": "seed", "priority": 100,
+        }
+        return CS.register_config(registry_value, config=config, artifact=release_manifest)
+
+    def fake_materialize(registry_value, **kwargs):
+        selected = CS.select_config(registry_value, config_id=kwargs["config_id"])
+        return {
+            "ok": True, "schema": CS.SCHEMA, "phase_independent": True,
+            "config": selected["config"],
+            "materialization": {"ok": True, "table_digest": "a" * 64},
+        }
+
+    monkeypatch.setattr(CS, "create_asm_config", fake_create)
+    monkeypatch.setattr(CS, "search_asm_configs", fake_create)
+    monkeypatch.setattr(CS, "materialize_asm_config", fake_materialize)
+    monkeypatch.setenv("GEAK_GPU_LOCK_HELD", "1")
+    monkeypatch.setenv("GEAK_GPU_FENCE_HELD", "1")
+    result = CS.prepare_asm_config(
+        registry, task_manifest=manifest, workspace=workspace, cache=tmp_path / "cache")
+    assert result["ok"] is True
+    assert result["prepared_before_engineer"] is True
+    assert [row["operation"] for row in result["operations"]] == [
+        "search", "create", "select", "materialize"]
+
+
+def test_prepare_requires_both_gpu_lock_and_process_fence(tmp_path: Path, monkeypatch) -> None:
+    manifest = Path(__file__).resolve().parents[2] / "asm_tuner/manifests/tasks/dense_bf16_gemm_fused.json"
+    monkeypatch.delenv("GEAK_GPU_LOCK_HELD", raising=False)
+    monkeypatch.delenv("GEAK_GPU_FENCE_HELD", raising=False)
+    with pytest.raises(CS.ConfigSearchError, match="gpu_lock"):
+        CS.prepare_asm_config(tmp_path / "registry.json", task_manifest=manifest,
+                              workspace=tmp_path, cache=tmp_path / "cache")
+    monkeypatch.setenv("GEAK_GPU_LOCK_HELD", "1")
+    with pytest.raises(CS.ConfigSearchError, match="gpu_fence"):
+        CS.prepare_asm_config(tmp_path / "registry.json", task_manifest=manifest,
+                              workspace=tmp_path, cache=tmp_path / "cache")

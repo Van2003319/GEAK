@@ -300,7 +300,8 @@ denominator. Return the same digest again in `director_validation.json` at valid
 ## PHASE=validate
 
 Inputs: `KERNEL_PATH_ORIG`, `EVAL_DIR`, `WORKSPACE` (=EVAL_DIR/workspace), `SKILL_DIR`, `GPU_ID`,
-`APPLY_TO_ORIGINAL`, and the COMMANDMENT path `EVAL_DIR/COMMANDMENT.md`, the final patch
+`APPLY_TO_ORIGINAL`, `ASM_TUNER_MODE`, `ASM_TUNER_MANIFEST`, `ASM_TUNER_CACHE`,
+`CONFIG_SEARCH_HELPER`, `CONFIG_SEARCH_REGISTRY`, and the COMMANDMENT path `EVAL_DIR/COMMANDMENT.md`, the final patch
 `EVAL_DIR/final_patch.diff`, the TechLead's claimed numbers, and `BASELINE_TIMING` (the per-case
 baseline latencies recorded at benchmark setup).
 
@@ -336,6 +337,16 @@ baseline latencies recorded at benchmark setup).
    git apply "$EVAL_DIR/final_patch.diff"
    # (No artifact cleanup needed — the tar copy excluded build/__pycache__/*.so; git apply adds only source.)
    ```
+2b. When `ASM_TUNER_MODE=required`, the applied final patch must contain
+   `asm_tuner_selection.json`. Read its exact `registry_id`; do not choose another row. Under
+   `gpu_lock.sh` + `gpu_fence_run.sh`, run `config_search materialize`, then
+   `verify-materialization --rebuild --in-place`, then `smoke` against the validation workspace.
+   Save all three JSON receipts under `EVAL_DIR` and return them verbatim as
+   `config_materialization:{"ok":true,"materialize":...,"verify":...,"smoke":...}`. Any missing
+   id/hash/symbol, rebuild/ISA/load failure, or a smoke that does not name the selected dispatch symbol
+   is `validation_status:"flagged"` and no speedup. `geak_tuner_runtime.py` may be immutable-exempted
+   from the policy scanner only after this task-digest check succeeds; the table, generated source and
+   selected ELF are never exempt.
 3. Before executing candidate code, run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` on every candidate-owned source, wrapper, build/link file, imported/generated snapshot, and any candidate ELF in the validation workspace. Exempt only separately frozen immutable baseline/oracle paths; a mixed candidate+oracle artifact is never exempt. Candidates must not include, call, import, dynamically load, or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, MIOpen, or indirect PyTorch matmul/mm/bmm/linear. HIP runtime/language APIs, MFMA/device intrinsics, inline AMDGCN assembly, and header-only rocWMMA are allowed only with a clean candidate ELF. Store `policy_prebuild.json`; any finding, inspection/tool error, missing path, or absent passing receipt fails closed: `validation_status:"flagged"`, `policy_pass:false`, no correctness/benchmark/writeback.
 4. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status `flagged`, record the failure, do NOT report a speedup as accepted. Scan all newly built candidate ELFs and candidate source/build paths again into `policy_postbuild.json`; forbidden dependencies/symbols/strings or an absent passing receipt are flagged and benchmarking stops.
 5. Run FULL_BENCHMARK with `$GPU_LOCK_ENV bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID bash $SKILL_DIR/scripts/gpu_fence_run.sh <full bench cmd>`.
@@ -419,6 +430,7 @@ Return JSON:
   "director_verified_speedup_weighted": 0.0,
   "tech_lead_reported_speedup_geomean": 0.0,
   "validation_status": "accepted|flagged",
+  "config_materialization": {"ok": true, "materialize": {}, "verify": {"ok": true}, "smoke": {"ok": true}},
   "correctness": "pass|fail",
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}],
   "applied_to_original": "true|false",

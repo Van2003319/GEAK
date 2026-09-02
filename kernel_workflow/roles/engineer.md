@@ -25,8 +25,11 @@ work in your OWN private workspace copy — total isolation, no coordination wit
   weighted target and never violate its gates, e.g. decode-no-regress or the memory cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base, resolved by the TechLead for THIS kernel (see the next section).
-- `AVAILABLE_CAPABILITIES.config_search` — phase-independent config lookup/materialisation. Select
-  only hash-valid `precompiled:true` results; route new config creation through its `create` command.
+- `AVAILABLE_CAPABILITIES.config_search`, `CONFIG_SELECTION`, `ASM_TUNER_MATERIALIZATION` — the
+  canonical search/create/select/materialize barrier already completed before your call. Execute the
+  selected task artifact; do not edit `.geak_tuner`, its versioned table, or substitute another `.so`.
+  New configs must be declared by the search-space manifest and registered with `create-asm` or
+  `search-asm`, never fabricated in source/prose.
 
 ## Load only the knowledge for your specialty (keeps context focused)
 - algorithm  → `hip_optimization.md` (P0/P1) or `triton_optimization.md`, + `geomean_levers.md`

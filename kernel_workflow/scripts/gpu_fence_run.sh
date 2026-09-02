@@ -75,6 +75,9 @@ live_in_group() {
 # while the log says the fence ran. Its own test caught it, which is the only
 # reason it is not still in here.
 set -m
+# Payloads that enforce the full measurement boundary can distinguish this
+# process-group fence from a bare gpu_lock.sh invocation.
+export GEAK_GPU_FENCE_HELD=1
 "$@" &
 child=$!
 set +m

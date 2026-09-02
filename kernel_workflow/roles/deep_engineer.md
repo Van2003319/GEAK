@@ -44,9 +44,10 @@ coherent implementation, and iterate hard.
   (e2e-refined weighted target + hard gates — push toward it, never violate decode-no-regress / mem cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base (see the contract section).
-- `AVAILABLE_CAPABILITIES.config_search` — callable in this phase exactly as in every other phase.
-  Select only hash-valid precompiled entries. Route creation through `config_search create`, which
-  owns the builder receipt and registration; never invent an unregistered config in prose.
+- `AVAILABLE_CAPABILITIES.config_search`, `CONFIG_SELECTION`, `ASM_TUNER_MATERIALIZATION` — the
+  complete task release selected before this call. Keep its table/artifact immutable. Use only
+  declared `create-asm`/`search-asm` variants and a real registry id for any replacement; never invent
+  config geometry in prose.
 
 ## Read broadly (you get the full context, unlike specialists)
 Read ALL of these before and during your work, and re-consult as the bottleneck shifts:

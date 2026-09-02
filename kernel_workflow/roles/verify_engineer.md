@@ -16,6 +16,9 @@ absolute per-case latencies. The script trusts only your numbers.
   `verified_geomean:0`, and do not treat it as an error.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
+- `ASM_TUNER_MODE`, `ASM_TUNER_MANIFEST`, `ASM_TUNER_CACHE`, `CONFIG_SEARCH_HELPER`,
+  `CONFIG_SEARCH_REGISTRY`, and `CONFIG_SELECTION` — when mode is `required`, these name the exact
+  precompiled release the Engineer actually ran. They are an execution contract, not advice.
 - `ASM_ROUNDTRIP_HELPER` — `asm_roundtrip.py`, present when the lane can build an assembly
   candidate. See step 2d: whether you NEED it is decided by the patch, not by this input.
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
@@ -42,6 +45,44 @@ absolute per-case latencies. The script trusts only your numbers.
    ```
    (Use `$WS` as your verify workspace for all subsequent commands.)
    If the patch fails to apply → return `status:"apply_failed"`, `verified_geomean:0`.
+1b. **Re-materialize and independently rebuild the selected asm_tuner release before candidate code.**
+    Skip only when `ASM_TUNER_MODE=off`. In `required` mode, `CONFIG_SELECTION.id` must be non-empty;
+    never substitute the first registry row or a nearby artifact. From the fresh `$WS`, run both commands
+    under the same GPU lock + process-group fence used by the lane (the smoke launches the task):
+
+    ```bash
+    ID='<CONFIG_SELECTION.id exactly>'
+    $GPU_LOCK_ENV bash "$SKILL_DIR/scripts/gpu_lock.sh" "$GPU_ID" \
+      bash "$SKILL_DIR/scripts/gpu_fence_run.sh" \
+      python3 "$CONFIG_SEARCH_HELPER" materialize \
+        --registry "$CONFIG_SEARCH_REGISTRY" --id "$ID" \
+        --task-manifest "$ASM_TUNER_MANIFEST" --workspace "$WS" \
+      > "$VERIFY_DIR/asm_tuner_materialize.json"
+    $GPU_LOCK_ENV bash "$SKILL_DIR/scripts/gpu_lock.sh" "$GPU_ID" \
+      bash "$SKILL_DIR/scripts/gpu_fence_run.sh" \
+      python3 "$CONFIG_SEARCH_HELPER" verify-materialization \
+        --task-manifest "$ASM_TUNER_MANIFEST" --workspace "$WS" \
+        --cache "$VERIFY_DIR/asm_tuner_rebuild_cache" --rebuild --in-place \
+      > "$VERIFY_DIR/asm_tuner_verify.json"
+    $GPU_LOCK_ENV bash "$SKILL_DIR/scripts/gpu_lock.sh" "$GPU_ID" \
+      bash "$SKILL_DIR/scripts/gpu_fence_run.sh" \
+      python3 "$CONFIG_SEARCH_HELPER" smoke \
+        --task-manifest "$ASM_TUNER_MANIFEST" --workspace "$WS" \
+      > "$VERIFY_DIR/asm_tuner_dispatch_smoke.json"
+    ```
+
+    All three must return `ok:true`. The verifier recomputes the canonical task digest (including
+    CASES, input builder, correctness function and trusted task-local loader), loads the selected symbol,
+    checks table/artifact/generated-source/protocol/oracle hashes, and independently rebuilds source in
+    `$VERIFY_DIR`, comparing ISA. The smoke must name the selected `config_id` and `symbol`; this is the
+    proof that task dispatch consumed the versioned table rather than merely running a Python selector.
+    Return all three tool objects without paraphrase as
+    `config_materialization: {"ok":true,"materialize":<first>,"verify":<second>,"smoke":<third>}`.
+    Any missing receipt or mismatch is `status:"config_materialization_failed"`; do not run correctness.
+
+    `geak_tuner_runtime.py` is the one narrow dynamic-loader exception: it may be passed as `--immutable`
+    to the policy scanner only after the task-digest check above succeeds. Its hash is part of the task
+    contract. No other loader, runtime table, generated source, or selected ELF is exempt.
 2. Read `COMMANDMENT.md` for the exact correctness + full-benchmark commands + parse hint.
 2b. **Mandatory policy gate before executing candidate code.** Run `python3 $SKILL_DIR/scripts/candidate_policy_scan.py` over every candidate-owned source, wrapper, build/link file, imported/generated snapshot, and any already-built candidate artifact. Pass only the frozen baseline/oracle paths through `--immutable`; never exempt a mixed candidate+oracle artifact. The candidate must not include, call, import, dynamically load, or link rocBLAS, hipBLAS, hipBLASLt, Tensile, Composable Kernel/CK, MIOpen, or indirect PyTorch GEMM/linear APIs. HIP runtime/language APIs, MFMA/device intrinsics, inline AMDGCN assembly, and header-only rocWMMA are allowed only when the candidate artifact has no forbidden dependency. Write the canonical JSON to `$VERIFY_DIR/policy_prebuild.json`. Any finding, inspection error, missing path/receipt, or uninspectable artifact fails closed: return `status:"policy_failed"`, `policy_pass:false`, and execute neither correctness nor benchmark.
 2c. **Vector-cast alignment gate (finding 143).** Run `python3 $SKILL_DIR/scripts/lds_cast_alignment.py <candidate sources> --baseline <the frozen original source>` and write the `--json` output to `$VERIFY_DIR/cast_alignment.json`. This catches one specific, popular, and entirely silent mutation: widening a `global -> LDS` staging copy by casting the destination to `uint4*` when the array's row stride is not a multiple of 16. Every counting check passes — fewer instructions, fewer registers, unchanged LDS, no spills — and the compiler emits `ds_write_b128` because the cast *told* it the address was aligned. On gfx942 that does not fault; the address is truncated inside the 16-byte granule and the tile is silently wrong. Exit 1 (a hazard the baseline does not have) → `status:"policy_failed"`, `policy_pass:false`, do not run correctness or benchmark. Exit 2 (something did not parse) is also fail-closed: the verdict would have been a guess. Exit 0 is **not** a proof of alignment — the tool checks only strides fixed by the declaration and says so; the innermost index term depends on the loop and is not decidable statically. Note the baseline itself carries an inherited instance in the B tile, which is why this runs as a delta and not as an absolute check; do not "fix" the inherited one, it is outside the task's mutable surface.
@@ -425,8 +466,18 @@ absolute per-case latencies. The script trusts only your numbers.
 7. **Prepare deterministic candidate/incumbent roots for the paired producer.** The candidate
    root is exactly `$VERIFY_DIR/candidate` from step 1. Build an untouched control at exactly
    `$VERIFY_DIR/incumbent` by the same symlink-preserving, build-excluding tar copy from `CANONICAL`.
-   If canonical carries a `.s`, restore it in the incumbent root before returning. Never apply the
-   candidate patch there and leave both roots on disk:
+   Never apply the candidate patch there. If that control contains `asm_tuner_selection.json`, read
+   its exact `registry_id` and run `config_search materialize` for that id under gpu_lock + gpu_fence
+   in the control workspace before it is built or timed; never substitute the candidate's id. Verify
+   the control's runtime-table, artifact, generated-source, task, and measurement-protocol hashes in
+   place. In `ASM_TUNER_MODE=required`, a missing selection, failed materialization, or hash mismatch
+   fails closed instead of timing a canonical fallback. The candidate remains governed by step 1b's
+   independent rebuild plus in-place ISA/hash verification.
+
+   If canonical carries a banked `.s`, restore it in the incumbent root with
+   `ASM_ROUNDTRIP_HELPER incumbent/restore` before returning. An unrestored control is an older
+   program and could count the same assembly win again. Leave both roots on disk for the deterministic
+   paired producer:
 
    ```bash
    CONTROL_WS="$VERIFY_DIR/incumbent"; mkdir -p "$CONTROL_WS"
