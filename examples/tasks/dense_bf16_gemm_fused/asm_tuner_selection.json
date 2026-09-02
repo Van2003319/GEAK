@@ -1,16 +1,808 @@
 {
   "config_ids": [
-    "530289ad76eb74d4579f",
     "9539a5460e4eb2decfb6",
     "c7f2c38f1343003c32d9"
   ],
   "oracle_manifest_sha256": "d7c75823dd2484c5442b63423d26d1025e4ada993f18904f8af30f41102c6b91",
   "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-  "registry_id": "cfg-f9942f29a6ad7f608006",
-  "release_id": "389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1",
+  "registry_id": "cfg-97de40d6709d3c9a8f87",
+  "release_id": "c46353829853ec27b598eaf7e982a3727b06dbdac7ef041685c401327917fbce",
+  "route_outcomes": {
+    "decode_m16_square": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "decode_m2_square": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "decode_m32_down": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "decode_m64_square": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "decode_m8_up": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "decode_m96_up": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "prefill_m1024_down": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "prefill_m128_square": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "prefill_m2048_square": {
+      "candidate_gates": [
+        {
+          "accepted": true,
+          "algorithm": {
+            "confidence": 0.95,
+            "effect": "log(canonical_ms/candidate_ms)",
+            "estimator": "20% trimmed mean",
+            "interval": "one-sided paired percentile bootstrap lower bound",
+            "min_pairs": 8,
+            "name": "paired-log-trimmed-bootstrap/v1",
+            "resamples": 4096,
+            "seed": 20260902
+          },
+          "candidate_id": "c7f2c38f1343003c32d9",
+          "candidate_median_ms": 0.4085501581430435,
+          "canonical_control_arm": "__canonical_task_implementation__",
+          "canonical_median_ms": 0.5334813892841339,
+          "ci95_lower_log_ratio": 0.26477771356227314,
+          "ci95_lower_speedup": 1.3031412729496379,
+          "comparison": "candidate_vs_canonical_task_implementation",
+          "decision": "winner",
+          "estimate_log_ratio": 0.266907617874913,
+          "estimate_speedup": 1.3059197971117742,
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "n_pairs": 36,
+          "pair_ids": [
+            "f1f8c14c89d85785966d132113be13f27f719826fe19a1ca43809f97b41208e0",
+            "dd7a160986418c8a8cf4d914b0cc5c584ebce0c1ab613c20e8699c7591207f12",
+            "9a123aad69bb19f76593c5c1390f5183c3002cca2a4ad85328a3ea3294a7031f",
+            "be8e327473cb569934c1b2ba4a5733fa19c08e380536b8686acc629f7cab903d",
+            "cc1088a94b1f4d3bf4d1e49bb03323ab5995665afdfac976d44f963f685e41da",
+            "0b2f29fcd3f98ce4a3acb7f128d0ef9884c5c661cd7e67182d13c4f42506bfba",
+            "9eb21a5bd9a32cf49b0e667f94ba977f3fd06d7481e599af1ef04b0acc85a277",
+            "3ee1312027d8431018b6afae388f5cef302dc5deea5036c6e62c99113f7aca4a",
+            "6917e19b9914b6ee79de29838b17a70426838b39b5eb1bf6f96ee7a2aa176353",
+            "afccab679d4b0dbc8b1e14e0f82f65f6f5c2536e1992e7bb6c0153a85bd9109b",
+            "9654aee009b8f4468c20d116cf23b2e14de4d137cf1cd5af7b9b0cc20c5fa17c",
+            "633f0cafeb0b184b0dd8cd607b8d339f6fd74a68f73b981d9e2d3f6a358617ed",
+            "a3c099946af574caa907e0c2202df72dde02afed703a94de90147e4dd686e525",
+            "a4b337feff169a6be6cfb22cd6eb0b903aa41fca590c3e3db2ade4ef9163948d",
+            "27de78081c2599e4c1becd4f6bef2e251dc7aedbe5c6b73a78dfd9ab33287a70",
+            "ec11c10d58b51361d610fcc0de0f2ed172fff83e2602d057ca746aee0dcebee1",
+            "8a21240f3004e775829be3ce9ab8fde3e2657a612f152a944255327fcdf5d163",
+            "45acea761365fbd89fc748516e1aa5c15898c50a590487253e95a4619f889db9",
+            "f806bf6e4912b70fc1b8d81ad2d9c640c6ed8d58589ff7eacbb8988ea03ce883",
+            "73b75c47cf5cd50cacf6d273f6f9128c71f3ee3db0f5f0ec042c031dc8200e43",
+            "729a702f2b5065b74eab5a86b26b196259f7c989a1e363e99f554da05d12755d",
+            "a233a6f3d93d9165b2d7b8a1e759702acf59aa8aa4ca69624463717b43afbd37",
+            "8a3b1e991064e0c6cc086ad84f8830a3fe312791d6d1f1c7ee8e1858d7d8d479",
+            "6372299a5254b16204c723fbffd1706257d320bc061327ba003b9d145989ee62",
+            "00f5dd06f20444f2c03030e856f8907f25ee8295734f1295d2a4a1d4738b0535",
+            "f238a001a02ff6950bbb2aebbf4ade9fa11c704cd2a5396731633c88226dd655",
+            "1724e66542d9c53078e2fde556d09ba1e1cb203f6c6ec880c71cad6ef325c75c",
+            "d85e7ecf2c3b2991cbb887d3691a3e3b9be822483cb4edfe460d4c031a552066",
+            "14f26bb7604b61a6e1dd919340be150db7d7c9229e491e5f25172b6a1ee42da5",
+            "330557b74ef3315b871c9c3a944fa91ad8d960a8b0ed137b647d328973834195",
+            "8eeef57e0dcd0a35f38f668231f7ebbdf357b3f2ac493551caf29a0c9809642e",
+            "200ee8fde0a44a9cdac8eeca38b9f1a68c065e26809f7d9b7b5de2b3f2c7751b",
+            "7e19ccc597ea3a763cbc22f92b93e9650fc84c34ae61d89957ed572bbf1e67d4",
+            "c2ee46eb171a17152a10d40e60aa8b3d3005ca799e403e548147bc560ade2947",
+            "82f6b2f04afe61a26fb62f818fafa12c2822ab93c2aa9d03f215570406808b2a",
+            "cdaec42c9cb6e74743b55663179e87a422fe6ddaba4ebe459a85f101bacc5d5d"
+          ],
+          "pairs": [
+            {
+              "block": 0,
+              "candidate_ms": 0.40540263056755066,
+              "canonical_ms": 0.53343266248703,
+              "pair_id": "f1f8c14c89d85785966d132113be13f27f719826fe19a1ca43809f97b41208e0",
+              "slot_fingerprint": "5b02a8e75068f989eb404408212891046d3e712e4af8c0214486937d82ed9c4d",
+              "slot_id": "weight-002"
+            },
+            {
+              "block": 1,
+              "candidate_ms": 0.41083261370658875,
+              "canonical_ms": 0.5318976640701294,
+              "pair_id": "dd7a160986418c8a8cf4d914b0cc5c584ebce0c1ab613c20e8699c7591207f12",
+              "slot_fingerprint": "3bc6a2260585684aaa27fb9fd5ef272248fbe99798266a669af2a143ff60bb98",
+              "slot_id": "weight-008"
+            },
+            {
+              "block": 2,
+              "candidate_ms": 0.4095626771450043,
+              "canonical_ms": 0.5305202007293701,
+              "pair_id": "9a123aad69bb19f76593c5c1390f5183c3002cca2a4ad85328a3ea3294a7031f",
+              "slot_fingerprint": "5c72fd56871069800276e691740487c7ddf0cad12f3748a0d39732c4c70bd2e4",
+              "slot_id": "weight-000"
+            },
+            {
+              "block": 3,
+              "candidate_ms": 0.40692511200904846,
+              "canonical_ms": 0.5330851078033447,
+              "pair_id": "be8e327473cb569934c1b2ba4a5733fa19c08e380536b8686acc629f7cab903d",
+              "slot_fingerprint": "5ecad2fa017c05ad869dd8feb33491588abcd598499be55ab0f61d9646894397",
+              "slot_id": "weight-007"
+            },
+            {
+              "block": 4,
+              "candidate_ms": 0.4072176218032837,
+              "canonical_ms": 0.5407126545906067,
+              "pair_id": "cc1088a94b1f4d3bf4d1e49bb03323ab5995665afdfac976d44f963f685e41da",
+              "slot_fingerprint": "21824f145e133cdbdbefc7c1b340ae5c6df16b53c41dfda429a622f7619b01c9",
+              "slot_id": "weight-010"
+            },
+            {
+              "block": 5,
+              "candidate_ms": 0.4078150689601898,
+              "canonical_ms": 0.5313177108764648,
+              "pair_id": "0b2f29fcd3f98ce4a3acb7f128d0ef9884c5c661cd7e67182d13c4f42506bfba",
+              "slot_fingerprint": "566892c6ea136b382b9e4a9ffe24ec16172eedd209daad5b988d130826da3595",
+              "slot_id": "weight-003"
+            },
+            {
+              "block": 6,
+              "candidate_ms": 0.40701013803482056,
+              "canonical_ms": 0.5336475968360901,
+              "pair_id": "9eb21a5bd9a32cf49b0e667f94ba977f3fd06d7481e599af1ef04b0acc85a277",
+              "slot_fingerprint": "c31528d159437b4e8ae6091064d107705194ed901c39fa3477978b10b133e365",
+              "slot_id": "weight-001"
+            },
+            {
+              "block": 7,
+              "candidate_ms": 0.41181012988090515,
+              "canonical_ms": 0.534162700176239,
+              "pair_id": "3ee1312027d8431018b6afae388f5cef302dc5deea5036c6e62c99113f7aca4a",
+              "slot_fingerprint": "0a9c7fa8ee10e35703852804ccb0d23db552038e793b401c81b2a59ce83ed5c8",
+              "slot_id": "weight-006"
+            },
+            {
+              "block": 8,
+              "candidate_ms": 0.4112701117992401,
+              "canonical_ms": 0.53395015001297,
+              "pair_id": "6917e19b9914b6ee79de29838b17a70426838b39b5eb1bf6f96ee7a2aa176353",
+              "slot_fingerprint": "b791c782f2043ba0a536139fb75730f0d5b3c9f0398249483a43afd9ee34d0e9",
+              "slot_id": "weight-004"
+            },
+            {
+              "block": 9,
+              "candidate_ms": 0.4079926311969757,
+              "canonical_ms": 0.5324926972389221,
+              "pair_id": "afccab679d4b0dbc8b1e14e0f82f65f6f5c2536e1992e7bb6c0153a85bd9109b",
+              "slot_fingerprint": "1f6aa55cf371194b1324d376f71b711d96d8e0c350edef246eacb2a42eaaae4a",
+              "slot_id": "weight-009"
+            },
+            {
+              "block": 10,
+              "candidate_ms": 0.40500763058662415,
+              "canonical_ms": 0.5339126586914062,
+              "pair_id": "9654aee009b8f4468c20d116cf23b2e14de4d137cf1cd5af7b9b0cc20c5fa17c",
+              "slot_fingerprint": "31a43fa6bb5167410ecc32777cbbb2ab70c2ff9a7fe03b31659bc2bb0c95ea15",
+              "slot_id": "weight-011"
+            },
+            {
+              "block": 11,
+              "candidate_ms": 0.40521013736724854,
+              "canonical_ms": 0.5356826782226562,
+              "pair_id": "633f0cafeb0b184b0dd8cd607b8d339f6fd74a68f73b981d9e2d3f6a358617ed",
+              "slot_fingerprint": "a296a3bd94cee0edd650ddc4667e2831df516d167934ac80fe010254390c40f1",
+              "slot_id": "weight-005"
+            },
+            {
+              "block": 12,
+              "candidate_ms": 0.4084226191043854,
+              "canonical_ms": 0.5339877009391785,
+              "pair_id": "a3c099946af574caa907e0c2202df72dde02afed703a94de90147e4dd686e525",
+              "slot_fingerprint": "5c72fd56871069800276e691740487c7ddf0cad12f3748a0d39732c4c70bd2e4",
+              "slot_id": "weight-000"
+            },
+            {
+              "block": 13,
+              "candidate_ms": 0.4072626233100891,
+              "canonical_ms": 0.5342726111412048,
+              "pair_id": "a4b337feff169a6be6cfb22cd6eb0b903aa41fca590c3e3db2ade4ef9163948d",
+              "slot_fingerprint": "5b02a8e75068f989eb404408212891046d3e712e4af8c0214486937d82ed9c4d",
+              "slot_id": "weight-002"
+            },
+            {
+              "block": 14,
+              "candidate_ms": 0.4071851372718811,
+              "canonical_ms": 0.5329601764678955,
+              "pair_id": "27de78081c2599e4c1becd4f6bef2e251dc7aedbe5c6b73a78dfd9ab33287a70",
+              "slot_fingerprint": "0a9c7fa8ee10e35703852804ccb0d23db552038e793b401c81b2a59ce83ed5c8",
+              "slot_id": "weight-006"
+            },
+            {
+              "block": 15,
+              "candidate_ms": 0.4211426377296448,
+              "canonical_ms": 0.5344001054763794,
+              "pair_id": "ec11c10d58b51361d610fcc0de0f2ed172fff83e2602d057ca746aee0dcebee1",
+              "slot_fingerprint": "3bc6a2260585684aaa27fb9fd5ef272248fbe99798266a669af2a143ff60bb98",
+              "slot_id": "weight-008"
+            },
+            {
+              "block": 16,
+              "candidate_ms": 0.40917012095451355,
+              "canonical_ms": 0.5344926118850708,
+              "pair_id": "8a21240f3004e775829be3ce9ab8fde3e2657a612f152a944255327fcdf5d163",
+              "slot_fingerprint": "5ecad2fa017c05ad869dd8feb33491588abcd598499be55ab0f61d9646894397",
+              "slot_id": "weight-007"
+            },
+            {
+              "block": 17,
+              "candidate_ms": 0.4078851342201233,
+              "canonical_ms": 0.5314801335334778,
+              "pair_id": "45acea761365fbd89fc748516e1aa5c15898c50a590487253e95a4619f889db9",
+              "slot_fingerprint": "566892c6ea136b382b9e4a9ffe24ec16172eedd209daad5b988d130826da3595",
+              "slot_id": "weight-003"
+            },
+            {
+              "block": 18,
+              "candidate_ms": 0.4099251329898834,
+              "canonical_ms": 0.5333076119422913,
+              "pair_id": "f806bf6e4912b70fc1b8d81ad2d9c640c6ed8d58589ff7eacbb8988ea03ce883",
+              "slot_fingerprint": "c31528d159437b4e8ae6091064d107705194ed901c39fa3477978b10b133e365",
+              "slot_id": "weight-001"
+            },
+            {
+              "block": 19,
+              "candidate_ms": 0.4057026207447052,
+              "canonical_ms": 0.5323526859283447,
+              "pair_id": "73b75c47cf5cd50cacf6d273f6f9128c71f3ee3db0f5f0ec042c031dc8200e43",
+              "slot_fingerprint": "31a43fa6bb5167410ecc32777cbbb2ab70c2ff9a7fe03b31659bc2bb0c95ea15",
+              "slot_id": "weight-011"
+            },
+            {
+              "block": 20,
+              "candidate_ms": 0.4094151258468628,
+              "canonical_ms": 0.5407027006149292,
+              "pair_id": "729a702f2b5065b74eab5a86b26b196259f7c989a1e363e99f554da05d12755d",
+              "slot_fingerprint": "b791c782f2043ba0a536139fb75730f0d5b3c9f0398249483a43afd9ee34d0e9",
+              "slot_id": "weight-004"
+            },
+            {
+              "block": 21,
+              "candidate_ms": 0.4088551104068756,
+              "canonical_ms": 0.5335326194763184,
+              "pair_id": "a233a6f3d93d9165b2d7b8a1e759702acf59aa8aa4ca69624463717b43afbd37",
+              "slot_fingerprint": "21824f145e133cdbdbefc7c1b340ae5c6df16b53c41dfda429a622f7619b01c9",
+              "slot_id": "weight-010"
+            },
+            {
+              "block": 22,
+              "candidate_ms": 0.4069526791572571,
+              "canonical_ms": 0.5340601801872253,
+              "pair_id": "8a3b1e991064e0c6cc086ad84f8830a3fe312791d6d1f1c7ee8e1858d7d8d479",
+              "slot_fingerprint": "1f6aa55cf371194b1324d376f71b711d96d8e0c350edef246eacb2a42eaaae4a",
+              "slot_id": "weight-009"
+            },
+            {
+              "block": 23,
+              "candidate_ms": 0.4063851833343506,
+              "canonical_ms": 0.5339576005935669,
+              "pair_id": "6372299a5254b16204c723fbffd1706257d320bc061327ba003b9d145989ee62",
+              "slot_fingerprint": "a296a3bd94cee0edd650ddc4667e2831df516d167934ac80fe010254390c40f1",
+              "slot_id": "weight-005"
+            },
+            {
+              "block": 24,
+              "candidate_ms": 0.4098976254463196,
+              "canonical_ms": 0.531845211982727,
+              "pair_id": "00f5dd06f20444f2c03030e856f8907f25ee8295734f1295d2a4a1d4738b0535",
+              "slot_fingerprint": "5c72fd56871069800276e691740487c7ddf0cad12f3748a0d39732c4c70bd2e4",
+              "slot_id": "weight-000"
+            },
+            {
+              "block": 25,
+              "candidate_ms": 0.4217401146888733,
+              "canonical_ms": 0.5328776240348816,
+              "pair_id": "f238a001a02ff6950bbb2aebbf4ade9fa11c704cd2a5396731633c88226dd655",
+              "slot_fingerprint": "5ecad2fa017c05ad869dd8feb33491588abcd598499be55ab0f61d9646894397",
+              "slot_id": "weight-007"
+            },
+            {
+              "block": 26,
+              "candidate_ms": 0.40987011790275574,
+              "canonical_ms": 0.5329251885414124,
+              "pair_id": "1724e66542d9c53078e2fde556d09ba1e1cb203f6c6ec880c71cad6ef325c75c",
+              "slot_fingerprint": "1f6aa55cf371194b1324d376f71b711d96d8e0c350edef246eacb2a42eaaae4a",
+              "slot_id": "weight-009"
+            },
+            {
+              "block": 27,
+              "candidate_ms": 0.4075751304626465,
+              "canonical_ms": 0.5346276164054871,
+              "pair_id": "d85e7ecf2c3b2991cbb887d3691a3e3b9be822483cb4edfe460d4c031a552066",
+              "slot_fingerprint": "566892c6ea136b382b9e4a9ffe24ec16172eedd209daad5b988d130826da3595",
+              "slot_id": "weight-003"
+            },
+            {
+              "block": 28,
+              "candidate_ms": 0.41044512391090393,
+              "canonical_ms": 0.5357477068901062,
+              "pair_id": "14f26bb7604b61a6e1dd919340be150db7d7c9229e491e5f25172b6a1ee42da5",
+              "slot_fingerprint": "0a9c7fa8ee10e35703852804ccb0d23db552038e793b401c81b2a59ce83ed5c8",
+              "slot_id": "weight-006"
+            },
+            {
+              "block": 29,
+              "candidate_ms": 0.4093826115131378,
+              "canonical_ms": 0.5326526761054993,
+              "pair_id": "330557b74ef3315b871c9c3a944fa91ad8d960a8b0ed137b647d328973834195",
+              "slot_fingerprint": "c31528d159437b4e8ae6091064d107705194ed901c39fa3477978b10b133e365",
+              "slot_id": "weight-001"
+            },
+            {
+              "block": 30,
+              "candidate_ms": 0.408807635307312,
+              "canonical_ms": 0.5353676080703735,
+              "pair_id": "8eeef57e0dcd0a35f38f668231f7ebbdf357b3f2ac493551caf29a0c9809642e",
+              "slot_fingerprint": "a296a3bd94cee0edd650ddc4667e2831df516d167934ac80fe010254390c40f1",
+              "slot_id": "weight-005"
+            },
+            {
+              "block": 31,
+              "candidate_ms": 0.4211576282978058,
+              "canonical_ms": 0.5321776866912842,
+              "pair_id": "200ee8fde0a44a9cdac8eeca38b9f1a68c065e26809f7d9b7b5de2b3f2c7751b",
+              "slot_fingerprint": "5b02a8e75068f989eb404408212891046d3e712e4af8c0214486937d82ed9c4d",
+              "slot_id": "weight-002"
+            },
+            {
+              "block": 32,
+              "candidate_ms": 0.4068151116371155,
+              "canonical_ms": 0.5335301160812378,
+              "pair_id": "7e19ccc597ea3a763cbc22f92b93e9650fc84c34ae61d89957ed572bbf1e67d4",
+              "slot_fingerprint": "31a43fa6bb5167410ecc32777cbbb2ab70c2ff9a7fe03b31659bc2bb0c95ea15",
+              "slot_id": "weight-011"
+            },
+            {
+              "block": 33,
+              "candidate_ms": 0.40723511576652527,
+              "canonical_ms": 0.5316451787948608,
+              "pair_id": "c2ee46eb171a17152a10d40e60aa8b3d3005ca799e403e548147bc560ade2947",
+              "slot_fingerprint": "3bc6a2260585684aaa27fb9fd5ef272248fbe99798266a669af2a143ff60bb98",
+              "slot_id": "weight-008"
+            },
+            {
+              "block": 34,
+              "candidate_ms": 0.40867769718170166,
+              "canonical_ms": 0.5332926511764526,
+              "pair_id": "82f6b2f04afe61a26fb62f818fafa12c2822ab93c2aa9d03f215570406808b2a",
+              "slot_fingerprint": "21824f145e133cdbdbefc7c1b340ae5c6df16b53c41dfda429a622f7619b01c9",
+              "slot_id": "weight-010"
+            },
+            {
+              "block": 35,
+              "candidate_ms": 0.4116651117801666,
+              "canonical_ms": 0.5333526134490967,
+              "pair_id": "cdaec42c9cb6e74743b55663179e87a422fe6ddaba4ebe459a85f101bacc5d5d",
+              "slot_fingerprint": "b791c782f2043ba0a536139fb75730f0d5b3c9f0398249483a43afd9ee34d0e9",
+              "slot_id": "weight-004"
+            }
+          ],
+          "practical_mde": 0.02,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "reason": "paired lower bound proves candidate improvement over canonical",
+          "route": "prefill_m2048_square",
+          "schema": "geak.asm-candidate-vs-canonical-gate/v1",
+          "threshold_log_ratio": 0.02020270731751945
+        },
+        {
+          "accepted": true,
+          "algorithm": {
+            "confidence": 0.95,
+            "effect": "log(canonical_ms/candidate_ms)",
+            "estimator": "20% trimmed mean",
+            "interval": "one-sided paired percentile bootstrap lower bound",
+            "min_pairs": 8,
+            "name": "paired-log-trimmed-bootstrap/v1",
+            "resamples": 4096,
+            "seed": 20260902
+          },
+          "candidate_id": "9539a5460e4eb2decfb6",
+          "candidate_median_ms": 0.4252176284790039,
+          "canonical_control_arm": "__canonical_task_implementation__",
+          "canonical_median_ms": 0.5334813892841339,
+          "ci95_lower_log_ratio": 0.22496032611673367,
+          "ci95_lower_speedup": 1.252273032672186,
+          "comparison": "candidate_vs_canonical_task_implementation",
+          "decision": "winner",
+          "estimate_log_ratio": 0.2276349842798157,
+          "estimate_speedup": 1.2556269182106794,
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "n_pairs": 36,
+          "pair_ids": [
+            "f1f8c14c89d85785966d132113be13f27f719826fe19a1ca43809f97b41208e0",
+            "dd7a160986418c8a8cf4d914b0cc5c584ebce0c1ab613c20e8699c7591207f12",
+            "9a123aad69bb19f76593c5c1390f5183c3002cca2a4ad85328a3ea3294a7031f",
+            "be8e327473cb569934c1b2ba4a5733fa19c08e380536b8686acc629f7cab903d",
+            "cc1088a94b1f4d3bf4d1e49bb03323ab5995665afdfac976d44f963f685e41da",
+            "0b2f29fcd3f98ce4a3acb7f128d0ef9884c5c661cd7e67182d13c4f42506bfba",
+            "9eb21a5bd9a32cf49b0e667f94ba977f3fd06d7481e599af1ef04b0acc85a277",
+            "3ee1312027d8431018b6afae388f5cef302dc5deea5036c6e62c99113f7aca4a",
+            "6917e19b9914b6ee79de29838b17a70426838b39b5eb1bf6f96ee7a2aa176353",
+            "afccab679d4b0dbc8b1e14e0f82f65f6f5c2536e1992e7bb6c0153a85bd9109b",
+            "9654aee009b8f4468c20d116cf23b2e14de4d137cf1cd5af7b9b0cc20c5fa17c",
+            "633f0cafeb0b184b0dd8cd607b8d339f6fd74a68f73b981d9e2d3f6a358617ed",
+            "a3c099946af574caa907e0c2202df72dde02afed703a94de90147e4dd686e525",
+            "a4b337feff169a6be6cfb22cd6eb0b903aa41fca590c3e3db2ade4ef9163948d",
+            "27de78081c2599e4c1becd4f6bef2e251dc7aedbe5c6b73a78dfd9ab33287a70",
+            "ec11c10d58b51361d610fcc0de0f2ed172fff83e2602d057ca746aee0dcebee1",
+            "8a21240f3004e775829be3ce9ab8fde3e2657a612f152a944255327fcdf5d163",
+            "45acea761365fbd89fc748516e1aa5c15898c50a590487253e95a4619f889db9",
+            "f806bf6e4912b70fc1b8d81ad2d9c640c6ed8d58589ff7eacbb8988ea03ce883",
+            "73b75c47cf5cd50cacf6d273f6f9128c71f3ee3db0f5f0ec042c031dc8200e43",
+            "729a702f2b5065b74eab5a86b26b196259f7c989a1e363e99f554da05d12755d",
+            "a233a6f3d93d9165b2d7b8a1e759702acf59aa8aa4ca69624463717b43afbd37",
+            "8a3b1e991064e0c6cc086ad84f8830a3fe312791d6d1f1c7ee8e1858d7d8d479",
+            "6372299a5254b16204c723fbffd1706257d320bc061327ba003b9d145989ee62",
+            "00f5dd06f20444f2c03030e856f8907f25ee8295734f1295d2a4a1d4738b0535",
+            "f238a001a02ff6950bbb2aebbf4ade9fa11c704cd2a5396731633c88226dd655",
+            "1724e66542d9c53078e2fde556d09ba1e1cb203f6c6ec880c71cad6ef325c75c",
+            "d85e7ecf2c3b2991cbb887d3691a3e3b9be822483cb4edfe460d4c031a552066",
+            "14f26bb7604b61a6e1dd919340be150db7d7c9229e491e5f25172b6a1ee42da5",
+            "330557b74ef3315b871c9c3a944fa91ad8d960a8b0ed137b647d328973834195",
+            "8eeef57e0dcd0a35f38f668231f7ebbdf357b3f2ac493551caf29a0c9809642e",
+            "200ee8fde0a44a9cdac8eeca38b9f1a68c065e26809f7d9b7b5de2b3f2c7751b",
+            "7e19ccc597ea3a763cbc22f92b93e9650fc84c34ae61d89957ed572bbf1e67d4",
+            "c2ee46eb171a17152a10d40e60aa8b3d3005ca799e403e548147bc560ade2947",
+            "82f6b2f04afe61a26fb62f818fafa12c2822ab93c2aa9d03f215570406808b2a",
+            "cdaec42c9cb6e74743b55663179e87a422fe6ddaba4ebe459a85f101bacc5d5d"
+          ],
+          "pairs": [
+            {
+              "block": 0,
+              "candidate_ms": 0.41388261318206787,
+              "canonical_ms": 0.53343266248703,
+              "pair_id": "f1f8c14c89d85785966d132113be13f27f719826fe19a1ca43809f97b41208e0",
+              "slot_fingerprint": "5b02a8e75068f989eb404408212891046d3e712e4af8c0214486937d82ed9c4d",
+              "slot_id": "weight-002"
+            },
+            {
+              "block": 1,
+              "candidate_ms": 0.4248926341533661,
+              "canonical_ms": 0.5318976640701294,
+              "pair_id": "dd7a160986418c8a8cf4d914b0cc5c584ebce0c1ab613c20e8699c7591207f12",
+              "slot_fingerprint": "3bc6a2260585684aaa27fb9fd5ef272248fbe99798266a669af2a143ff60bb98",
+              "slot_id": "weight-008"
+            },
+            {
+              "block": 2,
+              "candidate_ms": 0.42679011821746826,
+              "canonical_ms": 0.5305202007293701,
+              "pair_id": "9a123aad69bb19f76593c5c1390f5183c3002cca2a4ad85328a3ea3294a7031f",
+              "slot_fingerprint": "5c72fd56871069800276e691740487c7ddf0cad12f3748a0d39732c4c70bd2e4",
+              "slot_id": "weight-000"
+            },
+            {
+              "block": 3,
+              "candidate_ms": 0.41704261302948,
+              "canonical_ms": 0.5330851078033447,
+              "pair_id": "be8e327473cb569934c1b2ba4a5733fa19c08e380536b8686acc629f7cab903d",
+              "slot_fingerprint": "5ecad2fa017c05ad869dd8feb33491588abcd598499be55ab0f61d9646894397",
+              "slot_id": "weight-007"
+            },
+            {
+              "block": 4,
+              "candidate_ms": 0.4250301122665405,
+              "canonical_ms": 0.5407126545906067,
+              "pair_id": "cc1088a94b1f4d3bf4d1e49bb03323ab5995665afdfac976d44f963f685e41da",
+              "slot_fingerprint": "21824f145e133cdbdbefc7c1b340ae5c6df16b53c41dfda429a622f7619b01c9",
+              "slot_id": "weight-010"
+            },
+            {
+              "block": 5,
+              "candidate_ms": 0.4252476394176483,
+              "canonical_ms": 0.5313177108764648,
+              "pair_id": "0b2f29fcd3f98ce4a3acb7f128d0ef9884c5c661cd7e67182d13c4f42506bfba",
+              "slot_fingerprint": "566892c6ea136b382b9e4a9ffe24ec16172eedd209daad5b988d130826da3595",
+              "slot_id": "weight-003"
+            },
+            {
+              "block": 6,
+              "candidate_ms": 0.4244976341724396,
+              "canonical_ms": 0.5336475968360901,
+              "pair_id": "9eb21a5bd9a32cf49b0e667f94ba977f3fd06d7481e599af1ef04b0acc85a277",
+              "slot_fingerprint": "c31528d159437b4e8ae6091064d107705194ed901c39fa3477978b10b133e365",
+              "slot_id": "weight-001"
+            },
+            {
+              "block": 7,
+              "candidate_ms": 0.4243951141834259,
+              "canonical_ms": 0.534162700176239,
+              "pair_id": "3ee1312027d8431018b6afae388f5cef302dc5deea5036c6e62c99113f7aca4a",
+              "slot_fingerprint": "0a9c7fa8ee10e35703852804ccb0d23db552038e793b401c81b2a59ce83ed5c8",
+              "slot_id": "weight-006"
+            },
+            {
+              "block": 8,
+              "candidate_ms": 0.427540123462677,
+              "canonical_ms": 0.53395015001297,
+              "pair_id": "6917e19b9914b6ee79de29838b17a70426838b39b5eb1bf6f96ee7a2aa176353",
+              "slot_fingerprint": "b791c782f2043ba0a536139fb75730f0d5b3c9f0398249483a43afd9ee34d0e9",
+              "slot_id": "weight-004"
+            },
+            {
+              "block": 9,
+              "candidate_ms": 0.42308518290519714,
+              "canonical_ms": 0.5324926972389221,
+              "pair_id": "afccab679d4b0dbc8b1e14e0f82f65f6f5c2536e1992e7bb6c0153a85bd9109b",
+              "slot_fingerprint": "1f6aa55cf371194b1324d376f71b711d96d8e0c350edef246eacb2a42eaaae4a",
+              "slot_id": "weight-009"
+            },
+            {
+              "block": 10,
+              "candidate_ms": 0.42828261852264404,
+              "canonical_ms": 0.5339126586914062,
+              "pair_id": "9654aee009b8f4468c20d116cf23b2e14de4d137cf1cd5af7b9b0cc20c5fa17c",
+              "slot_fingerprint": "31a43fa6bb5167410ecc32777cbbb2ab70c2ff9a7fe03b31659bc2bb0c95ea15",
+              "slot_id": "weight-011"
+            },
+            {
+              "block": 11,
+              "candidate_ms": 0.4257301390171051,
+              "canonical_ms": 0.5356826782226562,
+              "pair_id": "633f0cafeb0b184b0dd8cd607b8d339f6fd74a68f73b981d9e2d3f6a358617ed",
+              "slot_fingerprint": "a296a3bd94cee0edd650ddc4667e2831df516d167934ac80fe010254390c40f1",
+              "slot_id": "weight-005"
+            },
+            {
+              "block": 12,
+              "candidate_ms": 0.4257051348686218,
+              "canonical_ms": 0.5339877009391785,
+              "pair_id": "a3c099946af574caa907e0c2202df72dde02afed703a94de90147e4dd686e525",
+              "slot_fingerprint": "5c72fd56871069800276e691740487c7ddf0cad12f3748a0d39732c4c70bd2e4",
+              "slot_id": "weight-000"
+            },
+            {
+              "block": 13,
+              "candidate_ms": 0.4264126121997833,
+              "canonical_ms": 0.5342726111412048,
+              "pair_id": "a4b337feff169a6be6cfb22cd6eb0b903aa41fca590c3e3db2ade4ef9163948d",
+              "slot_fingerprint": "5b02a8e75068f989eb404408212891046d3e712e4af8c0214486937d82ed9c4d",
+              "slot_id": "weight-002"
+            },
+            {
+              "block": 14,
+              "candidate_ms": 0.413035124540329,
+              "canonical_ms": 0.5329601764678955,
+              "pair_id": "27de78081c2599e4c1becd4f6bef2e251dc7aedbe5c6b73a78dfd9ab33287a70",
+              "slot_fingerprint": "0a9c7fa8ee10e35703852804ccb0d23db552038e793b401c81b2a59ce83ed5c8",
+              "slot_id": "weight-006"
+            },
+            {
+              "block": 15,
+              "candidate_ms": 0.42682763934135437,
+              "canonical_ms": 0.5344001054763794,
+              "pair_id": "ec11c10d58b51361d610fcc0de0f2ed172fff83e2602d057ca746aee0dcebee1",
+              "slot_fingerprint": "3bc6a2260585684aaa27fb9fd5ef272248fbe99798266a669af2a143ff60bb98",
+              "slot_id": "weight-008"
+            },
+            {
+              "block": 16,
+              "candidate_ms": 0.4279526174068451,
+              "canonical_ms": 0.5344926118850708,
+              "pair_id": "8a21240f3004e775829be3ce9ab8fde3e2657a612f152a944255327fcdf5d163",
+              "slot_fingerprint": "5ecad2fa017c05ad869dd8feb33491588abcd598499be55ab0f61d9646894397",
+              "slot_id": "weight-007"
+            },
+            {
+              "block": 17,
+              "candidate_ms": 0.42509761452674866,
+              "canonical_ms": 0.5314801335334778,
+              "pair_id": "45acea761365fbd89fc748516e1aa5c15898c50a590487253e95a4619f889db9",
+              "slot_fingerprint": "566892c6ea136b382b9e4a9ffe24ec16172eedd209daad5b988d130826da3595",
+              "slot_id": "weight-003"
+            },
+            {
+              "block": 18,
+              "candidate_ms": 0.4101076126098633,
+              "canonical_ms": 0.5333076119422913,
+              "pair_id": "f806bf6e4912b70fc1b8d81ad2d9c640c6ed8d58589ff7eacbb8988ea03ce883",
+              "slot_fingerprint": "c31528d159437b4e8ae6091064d107705194ed901c39fa3477978b10b133e365",
+              "slot_id": "weight-001"
+            },
+            {
+              "block": 19,
+              "candidate_ms": 0.4242476224899292,
+              "canonical_ms": 0.5323526859283447,
+              "pair_id": "73b75c47cf5cd50cacf6d273f6f9128c71f3ee3db0f5f0ec042c031dc8200e43",
+              "slot_fingerprint": "31a43fa6bb5167410ecc32777cbbb2ab70c2ff9a7fe03b31659bc2bb0c95ea15",
+              "slot_id": "weight-011"
+            },
+            {
+              "block": 20,
+              "candidate_ms": 0.42742013931274414,
+              "canonical_ms": 0.5407027006149292,
+              "pair_id": "729a702f2b5065b74eab5a86b26b196259f7c989a1e363e99f554da05d12755d",
+              "slot_fingerprint": "b791c782f2043ba0a536139fb75730f0d5b3c9f0398249483a43afd9ee34d0e9",
+              "slot_id": "weight-004"
+            },
+            {
+              "block": 21,
+              "candidate_ms": 0.42412763833999634,
+              "canonical_ms": 0.5335326194763184,
+              "pair_id": "a233a6f3d93d9165b2d7b8a1e759702acf59aa8aa4ca69624463717b43afbd37",
+              "slot_fingerprint": "21824f145e133cdbdbefc7c1b340ae5c6df16b53c41dfda429a622f7619b01c9",
+              "slot_id": "weight-010"
+            },
+            {
+              "block": 22,
+              "candidate_ms": 0.42688512802124023,
+              "canonical_ms": 0.5340601801872253,
+              "pair_id": "8a3b1e991064e0c6cc086ad84f8830a3fe312791d6d1f1c7ee8e1858d7d8d479",
+              "slot_fingerprint": "1f6aa55cf371194b1324d376f71b711d96d8e0c350edef246eacb2a42eaaae4a",
+              "slot_id": "weight-009"
+            },
+            {
+              "block": 23,
+              "candidate_ms": 0.42874011397361755,
+              "canonical_ms": 0.5339576005935669,
+              "pair_id": "6372299a5254b16204c723fbffd1706257d320bc061327ba003b9d145989ee62",
+              "slot_fingerprint": "a296a3bd94cee0edd650ddc4667e2831df516d167934ac80fe010254390c40f1",
+              "slot_id": "weight-005"
+            },
+            {
+              "block": 24,
+              "candidate_ms": 0.41775763034820557,
+              "canonical_ms": 0.531845211982727,
+              "pair_id": "00f5dd06f20444f2c03030e856f8907f25ee8295734f1295d2a4a1d4738b0535",
+              "slot_fingerprint": "5c72fd56871069800276e691740487c7ddf0cad12f3748a0d39732c4c70bd2e4",
+              "slot_id": "weight-000"
+            },
+            {
+              "block": 25,
+              "candidate_ms": 0.42533013224601746,
+              "canonical_ms": 0.5328776240348816,
+              "pair_id": "f238a001a02ff6950bbb2aebbf4ade9fa11c704cd2a5396731633c88226dd655",
+              "slot_fingerprint": "5ecad2fa017c05ad869dd8feb33491588abcd598499be55ab0f61d9646894397",
+              "slot_id": "weight-007"
+            },
+            {
+              "block": 26,
+              "candidate_ms": 0.4277276396751404,
+              "canonical_ms": 0.5329251885414124,
+              "pair_id": "1724e66542d9c53078e2fde556d09ba1e1cb203f6c6ec880c71cad6ef325c75c",
+              "slot_fingerprint": "1f6aa55cf371194b1324d376f71b711d96d8e0c350edef246eacb2a42eaaae4a",
+              "slot_id": "weight-009"
+            },
+            {
+              "block": 27,
+              "candidate_ms": 0.42888763546943665,
+              "canonical_ms": 0.5346276164054871,
+              "pair_id": "d85e7ecf2c3b2991cbb887d3691a3e3b9be822483cb4edfe460d4c031a552066",
+              "slot_fingerprint": "566892c6ea136b382b9e4a9ffe24ec16172eedd209daad5b988d130826da3595",
+              "slot_id": "weight-003"
+            },
+            {
+              "block": 28,
+              "candidate_ms": 0.42274513840675354,
+              "canonical_ms": 0.5357477068901062,
+              "pair_id": "14f26bb7604b61a6e1dd919340be150db7d7c9229e491e5f25172b6a1ee42da5",
+              "slot_fingerprint": "0a9c7fa8ee10e35703852804ccb0d23db552038e793b401c81b2a59ce83ed5c8",
+              "slot_id": "weight-006"
+            },
+            {
+              "block": 29,
+              "candidate_ms": 0.42456763982772827,
+              "canonical_ms": 0.5326526761054993,
+              "pair_id": "330557b74ef3315b871c9c3a944fa91ad8d960a8b0ed137b647d328973834195",
+              "slot_fingerprint": "c31528d159437b4e8ae6091064d107705194ed901c39fa3477978b10b133e365",
+              "slot_id": "weight-001"
+            },
+            {
+              "block": 30,
+              "candidate_ms": 0.4081551134586334,
+              "canonical_ms": 0.5353676080703735,
+              "pair_id": "8eeef57e0dcd0a35f38f668231f7ebbdf357b3f2ac493551caf29a0c9809642e",
+              "slot_fingerprint": "a296a3bd94cee0edd650ddc4667e2831df516d167934ac80fe010254390c40f1",
+              "slot_id": "weight-005"
+            },
+            {
+              "block": 31,
+              "candidate_ms": 0.4279477000236511,
+              "canonical_ms": 0.5321776866912842,
+              "pair_id": "200ee8fde0a44a9cdac8eeca38b9f1a68c065e26809f7d9b7b5de2b3f2c7751b",
+              "slot_fingerprint": "5b02a8e75068f989eb404408212891046d3e712e4af8c0214486937d82ed9c4d",
+              "slot_id": "weight-002"
+            },
+            {
+              "block": 32,
+              "candidate_ms": 0.4251876175403595,
+              "canonical_ms": 0.5335301160812378,
+              "pair_id": "7e19ccc597ea3a763cbc22f92b93e9650fc84c34ae61d89957ed572bbf1e67d4",
+              "slot_fingerprint": "31a43fa6bb5167410ecc32777cbbb2ab70c2ff9a7fe03b31659bc2bb0c95ea15",
+              "slot_id": "weight-011"
+            },
+            {
+              "block": 33,
+              "candidate_ms": 0.42710012197494507,
+              "canonical_ms": 0.5316451787948608,
+              "pair_id": "c2ee46eb171a17152a10d40e60aa8b3d3005ca799e403e548147bc560ade2947",
+              "slot_fingerprint": "3bc6a2260585684aaa27fb9fd5ef272248fbe99798266a669af2a143ff60bb98",
+              "slot_id": "weight-008"
+            },
+            {
+              "block": 34,
+              "candidate_ms": 0.41837263107299805,
+              "canonical_ms": 0.5332926511764526,
+              "pair_id": "82f6b2f04afe61a26fb62f818fafa12c2822ab93c2aa9d03f215570406808b2a",
+              "slot_fingerprint": "21824f145e133cdbdbefc7c1b340ae5c6df16b53c41dfda429a622f7619b01c9",
+              "slot_id": "weight-010"
+            },
+            {
+              "block": 35,
+              "candidate_ms": 0.42594513297080994,
+              "canonical_ms": 0.5333526134490967,
+              "pair_id": "cdaec42c9cb6e74743b55663179e87a422fe6ddaba4ebe459a85f101bacc5d5d",
+              "slot_fingerprint": "b791c782f2043ba0a536139fb75730f0d5b3c9f0398249483a43afd9ee34d0e9",
+              "slot_id": "weight-004"
+            }
+          ],
+          "practical_mde": 0.02,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "reason": "paired lower bound proves candidate improvement over canonical",
+          "route": "prefill_m2048_square",
+          "schema": "geak.asm-candidate-vs-canonical-gate/v1",
+          "threshold_log_ratio": 0.02020270731751945
+        }
+      ],
+      "config_ids": [
+        "c7f2c38f1343003c32d9",
+        "9539a5460e4eb2decfb6"
+      ],
+      "reason": "candidate-vs-canonical paired MDE gate passed",
+      "selection": "candidate",
+      "status": "winner"
+    },
+    "prefill_m256_down": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    },
+    "prefill_m512_up": {
+      "candidate_gates": [],
+      "reason": "route was outside this search target",
+      "selection": "canonical",
+      "status": "unmeasured"
+    }
+  },
   "runtime_table": "asm_tuner_runtime_table.json",
-  "runtime_table_sha256": "6e54a0288fc6cf3c6d0d2e34b9103084012946694a297e67946e2d17cffc1029",
-  "schema": "geak.asm-selection/v1",
+  "runtime_table_sha256": "5cac8101f692fc8421620a0cb344b1843a7186014b8d5636103ecd2b939fb731",
+  "schema": "geak.asm-selection/v2",
   "score_metric": {
     "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
     "id": "sustained_throughput",
@@ -22,8 +814,8 @@
   },
   "score_metric_id": "sustained_throughput",
   "score_metric_inner": 16,
-  "source_digest": "88013c326bcc1a3c35c8f3b6fe879255f77dbf29357b45552074e07af5bb861d",
-  "table_digest": "12d3d5c4daeeccfc3ae173a6d06968ce0731f1fa5d9bcdd7e3555481d2d2d421",
+  "source_digest": "94fb90ff2e56eab7785f372c43ad64828889cd692c6f65fce95cd341b06444d4",
+  "table_digest": "031a39502130330dfbf3e7184f2f99ecef19b7e8005e50e4f04f2c7fd1e4fed6",
   "task": "dense_bf16_gemm_fused",
-  "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+  "task_digest": "3553c9b6cd8161b4afb460fb43a9388d94b28cd49cafbcb42f895394dbdd6fd8"
 }

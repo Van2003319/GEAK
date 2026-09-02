@@ -1,12 +1,12 @@
 {
   "fallback": {
     "kind": "canonical",
-    "reason": "shape absent from canonical CASES"
+    "reason": "route is unmeasured or has no paired MDE winner"
   },
   "history": [
     {
       "previous_table_digest": null,
-      "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+      "release_id": "4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da",
       "revision": 1,
       "route_ids": [
         "decode_m16_square",
@@ -21,8 +21,8 @@
         "prefill_m256_down",
         "prefill_m512_up"
       ],
-      "run_id": "materialize-3ad75f0437e53d3b",
-      "updated_at": "2026-09-02T20:34:11.222968+00:00"
+      "run_id": "materialize-4affc945392a4807",
+      "updated_at": "2026-09-02T22:33:21.170608+00:00"
     }
   ],
   "oracle": {
@@ -46,108 +46,24 @@
     "schema": "geak.measurement-protocol/v2",
     "version": 2
   },
-  "receipts_root": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
-  "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+  "receipts_root": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da",
+  "release_id": "4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da",
   "revision": 1,
   "routes": {
     "decode_m16_square": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "decode_m16_square",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 4096,
         "m": 16,
@@ -156,103 +72,19 @@
       "weight": 1.0
     },
     "decode_m2_square": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "decode_m2_square",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 4096,
         "m": 2,
@@ -261,103 +93,19 @@
       "weight": 1.0
     },
     "decode_m32_down": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "decode_m32_down",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 11008,
         "m": 32,
@@ -366,103 +114,19 @@
       "weight": 1.0
     },
     "decode_m64_square": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "decode_m64_square",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 8192,
         "m": 64,
@@ -471,103 +135,19 @@
       "weight": 1.0
     },
     "decode_m8_up": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "decode_m8_up",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 4096,
         "m": 8,
@@ -576,103 +156,19 @@
       "weight": 1.0
     },
     "decode_m96_up": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "decode_m96_up",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 4096,
         "m": 96,
@@ -683,10 +179,10 @@
     "prefill_m1024_down": {
       "entries": [
         {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "artifact": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/artifacts/227dcfa1b9d0d9c652bf44055bb6713016134923ec6171c90ee35a9cc2cb97bf.so",
+          "artifact_sha256": "227dcfa1b9d0d9c652bf44055bb6713016134923ec6171c90ee35a9cc2cb97bf",
+          "compile_manifest": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/manifests/e44536e65c375d82fdad6bd0b6d85db60acb83b792fa0c56e29c41606e30819a.json",
+          "compile_manifest_sha256": "e44536e65c375d82fdad6bd0b6d85db60acb83b792fa0c56e29c41606e30819a",
           "config": {
             "a_lds": {
               "buffers": 1,
@@ -769,16 +265,16 @@
           "rank": 0,
           "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
           "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
           "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
           "symbol": "geak_launch_fp8_rowwise_c4cd2f649a70d9f04d6b",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+          "task_digest": "44a33c61c960feb6e27b89dde0e5429c7354b5ace9110d6b36e84fddd9dee194"
         },
         {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "artifact": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/artifacts/227dcfa1b9d0d9c652bf44055bb6713016134923ec6171c90ee35a9cc2cb97bf.so",
+          "artifact_sha256": "227dcfa1b9d0d9c652bf44055bb6713016134923ec6171c90ee35a9cc2cb97bf",
+          "compile_manifest": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/manifests/e44536e65c375d82fdad6bd0b6d85db60acb83b792fa0c56e29c41606e30819a.json",
+          "compile_manifest_sha256": "e44536e65c375d82fdad6bd0b6d85db60acb83b792fa0c56e29c41606e30819a",
           "config": {
             "a_lds": {
               "buffers": 1,
@@ -861,17 +357,586 @@
           "rank": 1,
           "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
           "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source": ".geak_tuner/releases/4affc945392a48075e44caacb8a780015276322d18d8208f6b82b43ee33fd9da/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
           "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
           "symbol": "geak_launch_fp8_rowwise_db88343ca2e25eb8f46e",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+          "task_digest": "44a33c61c960feb6e27b89dde0e5429c7354b5ace9110d6b36e84fddd9dee194"
         }
       ],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "prefill_m1024_down",
+      "selection": {
+        "candidate_gates": [
+          {
+            "accepted": true,
+            "algorithm": {
+              "confidence": 0.95,
+              "effect": "log(canonical_ms/candidate_ms)",
+              "estimator": "20% trimmed mean",
+              "interval": "one-sided paired percentile bootstrap lower bound",
+              "min_pairs": 8,
+              "name": "paired-log-trimmed-bootstrap/v1",
+              "resamples": 4096,
+              "seed": 20260902
+            },
+            "candidate_id": "c4cd2f649a70d9f04d6b",
+            "candidate_median_ms": 0.20199500024318695,
+            "canonical_control_arm": "__canonical_task_implementation__",
+            "canonical_median_ms": 0.5192901492118835,
+            "ci95_lower_log_ratio": 0.9244119358579156,
+            "ci95_lower_speedup": 2.5203856760332357,
+            "comparison": "candidate_vs_canonical_task_implementation",
+            "decision": "winner",
+            "estimate_log_ratio": 0.9357186250653347,
+            "estimate_speedup": 2.5490446070525903,
+            "metric_id": "sustained_throughput",
+            "metric_inner": 16,
+            "n_pairs": 27,
+            "pair_ids": [
+              "bd1dab4024249aa81ca7c9a7df44aef713109fc7884f96d154c0de09675f71c6",
+              "a64f41a66e74005585d066fd351cd06b36e85765037f62dde6ae97c5c2eb9011",
+              "22d8bfa3ab34ab7801253ad4a186ce8d9967bc6a6c2fb5fb469887cb382f943c",
+              "f6e4df13a93f3b249962ef049506e0e1e94fe3cfead2b42ae81a68e5b83a8145",
+              "a73adc43217c27aca34fdadc2344f60d7e620bb8724ebb9e6c0331154b062425",
+              "2cad2380e78a98a3ba07c50cbfa78c71b1accc094345bee9b61c24e680012785",
+              "71378e2c4ded81815c7167917e6fed6220f49e96450bce0dce17d22b785772fa",
+              "29793bbe8011f051a281d7b47e7d1d8ad46896645ffbdbc1ebfad74d57802fcd",
+              "2b177c962f39e3e2b85bc7fb0606311bed4a6083de1d7b9e8b49aa102f53fb7e",
+              "9904424b6bc90207266a955716ca874421df91c598aaefe252e5ac0a4e0cd070",
+              "9f02c0d7029c0951d2081f5a40ef850cc9f00c262e532783e7dd6a0471a156e4",
+              "7af9ef3618d176ea9ad61b99f624c2f4bb76648f3a240d721cc7f7b34f23be08",
+              "f1af2830d71089b74d0ccaa283c4cd274a5608656ca5dd06309231154f6d3410",
+              "de1b2259503e7807573003cb342229f3716c2d0750a094ad78f7437356ca3614",
+              "b0987a073f8e2378d09e5e6700ea16adff351468fb5550f06dbda81ec3863903",
+              "2d0fc5a0989cfd0f253089a6d339330597bf3ca3cca060fa3a6b1ae1c2c4e10e",
+              "7123ad9daee53f44aeb0ad3b0fa35180464f3a00efc4fbc076160c3775860675",
+              "1f5017bb1d521f974355015451bd0967560db8c66fd7be7cc9c4b2e630bcb4d0",
+              "71b01f5719d571296def5c229f2996dc5c7c9d86d385443c2fddd2137a2f8db1",
+              "1d57bab0a3ee4abff286c24d473aa720618d23027006fe6417d5754d9a8e5fad",
+              "d66fa6ca7b89bfb2f983dba8854b9c449bc89e201bd6d9f73f663ebf2382af13",
+              "8f3665a67391174640741966da010f864e93b83d1e2a3fcd5de364d3eaebc93f",
+              "8ceea7973f792e0c62870c2ce9a95529c38352e82a6b0e9f8108c81fca33026f",
+              "502a50f3ab73cb55e3fcbe9642ce5bf0f752758326f6556eb793180224057185",
+              "393fd50e6633a6c1a7c3ad2537104e809b72e1c8cb0e6f87b75d95aef370cd25",
+              "d306c460b60f0b20a634585977e4222a9d01c7c2182a8b828f9caafb9ffc88c5",
+              "d17973073d9e9f8d54693080ddb2db44e5343e4f2601e1886cab488fb23eb113"
+            ],
+            "pairs": [
+              {
+                "block": 0,
+                "candidate_ms": 0.19736506044864655,
+                "canonical_ms": 0.5194201469421387,
+                "pair_id": "bd1dab4024249aa81ca7c9a7df44aef713109fc7884f96d154c0de09675f71c6",
+                "slot_fingerprint": "5401567850e108c5f73cd5e927c9703ec2171f9b00462b140b8c9eebd4cea542",
+                "slot_id": "weight-006"
+              },
+              {
+                "block": 1,
+                "candidate_ms": 0.21120256185531616,
+                "canonical_ms": 0.5230726003646851,
+                "pair_id": "a64f41a66e74005585d066fd351cd06b36e85765037f62dde6ae97c5c2eb9011",
+                "slot_fingerprint": "d6a7b451d770729a23e8b5ce203563746d4e0ec1678bc78b6a92a151ccf7fc7f",
+                "slot_id": "weight-001"
+              },
+              {
+                "block": 2,
+                "candidate_ms": 0.20053255558013916,
+                "canonical_ms": 0.4990151822566986,
+                "pair_id": "22d8bfa3ab34ab7801253ad4a186ce8d9967bc6a6c2fb5fb469887cb382f943c",
+                "slot_fingerprint": "26d87a5dc16e498e12c89a8cdb4f2ba63dd0a99192e3c7448c592971854eb111",
+                "slot_id": "weight-000"
+              },
+              {
+                "block": 3,
+                "candidate_ms": 0.20188505947589874,
+                "canonical_ms": 0.5210251808166504,
+                "pair_id": "f6e4df13a93f3b249962ef049506e0e1e94fe3cfead2b42ae81a68e5b83a8145",
+                "slot_fingerprint": "067f1109e8526ddd9dc8e4c168389ec0b2bf18cc63bfb36e3820d6d5b892f983",
+                "slot_id": "weight-003"
+              },
+              {
+                "block": 4,
+                "candidate_ms": 0.19829756021499634,
+                "canonical_ms": 0.5336501002311707,
+                "pair_id": "a73adc43217c27aca34fdadc2344f60d7e620bb8724ebb9e6c0331154b062425",
+                "slot_fingerprint": "aa5cfce135b6e78bcfd4616dfed70b4423a7145b442e0788a196b01320dab47c",
+                "slot_id": "weight-002"
+              },
+              {
+                "block": 5,
+                "candidate_ms": 0.19962505996227264,
+                "canonical_ms": 0.509390115737915,
+                "pair_id": "2cad2380e78a98a3ba07c50cbfa78c71b1accc094345bee9b61c24e680012785",
+                "slot_fingerprint": "342fcd480768b1d2722115f3fd249f29165b2ec7b997cc62bc524e5f3a46a1bf",
+                "slot_id": "weight-004"
+              },
+              {
+                "block": 6,
+                "candidate_ms": 0.20872506499290466,
+                "canonical_ms": 0.5120151042938232,
+                "pair_id": "71378e2c4ded81815c7167917e6fed6220f49e96450bce0dce17d22b785772fa",
+                "slot_fingerprint": "db33d9e90956df7497d7d24a4047a53570ed8de43b5d3d0bd5a7b88465fe6cd3",
+                "slot_id": "weight-007"
+              },
+              {
+                "block": 7,
+                "candidate_ms": 0.20640505850315094,
+                "canonical_ms": 0.5073926448822021,
+                "pair_id": "29793bbe8011f051a281d7b47e7d1d8ad46896645ffbdbc1ebfad74d57802fcd",
+                "slot_fingerprint": "d84cd4607c691a76ca268d73402a9cd21a837ce9361d094bf08beeab5358bf28",
+                "slot_id": "weight-008"
+              },
+              {
+                "block": 8,
+                "candidate_ms": 0.2061275690793991,
+                "canonical_ms": 0.5080376267433167,
+                "pair_id": "2b177c962f39e3e2b85bc7fb0606311bed4a6083de1d7b9e8b49aa102f53fb7e",
+                "slot_fingerprint": "56fd13d554cd89dfffa6535834050b5abae7ed78b769ec939a3d7cff2a75e4ea",
+                "slot_id": "weight-005"
+              },
+              {
+                "block": 9,
+                "candidate_ms": 0.20784249901771545,
+                "canonical_ms": 0.511332631111145,
+                "pair_id": "9904424b6bc90207266a955716ca874421df91c598aaefe252e5ac0a4e0cd070",
+                "slot_fingerprint": "56fd13d554cd89dfffa6535834050b5abae7ed78b769ec939a3d7cff2a75e4ea",
+                "slot_id": "weight-005"
+              },
+              {
+                "block": 10,
+                "candidate_ms": 0.2082124948501587,
+                "canonical_ms": 0.5114651918411255,
+                "pair_id": "9f02c0d7029c0951d2081f5a40ef850cc9f00c262e532783e7dd6a0471a156e4",
+                "slot_fingerprint": "d6a7b451d770729a23e8b5ce203563746d4e0ec1678bc78b6a92a151ccf7fc7f",
+                "slot_id": "weight-001"
+              },
+              {
+                "block": 11,
+                "candidate_ms": 0.2075100690126419,
+                "canonical_ms": 0.5183725953102112,
+                "pair_id": "7af9ef3618d176ea9ad61b99f624c2f4bb76648f3a240d721cc7f7b34f23be08",
+                "slot_fingerprint": "d84cd4607c691a76ca268d73402a9cd21a837ce9361d094bf08beeab5358bf28",
+                "slot_id": "weight-008"
+              },
+              {
+                "block": 12,
+                "candidate_ms": 0.20072005689144135,
+                "canonical_ms": 0.5145276188850403,
+                "pair_id": "f1af2830d71089b74d0ccaa283c4cd274a5608656ca5dd06309231154f6d3410",
+                "slot_fingerprint": "342fcd480768b1d2722115f3fd249f29165b2ec7b997cc62bc524e5f3a46a1bf",
+                "slot_id": "weight-004"
+              },
+              {
+                "block": 13,
+                "candidate_ms": 0.19978755712509155,
+                "canonical_ms": 0.5193876624107361,
+                "pair_id": "de1b2259503e7807573003cb342229f3716c2d0750a094ad78f7437356ca3614",
+                "slot_fingerprint": "aa5cfce135b6e78bcfd4616dfed70b4423a7145b442e0788a196b01320dab47c",
+                "slot_id": "weight-002"
+              },
+              {
+                "block": 14,
+                "candidate_ms": 0.20212756097316742,
+                "canonical_ms": 0.5382026433944702,
+                "pair_id": "b0987a073f8e2378d09e5e6700ea16adff351468fb5550f06dbda81ec3863903",
+                "slot_fingerprint": "26d87a5dc16e498e12c89a8cdb4f2ba63dd0a99192e3c7448c592971854eb111",
+                "slot_id": "weight-000"
+              },
+              {
+                "block": 15,
+                "candidate_ms": 0.20440499484539032,
+                "canonical_ms": 0.5107126235961914,
+                "pair_id": "2d0fc5a0989cfd0f253089a6d339330597bf3ca3cca060fa3a6b1ae1c2c4e10e",
+                "slot_fingerprint": "5401567850e108c5f73cd5e927c9703ec2171f9b00462b140b8c9eebd4cea542",
+                "slot_id": "weight-006"
+              },
+              {
+                "block": 16,
+                "candidate_ms": 0.20260749757289886,
+                "canonical_ms": 0.5136476159095764,
+                "pair_id": "7123ad9daee53f44aeb0ad3b0fa35180464f3a00efc4fbc076160c3775860675",
+                "slot_fingerprint": "067f1109e8526ddd9dc8e4c168389ec0b2bf18cc63bfb36e3820d6d5b892f983",
+                "slot_id": "weight-003"
+              },
+              {
+                "block": 17,
+                "candidate_ms": 0.21156005561351776,
+                "canonical_ms": 0.5196900963783264,
+                "pair_id": "1f5017bb1d521f974355015451bd0967560db8c66fd7be7cc9c4b2e630bcb4d0",
+                "slot_fingerprint": "db33d9e90956df7497d7d24a4047a53570ed8de43b5d3d0bd5a7b88465fe6cd3",
+                "slot_id": "weight-007"
+              },
+              {
+                "block": 18,
+                "candidate_ms": 0.19924256205558777,
+                "canonical_ms": 0.5207201242446899,
+                "pair_id": "71b01f5719d571296def5c229f2996dc5c7c9d86d385443c2fddd2137a2f8db1",
+                "slot_fingerprint": "26d87a5dc16e498e12c89a8cdb4f2ba63dd0a99192e3c7448c592971854eb111",
+                "slot_id": "weight-000"
+              },
+              {
+                "block": 19,
+                "candidate_ms": 0.19497506320476532,
+                "canonical_ms": 0.5225276350975037,
+                "pair_id": "1d57bab0a3ee4abff286c24d473aa720618d23027006fe6417d5754d9a8e5fad",
+                "slot_fingerprint": "db33d9e90956df7497d7d24a4047a53570ed8de43b5d3d0bd5a7b88465fe6cd3",
+                "slot_id": "weight-007"
+              },
+              {
+                "block": 20,
+                "candidate_ms": 0.20199500024318695,
+                "canonical_ms": 0.5178426504135132,
+                "pair_id": "d66fa6ca7b89bfb2f983dba8854b9c449bc89e201bd6d9f73f663ebf2382af13",
+                "slot_fingerprint": "d6a7b451d770729a23e8b5ce203563746d4e0ec1678bc78b6a92a151ccf7fc7f",
+                "slot_id": "weight-001"
+              },
+              {
+                "block": 21,
+                "candidate_ms": 0.19979006052017212,
+                "canonical_ms": 0.5192901492118835,
+                "pair_id": "8f3665a67391174640741966da010f864e93b83d1e2a3fcd5de364d3eaebc93f",
+                "slot_fingerprint": "342fcd480768b1d2722115f3fd249f29165b2ec7b997cc62bc524e5f3a46a1bf",
+                "slot_id": "weight-004"
+              },
+              {
+                "block": 22,
+                "candidate_ms": 0.1979299932718277,
+                "canonical_ms": 0.5107226967811584,
+                "pair_id": "8ceea7973f792e0c62870c2ce9a95529c38352e82a6b0e9f8108c81fca33026f",
+                "slot_fingerprint": "d84cd4607c691a76ca268d73402a9cd21a837ce9361d094bf08beeab5358bf28",
+                "slot_id": "weight-008"
+              },
+              {
+                "block": 23,
+                "candidate_ms": 0.2038525640964508,
+                "canonical_ms": 0.5239576101303101,
+                "pair_id": "502a50f3ab73cb55e3fcbe9642ce5bf0f752758326f6556eb793180224057185",
+                "slot_fingerprint": "067f1109e8526ddd9dc8e4c168389ec0b2bf18cc63bfb36e3820d6d5b892f983",
+                "slot_id": "weight-003"
+              },
+              {
+                "block": 24,
+                "candidate_ms": 0.20013506710529327,
+                "canonical_ms": 0.5205451250076294,
+                "pair_id": "393fd50e6633a6c1a7c3ad2537104e809b72e1c8cb0e6f87b75d95aef370cd25",
+                "slot_fingerprint": "5401567850e108c5f73cd5e927c9703ec2171f9b00462b140b8c9eebd4cea542",
+                "slot_id": "weight-006"
+              },
+              {
+                "block": 25,
+                "candidate_ms": 0.20318755507469177,
+                "canonical_ms": 0.5193126201629639,
+                "pair_id": "d306c460b60f0b20a634585977e4222a9d01c7c2182a8b828f9caafb9ffc88c5",
+                "slot_fingerprint": "aa5cfce135b6e78bcfd4616dfed70b4423a7145b442e0788a196b01320dab47c",
+                "slot_id": "weight-002"
+              },
+              {
+                "block": 26,
+                "candidate_ms": 0.19765006005764008,
+                "canonical_ms": 0.5239876508712769,
+                "pair_id": "d17973073d9e9f8d54693080ddb2db44e5343e4f2601e1886cab488fb23eb113",
+                "slot_fingerprint": "56fd13d554cd89dfffa6535834050b5abae7ed78b769ec939a3d7cff2a75e4ea",
+                "slot_id": "weight-005"
+              }
+            ],
+            "practical_mde": 0.02,
+            "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+            "reason": "paired lower bound proves candidate improvement over canonical",
+            "route": "prefill_m1024_down",
+            "schema": "geak.asm-candidate-vs-canonical-gate/v1",
+            "threshold_log_ratio": 0.02020270731751945
+          },
+          {
+            "accepted": true,
+            "algorithm": {
+              "confidence": 0.95,
+              "effect": "log(canonical_ms/candidate_ms)",
+              "estimator": "20% trimmed mean",
+              "interval": "one-sided paired percentile bootstrap lower bound",
+              "min_pairs": 8,
+              "name": "paired-log-trimmed-bootstrap/v1",
+              "resamples": 4096,
+              "seed": 20260902
+            },
+            "candidate_id": "db88343ca2e25eb8f46e",
+            "candidate_median_ms": 0.20415006577968597,
+            "canonical_control_arm": "__canonical_task_implementation__",
+            "canonical_median_ms": 0.5192901492118835,
+            "ci95_lower_log_ratio": 0.9184708566975028,
+            "ci95_lower_speedup": 2.505456257558535,
+            "comparison": "candidate_vs_canonical_task_implementation",
+            "decision": "winner",
+            "estimate_log_ratio": 0.9301562072309283,
+            "estimate_speedup": 2.5349051172017605,
+            "metric_id": "sustained_throughput",
+            "metric_inner": 16,
+            "n_pairs": 27,
+            "pair_ids": [
+              "bd1dab4024249aa81ca7c9a7df44aef713109fc7884f96d154c0de09675f71c6",
+              "a64f41a66e74005585d066fd351cd06b36e85765037f62dde6ae97c5c2eb9011",
+              "22d8bfa3ab34ab7801253ad4a186ce8d9967bc6a6c2fb5fb469887cb382f943c",
+              "f6e4df13a93f3b249962ef049506e0e1e94fe3cfead2b42ae81a68e5b83a8145",
+              "a73adc43217c27aca34fdadc2344f60d7e620bb8724ebb9e6c0331154b062425",
+              "2cad2380e78a98a3ba07c50cbfa78c71b1accc094345bee9b61c24e680012785",
+              "71378e2c4ded81815c7167917e6fed6220f49e96450bce0dce17d22b785772fa",
+              "29793bbe8011f051a281d7b47e7d1d8ad46896645ffbdbc1ebfad74d57802fcd",
+              "2b177c962f39e3e2b85bc7fb0606311bed4a6083de1d7b9e8b49aa102f53fb7e",
+              "9904424b6bc90207266a955716ca874421df91c598aaefe252e5ac0a4e0cd070",
+              "9f02c0d7029c0951d2081f5a40ef850cc9f00c262e532783e7dd6a0471a156e4",
+              "7af9ef3618d176ea9ad61b99f624c2f4bb76648f3a240d721cc7f7b34f23be08",
+              "f1af2830d71089b74d0ccaa283c4cd274a5608656ca5dd06309231154f6d3410",
+              "de1b2259503e7807573003cb342229f3716c2d0750a094ad78f7437356ca3614",
+              "b0987a073f8e2378d09e5e6700ea16adff351468fb5550f06dbda81ec3863903",
+              "2d0fc5a0989cfd0f253089a6d339330597bf3ca3cca060fa3a6b1ae1c2c4e10e",
+              "7123ad9daee53f44aeb0ad3b0fa35180464f3a00efc4fbc076160c3775860675",
+              "1f5017bb1d521f974355015451bd0967560db8c66fd7be7cc9c4b2e630bcb4d0",
+              "71b01f5719d571296def5c229f2996dc5c7c9d86d385443c2fddd2137a2f8db1",
+              "1d57bab0a3ee4abff286c24d473aa720618d23027006fe6417d5754d9a8e5fad",
+              "d66fa6ca7b89bfb2f983dba8854b9c449bc89e201bd6d9f73f663ebf2382af13",
+              "8f3665a67391174640741966da010f864e93b83d1e2a3fcd5de364d3eaebc93f",
+              "8ceea7973f792e0c62870c2ce9a95529c38352e82a6b0e9f8108c81fca33026f",
+              "502a50f3ab73cb55e3fcbe9642ce5bf0f752758326f6556eb793180224057185",
+              "393fd50e6633a6c1a7c3ad2537104e809b72e1c8cb0e6f87b75d95aef370cd25",
+              "d306c460b60f0b20a634585977e4222a9d01c7c2182a8b828f9caafb9ffc88c5",
+              "d17973073d9e9f8d54693080ddb2db44e5343e4f2601e1886cab488fb23eb113"
+            ],
+            "pairs": [
+              {
+                "block": 0,
+                "candidate_ms": 0.20415006577968597,
+                "canonical_ms": 0.5194201469421387,
+                "pair_id": "bd1dab4024249aa81ca7c9a7df44aef713109fc7884f96d154c0de09675f71c6",
+                "slot_fingerprint": "5401567850e108c5f73cd5e927c9703ec2171f9b00462b140b8c9eebd4cea542",
+                "slot_id": "weight-006"
+              },
+              {
+                "block": 1,
+                "candidate_ms": 0.20195749402046204,
+                "canonical_ms": 0.5230726003646851,
+                "pair_id": "a64f41a66e74005585d066fd351cd06b36e85765037f62dde6ae97c5c2eb9011",
+                "slot_fingerprint": "d6a7b451d770729a23e8b5ce203563746d4e0ec1678bc78b6a92a151ccf7fc7f",
+                "slot_id": "weight-001"
+              },
+              {
+                "block": 2,
+                "candidate_ms": 0.20436006784439087,
+                "canonical_ms": 0.4990151822566986,
+                "pair_id": "22d8bfa3ab34ab7801253ad4a186ce8d9967bc6a6c2fb5fb469887cb382f943c",
+                "slot_fingerprint": "26d87a5dc16e498e12c89a8cdb4f2ba63dd0a99192e3c7448c592971854eb111",
+                "slot_id": "weight-000"
+              },
+              {
+                "block": 3,
+                "candidate_ms": 0.20256006717681885,
+                "canonical_ms": 0.5210251808166504,
+                "pair_id": "f6e4df13a93f3b249962ef049506e0e1e94fe3cfead2b42ae81a68e5b83a8145",
+                "slot_fingerprint": "067f1109e8526ddd9dc8e4c168389ec0b2bf18cc63bfb36e3820d6d5b892f983",
+                "slot_id": "weight-003"
+              },
+              {
+                "block": 4,
+                "candidate_ms": 0.2095324993133545,
+                "canonical_ms": 0.5336501002311707,
+                "pair_id": "a73adc43217c27aca34fdadc2344f60d7e620bb8724ebb9e6c0331154b062425",
+                "slot_fingerprint": "aa5cfce135b6e78bcfd4616dfed70b4423a7145b442e0788a196b01320dab47c",
+                "slot_id": "weight-002"
+              },
+              {
+                "block": 5,
+                "candidate_ms": 0.2088550627231598,
+                "canonical_ms": 0.509390115737915,
+                "pair_id": "2cad2380e78a98a3ba07c50cbfa78c71b1accc094345bee9b61c24e680012785",
+                "slot_fingerprint": "342fcd480768b1d2722115f3fd249f29165b2ec7b997cc62bc524e5f3a46a1bf",
+                "slot_id": "weight-004"
+              },
+              {
+                "block": 6,
+                "candidate_ms": 0.21154506504535675,
+                "canonical_ms": 0.5120151042938232,
+                "pair_id": "71378e2c4ded81815c7167917e6fed6220f49e96450bce0dce17d22b785772fa",
+                "slot_fingerprint": "db33d9e90956df7497d7d24a4047a53570ed8de43b5d3d0bd5a7b88465fe6cd3",
+                "slot_id": "weight-007"
+              },
+              {
+                "block": 7,
+                "candidate_ms": 0.20912006497383118,
+                "canonical_ms": 0.5073926448822021,
+                "pair_id": "29793bbe8011f051a281d7b47e7d1d8ad46896645ffbdbc1ebfad74d57802fcd",
+                "slot_fingerprint": "d84cd4607c691a76ca268d73402a9cd21a837ce9361d094bf08beeab5358bf28",
+                "slot_id": "weight-008"
+              },
+              {
+                "block": 8,
+                "candidate_ms": 0.20551756024360657,
+                "canonical_ms": 0.5080376267433167,
+                "pair_id": "2b177c962f39e3e2b85bc7fb0606311bed4a6083de1d7b9e8b49aa102f53fb7e",
+                "slot_fingerprint": "56fd13d554cd89dfffa6535834050b5abae7ed78b769ec939a3d7cff2a75e4ea",
+                "slot_id": "weight-005"
+              },
+              {
+                "block": 9,
+                "candidate_ms": 0.20757755637168884,
+                "canonical_ms": 0.511332631111145,
+                "pair_id": "9904424b6bc90207266a955716ca874421df91c598aaefe252e5ac0a4e0cd070",
+                "slot_fingerprint": "56fd13d554cd89dfffa6535834050b5abae7ed78b769ec939a3d7cff2a75e4ea",
+                "slot_id": "weight-005"
+              },
+              {
+                "block": 10,
+                "candidate_ms": 0.20964506268501282,
+                "canonical_ms": 0.5114651918411255,
+                "pair_id": "9f02c0d7029c0951d2081f5a40ef850cc9f00c262e532783e7dd6a0471a156e4",
+                "slot_fingerprint": "d6a7b451d770729a23e8b5ce203563746d4e0ec1678bc78b6a92a151ccf7fc7f",
+                "slot_id": "weight-001"
+              },
+              {
+                "block": 11,
+                "candidate_ms": 0.200062558054924,
+                "canonical_ms": 0.5183725953102112,
+                "pair_id": "7af9ef3618d176ea9ad61b99f624c2f4bb76648f3a240d721cc7f7b34f23be08",
+                "slot_fingerprint": "d84cd4607c691a76ca268d73402a9cd21a837ce9361d094bf08beeab5358bf28",
+                "slot_id": "weight-008"
+              },
+              {
+                "block": 12,
+                "candidate_ms": 0.1993175595998764,
+                "canonical_ms": 0.5145276188850403,
+                "pair_id": "f1af2830d71089b74d0ccaa283c4cd274a5608656ca5dd06309231154f6d3410",
+                "slot_fingerprint": "342fcd480768b1d2722115f3fd249f29165b2ec7b997cc62bc524e5f3a46a1bf",
+                "slot_id": "weight-004"
+              },
+              {
+                "block": 13,
+                "candidate_ms": 0.20090006291866302,
+                "canonical_ms": 0.5193876624107361,
+                "pair_id": "de1b2259503e7807573003cb342229f3716c2d0750a094ad78f7437356ca3614",
+                "slot_fingerprint": "aa5cfce135b6e78bcfd4616dfed70b4423a7145b442e0788a196b01320dab47c",
+                "slot_id": "weight-002"
+              },
+              {
+                "block": 14,
+                "candidate_ms": 0.19954505562782288,
+                "canonical_ms": 0.5382026433944702,
+                "pair_id": "b0987a073f8e2378d09e5e6700ea16adff351468fb5550f06dbda81ec3863903",
+                "slot_fingerprint": "26d87a5dc16e498e12c89a8cdb4f2ba63dd0a99192e3c7448c592971854eb111",
+                "slot_id": "weight-000"
+              },
+              {
+                "block": 15,
+                "candidate_ms": 0.20524750649929047,
+                "canonical_ms": 0.5107126235961914,
+                "pair_id": "2d0fc5a0989cfd0f253089a6d339330597bf3ca3cca060fa3a6b1ae1c2c4e10e",
+                "slot_fingerprint": "5401567850e108c5f73cd5e927c9703ec2171f9b00462b140b8c9eebd4cea542",
+                "slot_id": "weight-006"
+              },
+              {
+                "block": 16,
+                "candidate_ms": 0.20657756924629211,
+                "canonical_ms": 0.5136476159095764,
+                "pair_id": "7123ad9daee53f44aeb0ad3b0fa35180464f3a00efc4fbc076160c3775860675",
+                "slot_fingerprint": "067f1109e8526ddd9dc8e4c168389ec0b2bf18cc63bfb36e3820d6d5b892f983",
+                "slot_id": "weight-003"
+              },
+              {
+                "block": 17,
+                "candidate_ms": 0.20179755985736847,
+                "canonical_ms": 0.5196900963783264,
+                "pair_id": "1f5017bb1d521f974355015451bd0967560db8c66fd7be7cc9c4b2e630bcb4d0",
+                "slot_fingerprint": "db33d9e90956df7497d7d24a4047a53570ed8de43b5d3d0bd5a7b88465fe6cd3",
+                "slot_id": "weight-007"
+              },
+              {
+                "block": 18,
+                "candidate_ms": 0.20459255576133728,
+                "canonical_ms": 0.5207201242446899,
+                "pair_id": "71b01f5719d571296def5c229f2996dc5c7c9d86d385443c2fddd2137a2f8db1",
+                "slot_fingerprint": "26d87a5dc16e498e12c89a8cdb4f2ba63dd0a99192e3c7448c592971854eb111",
+                "slot_id": "weight-000"
+              },
+              {
+                "block": 19,
+                "candidate_ms": 0.2002275586128235,
+                "canonical_ms": 0.5225276350975037,
+                "pair_id": "1d57bab0a3ee4abff286c24d473aa720618d23027006fe6417d5754d9a8e5fad",
+                "slot_fingerprint": "db33d9e90956df7497d7d24a4047a53570ed8de43b5d3d0bd5a7b88465fe6cd3",
+                "slot_id": "weight-007"
+              },
+              {
+                "block": 20,
+                "candidate_ms": 0.2020350694656372,
+                "canonical_ms": 0.5178426504135132,
+                "pair_id": "d66fa6ca7b89bfb2f983dba8854b9c449bc89e201bd6d9f73f663ebf2382af13",
+                "slot_fingerprint": "d6a7b451d770729a23e8b5ce203563746d4e0ec1678bc78b6a92a151ccf7fc7f",
+                "slot_id": "weight-001"
+              },
+              {
+                "block": 21,
+                "candidate_ms": 0.20298756659030914,
+                "canonical_ms": 0.5192901492118835,
+                "pair_id": "8f3665a67391174640741966da010f864e93b83d1e2a3fcd5de364d3eaebc93f",
+                "slot_fingerprint": "342fcd480768b1d2722115f3fd249f29165b2ec7b997cc62bc524e5f3a46a1bf",
+                "slot_id": "weight-004"
+              },
+              {
+                "block": 22,
+                "candidate_ms": 0.21319755911827087,
+                "canonical_ms": 0.5107226967811584,
+                "pair_id": "8ceea7973f792e0c62870c2ce9a95529c38352e82a6b0e9f8108c81fca33026f",
+                "slot_fingerprint": "d84cd4607c691a76ca268d73402a9cd21a837ce9361d094bf08beeab5358bf28",
+                "slot_id": "weight-008"
+              },
+              {
+                "block": 23,
+                "candidate_ms": 0.20079006254673004,
+                "canonical_ms": 0.5239576101303101,
+                "pair_id": "502a50f3ab73cb55e3fcbe9642ce5bf0f752758326f6556eb793180224057185",
+                "slot_fingerprint": "067f1109e8526ddd9dc8e4c168389ec0b2bf18cc63bfb36e3820d6d5b892f983",
+                "slot_id": "weight-003"
+              },
+              {
+                "block": 24,
+                "candidate_ms": 0.20240506529808044,
+                "canonical_ms": 0.5205451250076294,
+                "pair_id": "393fd50e6633a6c1a7c3ad2537104e809b72e1c8cb0e6f87b75d95aef370cd25",
+                "slot_fingerprint": "5401567850e108c5f73cd5e927c9703ec2171f9b00462b140b8c9eebd4cea542",
+                "slot_id": "weight-006"
+              },
+              {
+                "block": 25,
+                "candidate_ms": 0.19946999847888947,
+                "canonical_ms": 0.5193126201629639,
+                "pair_id": "d306c460b60f0b20a634585977e4222a9d01c7c2182a8b828f9caafb9ffc88c5",
+                "slot_fingerprint": "aa5cfce135b6e78bcfd4616dfed70b4423a7145b442e0788a196b01320dab47c",
+                "slot_id": "weight-002"
+              },
+              {
+                "block": 26,
+                "candidate_ms": 0.20834755897521973,
+                "canonical_ms": 0.5239876508712769,
+                "pair_id": "d17973073d9e9f8d54693080ddb2db44e5343e4f2601e1886cab488fb23eb113",
+                "slot_fingerprint": "56fd13d554cd89dfffa6535834050b5abae7ed78b769ec939a3d7cff2a75e4ea",
+                "slot_id": "weight-005"
+              }
+            ],
+            "practical_mde": 0.02,
+            "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+            "reason": "paired lower bound proves candidate improvement over canonical",
+            "route": "prefill_m1024_down",
+            "schema": "geak.asm-candidate-vs-canonical-gate/v1",
+            "threshold_log_ratio": 0.02020270731751945
+          }
+        ],
+        "config_ids": [
+          "c4cd2f649a70d9f04d6b",
+          "db88343ca2e25eb8f46e"
+        ],
+        "kind": "candidate",
+        "reason": "candidate-vs-canonical paired MDE gate passed",
+        "status": "winner"
+      },
       "shape": {
         "k": 11008,
         "m": 1024,
@@ -880,103 +945,19 @@
       "weight": 1.0
     },
     "prefill_m128_square": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "prefill_m128_square",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 4096,
         "m": 128,
@@ -985,103 +966,19 @@
       "weight": 1.0
     },
     "prefill_m2048_square": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "prefill_m2048_square",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 4096,
         "m": 2048,
@@ -1090,103 +987,19 @@
       "weight": 1.0
     },
     "prefill_m256_down": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "prefill_m256_down",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 11008,
         "m": 256,
@@ -1195,103 +1008,19 @@
       "weight": 1.0
     },
     "prefill_m512_up": {
-      "entries": [
-        {
-          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
-          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
-          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
-          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
-          "config": {
-            "a_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "arch": "gfx942",
-            "b_lds": {
-              "buffers": 1,
-              "pad_elements": 0
-            },
-            "bk": 64,
-            "bm": 64,
-            "bn": 64,
-            "derived": {
-              "lds": {
-                "a_bytes": 4096,
-                "b_bytes": 4096,
-                "pgr_counted_as_buffer": false,
-                "scratch_bytes": 4096,
-                "total_bytes": 12288
-              },
-              "miwt": {
-                "m": 2,
-                "n": 2
-              },
-              "nw": 4,
-              "register_estimate": {
-                "accumulator_vgpr": 16,
-                "pgr_register_vgpr": 4,
-                "regular_vgpr": 36,
-                "unified_vgpr": 52
-              },
-              "wave_tile": {
-                "m": 32,
-                "n": 32
-              }
-            },
-            "dtype": "fp8_e4m3_fnuz",
-            "gsu": 1,
-            "layout": "a_mk_b_nk",
-            "lds_scratch_bytes": 4096,
-            "mfma": {
-              "blocks": 1,
-              "k": 32,
-              "m": 16,
-              "n": 16
-            },
-            "pgr": 1,
-            "plr": 0,
-            "provenance": {
-              "kind": "mvp_correctness_seed",
-              "vendor_default": false
-            },
-            "schema": "geak.asm_config/v1",
-            "stagger": 0,
-            "store": {
-              "mode": "vector"
-            },
-            "stream_k": 0,
-            "vector_widths": {
-              "a": 16,
-              "b": 16,
-              "store": 4
-            },
-            "wave_grid": {
-              "m": 2,
-              "n": 2
-            },
-            "wgm": 1,
-            "xcc": 1
-          },
-          "config_id": "85c8914408c3ef3917eb",
-          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
-          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
-          "metric_id": "sustained_throughput",
-          "metric_inner": 16,
-          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-          "rank": 0,
-          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
-          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
-          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
-          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
-          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
-          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
-        }
-      ],
+      "entries": [],
       "fallback": {
         "kind": "canonical",
-        "reason": "shape absent from canonical CASES"
+        "reason": "route is unmeasured or has no paired MDE winner"
       },
       "route": "prefill_m512_up",
+      "selection": {
+        "candidate_gates": [],
+        "config_ids": [],
+        "kind": "canonical",
+        "reason": "route was outside this search target",
+        "status": "unmeasured"
+      },
       "shape": {
         "k": 4096,
         "m": 512,
@@ -1300,8 +1029,8 @@
       "weight": 1.0
     }
   },
-  "run_id": "materialize-3ad75f0437e53d3b",
-  "schema": "geak.runtime_table/v2",
+  "run_id": "materialize-4affc945392a4807",
+  "schema": "geak.runtime_table/v3",
   "score_metric": {
     "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
     "id": "sustained_throughput",
@@ -1327,7 +1056,7 @@
       "shard_size": 12,
       "top_k": 2
     },
-    "search_id": "a1e34c361619793655d64e0252bf5663ba90fe1a10a57e4c474eff8ab389f203"
+    "search_id": "3a17ed80d1dd708917da77064907c5f2dbe23ca4afa0c21cef45577327c6b84c"
   },
   "suite": {
     "atomic": true,
@@ -1346,7 +1075,7 @@
       "prefill_m512_up"
     ]
   },
-  "table_digest": "0204f30f3b2331575fe5ecf2e251498f835a8a94870b291d5981a2d72cb448e7",
+  "table_digest": "f2fc30621727876b36840f1acaf97dafb0d994abd3340e2d7aae0429b425490f",
   "task": {
     "adapter": "fp8_rowwise",
     "binding_hashes": {
@@ -1354,17 +1083,17 @@
       "correctness": "eae90869d4c8b85eaa356986acad7ca515f946aa58dc5dc95fb6bc0e08c23ce1",
       "input_builder": "0f5bcf267d2febaa5100f578023ee6bc0434da23b94cb20c2fc6fa4c2aa0acbf"
     },
-    "digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa",
+    "digest": "44a33c61c960feb6e27b89dde0e5429c7354b5ace9110d6b36e84fddd9dee194",
     "name": "dense_fp8_gemm_rowwise",
     "semantic_hashes": {
       "config.yaml": "70d77b92d12cd4902de487b8941b0ec9b90641af7f8548607545540c2093d64f",
-      "geak_tuner_runtime.py": "a8dea961de35c18886c13c89017614d0e03311ff34832e561255f33307bcf50d",
+      "geak_tuner_runtime.py": "0f4c0b757833e490e0bd3e05f0837297024e6ce6eb82067414f4689a921fe476",
       "harness_lib.py": "9438cf7ede040aecd2cbffd497a6c91c39d49d312f7c17bef36c597965f6678b",
       "oracle_wrapper.py": "41f80fffa70817415667780364a55a3f1af77c8a0fa279d513e23748ce162d8c",
       "route_manifest.py": "0ecf122d93054bfea40fab7f6f8a5f8b84d423fa274c0d9a468afb7d59612d5d",
       "scripts/task_runner.py": "7c97c9ef60243687d55d3f6ff4d99ecc151f9c39b460e75581d8a2dbf8d79c49"
     },
-    "source_digest": "7877983c73190264417a68aa5e7bff405ec75eef30437ef1530e66ef87de756e"
+    "source_digest": "abb98732cf4c6df066976f7a103e50a00b7a23bdda5b010fa3ef79cb3728b6e0"
   },
-  "updated_at": "2026-09-02T20:34:11.222968+00:00"
+  "updated_at": "2026-09-02T22:33:21.170608+00:00"
 }
