@@ -31,6 +31,12 @@ def _check_inputs(a: torch.Tensor, b: torch.Tensor,
         raise ValueError("b_scale must hold exactly N elements (per-channel)")
 
 
+def _canonical_gemm(a: torch.Tensor, b: torch.Tensor,
+                    a_scale: torch.Tensor, b_scale: torch.Tensor) -> torch.Tensor:
+    from kernel_loader import gemm_ext
+    return gemm_ext.dense_fp8_gemm(a, b, a_scale, b_scale)
+
+
 def dense_fp8_gemm(a: torch.Tensor, b: torch.Tensor,
                    a_scale: torch.Tensor, b_scale: torch.Tensor) -> torch.Tensor:
     """Compute (A*a_scale) @ (B*b_scale).T in bf16 with the editable HIP candidate."""
@@ -39,5 +45,4 @@ def dense_fp8_gemm(a: torch.Tensor, b: torch.Tensor,
     if tuned is not None:
         return tuned
     # Shapes outside the exact suite use the declared canonical fallback.
-    from kernel_loader import gemm_ext
-    return gemm_ext.dense_fp8_gemm(a, b, a_scale, b_scale)
+    return _canonical_gemm(a, b, a_scale, b_scale)

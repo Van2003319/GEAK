@@ -84,6 +84,10 @@ def test_compile_cache_metadata_and_cross_shard_isa_dedupe(tmp_path, monkeypatch
     second = compiler.compile(get_adapter("bf16"), configs, on_demand=True, shared=True)
     assert [item.cache_hit for item in second] == [True, True]
     assert len(calls) == calls_before
+    rebound = ShardCompiler(
+        tmp_path / "cache", hipcc="/fake/hipcc", cache_binding="changed-task-digest",
+    ).compile(get_adapter("bf16"), configs, on_demand=True, shared=True)
+    assert [item.cache_hit for item in rebound] == [False, False]
 
 
 def test_metadata_gate_rejects_register_spill(tmp_path, monkeypatch):

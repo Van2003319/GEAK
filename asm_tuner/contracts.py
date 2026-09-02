@@ -350,8 +350,10 @@ class TaskContract:
         binding_hashes = {
             "cases": sha256_bytes(canonical_json(normalized_cases).encode("utf-8")),
         }
-        for key in ("input_builder", "correctness"):
+        for key in ("entrypoint", "input_builder", "correctness", "reference"):
             binding = bindings.get(key) or {}
+            if key == "reference" and not binding:
+                continue
             path = root / str(binding.get("path") or "")
             symbol = str(binding.get("symbol") or "")
             binding_hashes[key] = _function_sha256(path, symbol)
@@ -420,6 +422,14 @@ class TaskContract:
             "task": value["task"],
             "adapter": value["adapter"],
             "cases": normalized_cases,
+            "bindings": {
+                str(key): {
+                    "path": str(binding.get("path") or ""),
+                    "symbol": str(binding.get("symbol") or ""),
+                }
+                for key, binding in sorted(bindings.items())
+                if isinstance(binding, dict)
+            },
             "semantic_hashes": semantic_hashes,
             "binding_hashes": binding_hashes,
             "route_manifest_sha256": sha256_file(route_path),

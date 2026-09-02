@@ -1,6 +1,8 @@
+import copy
 import datetime as dt
 import importlib.util
 import json
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -33,7 +35,57 @@ def rebaked_contract(tmp_path):
 
 class FakeLibrary:
     def __getattr__(self, name):
-        return object()
+        return lambda *args: 0
+
+
+def fake_confirmation_gate(contract, route, row):
+    candidate_id = row["config_id"]
+    blocks = []
+    for index in range(8):
+        samples = {
+            candidate_id: {
+                "ms": 0.9, "slot_fingerprint": "slot", "arm": candidate_id,
+            },
+            integration.CANONICAL_CONTROL_ARM: {
+                "ms": 1.0, "slot_fingerprint": "slot",
+                "arm": integration.CANONICAL_CONTROL_ARM,
+            },
+        }
+        blocks.append({
+            "block": index, "cycle": index, "slot_id": "slot",
+            "slot_fingerprint": "slot", "samples": samples,
+        })
+    gate = integration._candidate_vs_canonical_gate(
+        {
+            "blocks": blocks,
+            "protocol_hash": contract.protocol["hash"],
+            "metric_id": contract.score_metric_id,
+            "metric": {"inner": contract.score_metric_inner},
+            "medians_ms": {
+                candidate_id: 0.9,
+                integration.CANONICAL_CONTROL_ARM: 1.0,
+            },
+        },
+        route=route, candidate_id=candidate_id,
+        evidence_phase="independent_materialized_task_dispatch",
+    )
+    gate["confirmation"] = {
+        "workspace": "isolated_materialized_copy",
+        "task_entrypoint": contract.value["bindings"]["entrypoint"]["symbol"],
+        "runtime_table_schema": "geak.runtime_table/v3",
+        "table_digest": "d" * 64,
+        "correctness": {"passed": True, "max_relative_error": 0.0},
+        "dispatch_receipt": {
+            "route": route,
+            "config_id": candidate_id,
+            "symbol": row["symbol"],
+            "table_digest": "d" * 64,
+            "artifact_sha256": row["artifact_sha256"],
+            "source_sha256": row["source_sha256"],
+            "compile_manifest_sha256": row["compile_manifest_sha256"],
+        },
+    }
+    return gate
 
 
 def fake_release(contract, tmp_path):
@@ -81,21 +133,9 @@ def fake_release(contract, tmp_path):
                 "selection": "candidate",
                 "reason": "unit candidate-vs-canonical paired MDE gate passed",
                 "config_ids": [configs[0].config_id, configs[1].config_id],
-                "candidate_gates": [{
-                    "schema": integration.PAIR_GATE_SCHEMA,
-                    "comparison": "candidate_vs_canonical_task_implementation",
-                    "route": winner_route,
-                    "candidate_id": config.config_id,
-                    "accepted": True,
-                    "protocol_hash": contract.protocol["hash"],
-                    "metric_id": contract.score_metric_id,
-                    "metric_inner": contract.score_metric_inner,
-                    "n_pairs": 8,
-                    "pair_ids": ["%064x" % index for index in range(8)],
-                    "ci95_lower_log_ratio": 0.05,
-                    "threshold_log_ratio": 0.02,
-                    "algorithm": {"name": integration.PAIR_GATE_ALGORITHM},
-                } for config in configs],
+                "candidate_gates": [
+                    fake_confirmation_gate(contract, winner_route, row) for row in rows
+                ],
             }
             if route.name == winner_route else
             {
@@ -170,7 +210,16 @@ def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(
     assert spec and spec.loader
     runtime = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runtime)
+    original_sha256 = runtime._sha256
+    hash_calls = []
+    runtime._sha256 = lambda path: (
+        hash_calls.append(str(path)) or original_sha256(path)
+    )
     loaded = runtime._load_table()
+    first_load_hashes = len(hash_calls)
+    assert first_load_hashes > 0
+    assert runtime._load_table() is loaded
+    assert len(hash_calls) == first_load_hashes
     first_route = contract.routes[0]
     route_id, selected = runtime._select(
         loaded, (first_route.m, first_route.n, first_route.k),
@@ -182,6 +231,9 @@ def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(
     assert runtime._select(
         loaded, (fallback_route.m, fallback_route.n, fallback_route.k),
     ) is None
+    os.utime(workspace / "asm_tuner_runtime_table.json", None)
+    assert runtime._load_table()["table_digest"] == loaded["table_digest"]
+    assert len(hash_calls) > first_load_hashes
 
     verified = verify_materialization(contract, workspace=workspace,
                                         rebuild=False, independent=True)
@@ -207,3 +259,25 @@ def test_materialized_source_tamper_fails_closed(tmp_path, monkeypatch):
     (workspace / entry["source"]).write_text("tampered\n")
     with pytest.raises(IntegrationError, match="source hash mismatch"):
         verify_materialization(contract, workspace=workspace, independent=False)
+
+
+@pytest.mark.parametrize("attack", ["lower", "mde", "delete_pair", "duplicate_pair"])
+def test_release_recomputes_raw_confirmation_pairs(tmp_path, attack):
+    contract = rebaked_contract(tmp_path)
+    release = copy.deepcopy(fake_release(contract, tmp_path))
+    route = contract.routes[0].name
+    gate = release["route_outcomes"][route]["candidate_gates"][0]
+    if attack == "lower":
+        gate["ci95_lower_log_ratio"] += 0.1
+    elif attack == "mde":
+        gate["practical_mde"] = 0.001
+        gate["threshold_log_ratio"] = -integration.math.log1p(-0.001)
+    elif attack == "delete_pair":
+        gate["pairs"].pop()
+    else:
+        gate["pairs"].append(copy.deepcopy(gate["pairs"][0]))
+        gate["pair_ids"].append(gate["pair_ids"][0])
+        gate["n_pairs"] += 1
+    release["release_id"] = integration._release_identity(release)
+    with pytest.raises(IntegrationError, match="paired gate"):
+        integration.validate_release(release, contract)

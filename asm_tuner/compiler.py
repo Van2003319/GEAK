@@ -92,10 +92,14 @@ def _locked(path: Path) -> Iterator[None]:
 
 
 class ShardCompiler:
-    def __init__(self, cache_root: Path, hipcc: Optional[str] = None, optimization: str = "-O3") -> None:
+    def __init__(
+        self, cache_root: Path, hipcc: Optional[str] = None,
+        optimization: str = "-O3", cache_binding: str = "",
+    ) -> None:
         self.cache_root = Path(cache_root)
         self.hipcc = hipcc or os.environ.get("HIPCC") or shutil.which("hipcc") or "/opt/rocm/bin/hipcc"
         self.optimization = optimization
+        self.cache_binding = str(cache_binding)
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self._fingerprint: Optional[CompilerFingerprint] = None
 
@@ -118,6 +122,7 @@ class ShardCompiler:
             "compiler": self.fingerprint.to_dict(),
             "optimization": self.optimization,
             "shared": shared,
+            "cache_binding": self.cache_binding,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 

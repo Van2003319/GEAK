@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
@@ -933,8 +933,10 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
         raise LaunchError("task CASES binding is malformed",
                           code=EXIT_TUNER, category="tuner") from exc
     computed_bindings = {"cases": sha256_json(normalized_cases)}
-    for binding_name in ("input_builder", "correctness"):
+    for binding_name in ("entrypoint", "input_builder", "correctness", "reference"):
         binding = bindings.get(binding_name) or {}
+        if binding_name == "reference" and not binding:
+            continue
         binding_path = _root_bound_file(
             spec.root, task_root, binding.get("path"), f"task {binding_name} binding",
         )
@@ -961,6 +963,14 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
         "task": manifest.get("task"),
         "adapter": manifest.get("adapter"),
         "cases": normalized_cases,
+            "bindings": {
+                str(key): {
+                    "path": str(binding.get("path") or ""),
+                    "symbol": str(binding.get("symbol") or ""),
+                }
+                for key, binding in sorted(bindings.items())
+                if isinstance(binding, dict)
+            },
         "semantic_hashes": semantic_hashes,
         "binding_hashes": computed_bindings,
         "route_manifest_sha256": sha256_file(route_manifest_path),
@@ -1370,6 +1380,73 @@ def render_workflow(spec: LaunchSpec) -> str:
         f"  scriptPath: {json.dumps(str(spec.root / 'kernel_workflow/kernel_workflow.js'), sort_keys=True)},\n"
         "  args: {\n" + body + "\n  }\n})"
     )
+
+
+def prepare_tuner_for_supervise(
+    spec: LaunchSpec,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> LaunchSpec:
+    """Hydrate a fresh clone under the lane GPU lock, commit only publication files."""
+    check_git(spec.root, spec.expected_commit)
+    check_state(spec, resume=False)
+    task_root = Path(str(spec.args["kernel_path"])).resolve()
+    manifest = Path(str(spec.args["asm_tuner_manifest"])).resolve()
+    selection = task_root / "asm_tuner_selection.json"
+    publication = [spec.tuner_registry, spec.tuner_table, selection]
+    gpu_csv = ",".join(map(str, spec.gpu_ids))
+    command = [
+        "bash", str(spec.root / "kernel_workflow/scripts/gpu_lock.sh"), gpu_csv,
+        "bash", str(spec.root / "kernel_workflow/scripts/gpu_fence_run.sh"),
+        sys.executable, str(spec.root / "kernel_workflow/scripts/config_search.py"),
+        "prepare",
+        "--registry", str(spec.tuner_registry),
+        "--task-manifest", str(manifest),
+        "--workspace", str(task_root),
+        "--cache", str(task_root / ".geak_tuner/cache"),
+    ]
+    env = dict(os.environ)
+    env["GEAK_GPU_ALLOWED"] = gpu_csv
+    proc = runner(
+        command, cwd=spec.root, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if proc.returncode:
+        raise LaunchError(
+            "locked tuner prepare failed: %s" % (proc.stderr.strip() or proc.stdout.strip()),
+            code=EXIT_TUNER, category="tuner",
+        )
+    changed = {
+        line[3:] for line in git(
+            spec.root, "status", "--porcelain", "--untracked-files=no",
+        ).stdout.splitlines() if len(line) >= 4
+    }
+    allowed = {
+        path.resolve().relative_to(spec.root.resolve()).as_posix()
+        for path in publication
+    }
+    if changed - allowed:
+        raise LaunchError(
+            "tuner prepare modified non-publication files: %s" % sorted(changed - allowed),
+            code=EXIT_TUNER, category="tuner",
+        )
+    if changed:
+        git(spec.root, "add", "--", *sorted(allowed))
+        commit = git(
+            spec.root, "-c", "user.name=GEAK tuner prepare",
+            "-c", "user.email=geak-tuner@localhost",
+            "commit", "-m", "chore(tuner): hydrate fresh-clone publication",
+            "--", *sorted(allowed),
+        )
+        if not commit.stdout and not commit.stderr:
+            raise LaunchError("tuner publication commit produced no receipt",
+                              code=EXIT_TUNER, category="tuner")
+    head = git(spec.root, "rev-parse", "HEAD").stdout.strip()
+    prepared = replace(spec, expected_commit=head)
+    # This is deliberately the same strict, clean-HEAD condition used by the
+    # subsequent full preflight; no state has been created yet.
+    check_git(prepared.root, prepared.expected_commit)
+    return prepared
 
 
 def perform_preflight(spec: LaunchSpec, *, resume: bool, settings_path: Path | None = None,
@@ -1829,6 +1906,10 @@ def parser() -> argparse.ArgumentParser:
     add_common(supervise)
     supervise.add_argument("--dry-run", action="store_true",
                            help="run the read-only preflight and launch nothing")
+    supervise.add_argument(
+        "--prepare-tuner", action="store_true",
+        help="under the lane GPU lock, regenerate/commit only tuner publication before strict preflight",
+    )
     supervise.add_argument("--watchdog-interval", type=int, default=30)
     supervise.add_argument("--api-watchdog-interval", type=int, default=600)
     render = commands.add_parser("render", help="print the resolved lane without writing it")
@@ -1865,6 +1946,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(render_workflow(spec))
             return 0
         with lane_lock(spec.root, spec.lane):
+            if ns.command == "supervise" and ns.prepare_tuner:
+                if ns.resume or ns.dry_run:
+                    raise LaunchError(
+                        "--prepare-tuner is allowed only for a fresh non-dry-run supervise",
+                        code=EXIT_TUNER, category="tuner",
+                    )
+                spec = prepare_tuner_for_supervise(spec)
             if ns.command == "supervise" and ns.resume \
                     and int(time.time()) >= spec.deadline.hard_end_epoch:
                 check_git(spec.root, spec.expected_commit)

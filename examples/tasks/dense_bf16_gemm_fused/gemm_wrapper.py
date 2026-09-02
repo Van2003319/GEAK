@@ -20,6 +20,11 @@ def _check_inputs(a: torch.Tensor, b: torch.Tensor) -> None:
         raise ValueError("M, N, and K must be positive")
 
 
+def _canonical_gemm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    from kernel_loader import gemm_ext
+    return gemm_ext.dense_bf16_gemm(a, b)
+
+
 def dense_bf16_gemm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Compute A[M,K] @ B[N,K].T with the editable HIP candidate."""
     _check_inputs(a, b)
@@ -28,5 +33,4 @@ def dense_bf16_gemm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return tuned
     # Keep the canonical extension lazy: when a complete tuner table owns this
     # shape, task dispatch loads only the selected artifact and symbol.
-    from kernel_loader import gemm_ext
-    return gemm_ext.dense_bf16_gemm(a, b)
+    return _canonical_gemm(a, b)

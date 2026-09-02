@@ -202,6 +202,52 @@ class DeadlineContractTest(unittest.TestCase):
 
 
 class TunerContractTest(unittest.TestCase):
+    def test_fresh_supervise_prepare_commits_only_publication_before_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            task = root / "examples/tasks/unit"
+            task.mkdir(parents=True)
+            manifest = root / "asm_tuner/manifests/tasks/unit.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}\n")
+            registry = task / "asm_tuner_registry.json"
+            table = task / "asm_tuner_runtime_table.json"
+            selection = task / "asm_tuner_selection.json"
+            for path in (registry, table, selection):
+                path.write_text('{"old": true}\n')
+            head = commit_all(root)
+            spec = L.LaunchSpec(
+                lane="bf16", task="unit", root=root, state_dir=root / "exp/new",
+                expected_commit=head, template_path=root / "template",
+                allocation_path=root / "allocation", tuner_registry=registry,
+                tuner_table=table, gpu_ids=(2, 3), deadline=deadline(),
+                raw_lane={}, args={
+                    "kernel_path": str(task),
+                    "asm_tuner_manifest": str(manifest),
+                }, meta={}, config_sha256="f" * 64,
+            )
+            commands = []
+
+            def fake_runner(command, **kwargs):
+                commands.append(command)
+                for index, path in enumerate((registry, table, selection)):
+                    path.write_text(json.dumps({"new": index}) + "\n")
+                return subprocess.CompletedProcess(command, 0, "prepared", "")
+
+            with mock.patch.object(L, "check_git", return_value=head):
+                prepared = L.prepare_tuner_for_supervise(spec, runner=fake_runner)
+            self.assertFalse(spec.state_dir.exists())
+            self.assertNotEqual(head, prepared.expected_commit)
+            self.assertEqual("", git(root, "status", "--porcelain").stdout)
+            changed = set(git(root, "show", "--format=", "--name-only", "HEAD").stdout.split())
+            self.assertEqual({
+                str(registry.relative_to(root)),
+                str(table.relative_to(root)),
+                str(selection.relative_to(root)),
+            }, changed)
+            self.assertIn("gpu_lock.sh", " ".join(commands[0]))
+            self.assertIn("gpu_fence_run.sh", " ".join(commands[0]))
+
     def test_prepare_tracked_publish_then_preflight_contract(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "repo"

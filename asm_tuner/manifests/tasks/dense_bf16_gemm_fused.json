@@ -61,9 +61,15 @@
     "config.yaml",
     "scripts/task_runner.py",
     "harness_lib.py",
+    "gemm_wrapper.py",
+    "kernel_loader.py",
     "oracle_wrapper.py",
     "route_manifest.py",
-    "geak_tuner_runtime.py"
+    "geak_tuner_runtime.py",
+    "src/gemm_bindings.cpp",
+    "src/dense_bf16_gemm.h",
+    "src/dense_bf16_gemm.hip",
+    "src/custom_gemm.hip"
   ],
   "task": "dense_bf16_gemm_fused",
   "task_root": "examples/tasks/dense_bf16_gemm_fused",

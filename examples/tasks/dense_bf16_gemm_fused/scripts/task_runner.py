@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -396,8 +397,8 @@ def run_performance(selected_case=None, protocol_name=None, score_metric_id=None
     return True, report
 
 
-def _load_paired_candidate(root, label):
-    """Load candidate-owned code from one immutable arm under a unique module name."""
+def _load_paired_fallback(root, label):
+    """Compile the root's canonical fallback for routes not owned by its runtime table."""
     from torch.utils.cpp_extension import ROCM_HOME, load
 
     root = Path(root).resolve()
@@ -419,6 +420,49 @@ def _load_paired_candidate(root, label):
     return ext.dense_bf16_gemm
 
 
+def _load_paired_candidate(root, label):
+    """Load one arm through its formal gemm_wrapper + runtime-table dispatch path."""
+    root = Path(root).resolve()
+    fallback = _load_paired_fallback(root, label)
+    suffix = hashlib.sha256((str(root) + ":" + label).encode()).hexdigest()[:16]
+    displaced = {
+        name: sys.modules.pop(name, None)
+        for name in ("geak_tuner_runtime", "gemm_wrapper")
+    }
+    old_path = list(sys.path)
+    sys.path.insert(0, str(root))
+    try:
+        runtime_spec = importlib.util.spec_from_file_location(
+            "geak_tuner_runtime", root / "geak_tuner_runtime.py")
+        if runtime_spec is None or runtime_spec.loader is None:
+            raise RuntimeError(f"{label} runtime loader is not importable")
+        runtime = importlib.util.module_from_spec(runtime_spec)
+        sys.modules["geak_tuner_runtime"] = runtime
+        runtime_spec.loader.exec_module(runtime)
+        table = runtime._load_table()
+        if table is None:
+            raise RuntimeError(f"{label} has no executable runtime table")
+        wrapper_spec = importlib.util.spec_from_file_location(
+            f"geak_paired_bf16_wrapper_{suffix}", root / "gemm_wrapper.py")
+        if wrapper_spec is None or wrapper_spec.loader is None:
+            raise RuntimeError(f"{label} task wrapper is not importable")
+        wrapper = importlib.util.module_from_spec(wrapper_spec)
+        wrapper_spec.loader.exec_module(wrapper)
+        wrapper._canonical_gemm = fallback
+        return wrapper.dense_bf16_gemm, {
+            "execution_path": "gemm_wrapper.runtime_table",
+            "table_digest": table["table_digest"],
+            "release_id": table.get("release_id"),
+        }
+    finally:
+        sys.path[:] = old_path
+        for name in displaced:
+            sys.modules.pop(name, None)
+        for name, module in displaced.items():
+            if module is not None:
+                sys.modules[name] = module
+
+
 def run_paired_verify(protocol_name=None, score_metric_id=None):
     """Task-v2 producer: full suite, same slots/blocks, candidate+incumbent+oracle."""
     from oracle_wrapper import oracle_backends, oracle_route, validate_oracle_routes
@@ -435,8 +479,8 @@ def run_paired_verify(protocol_name=None, score_metric_id=None):
     os.environ["GEAK_SCORE_METRIC"] = score_metric["id"]
     secondary_metric = harness.secondary_score_metric(score_metric, protocol=protocol)
     trusted, errors = validate_oracle_routes(protocol["hash"], score_metric, CASES)
-    candidate = _load_paired_candidate(candidate_root, "candidate")
-    incumbent = _load_paired_candidate(incumbent_root, "incumbent")
+    candidate, candidate_dispatch = _load_paired_candidate(candidate_root, "candidate")
+    incumbent, incumbent_dispatch = _load_paired_candidate(incumbent_root, "incumbent")
     backends = oracle_backends(frozen_algorithms=True) if trusted else {}
     # Every route must expose the same outer block inventory. Use the largest slot count any
     # suite route needs to exceed the cache; routes are measured sequentially, so this does not
@@ -500,6 +544,9 @@ def run_paired_verify(protocol_name=None, score_metric_id=None):
         "inner": score_metric["inner"],
         "secondary_metric": dict(secondary_metric),
         "promotion_control": "incumbent",
+        "task_entrypoint": "dense_bf16_gemm",
+        "candidate_dispatch": candidate_dispatch,
+        "incumbent_dispatch": incumbent_dispatch,
         "oracle_role": "absolute_report_only",
         "routes": routes,
     }

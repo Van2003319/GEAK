@@ -328,6 +328,18 @@ def validate_raw_suite(
         raise PairedVerifyError("task promotion_control must be the untouched incumbent")
     if value.get("oracle_role") != "absolute_report_only":
         raise PairedVerifyError("task oracle_role must be absolute_report_only")
+    if not isinstance(value.get("task_entrypoint"), str) or not value["task_entrypoint"]:
+        raise PairedVerifyError("task receipt does not name the formal entrypoint")
+    for arm in ("candidate", "incumbent"):
+        dispatch = value.get(f"{arm}_dispatch")
+        if (not isinstance(dispatch, Mapping)
+                or dispatch.get("execution_path") != "gemm_wrapper.runtime_table"
+                or not isinstance(dispatch.get("table_digest"), str)
+                or SHA256_RE.fullmatch(dispatch["table_digest"]) is None
+                or not isinstance(dispatch.get("release_id"), str)
+                or not dispatch["release_id"]):
+            raise PairedVerifyError(
+                f"task {arm} arm did not execute through gemm_wrapper/runtime table")
     expected = sorted(_names(list(expected_routes), "expected_routes"))
     declared = sorted(_names(value.get("expected_routes"), "task expected_routes"))
     if declared != expected:
@@ -428,6 +440,9 @@ def seal_task_receipt(
         "source_schema": RAW_SUITE_SCHEMA,
         "promotion_control": "incumbent",
         "oracle_role": "absolute_report_only",
+        "task_entrypoint": raw["task_entrypoint"],
+        "candidate_dispatch": dict(raw["candidate_dispatch"]),
+        "incumbent_dispatch": dict(raw["incumbent_dispatch"]),
         "expected_routes": sorted(expected_routes),
         "protocol": first["protocol"],
         "protocol_hash": first["protocol_hash"],
@@ -579,6 +594,15 @@ def validate_task_receipt(
         raise PairedVerifyError("paired task promotion control is not the incumbent")
     if task.get("oracle_role") != "absolute_report_only":
         raise PairedVerifyError("paired task oracle is not report-only")
+    if not isinstance(task.get("task_entrypoint"), str) or not task["task_entrypoint"]:
+        raise PairedVerifyError("paired task formal entrypoint is missing")
+    for arm in ("candidate", "incumbent"):
+        dispatch = task.get(f"{arm}_dispatch")
+        if (not isinstance(dispatch, Mapping)
+                or dispatch.get("execution_path") != "gemm_wrapper.runtime_table"
+                or not isinstance(dispatch.get("table_digest"), str)
+                or SHA256_RE.fullmatch(dispatch["table_digest"]) is None):
+            raise PairedVerifyError(f"paired task {arm} dispatch binding is invalid")
     if task.get("incumbent_unchanged") is not True:
         raise PairedVerifyError("paired task receipt does not prove an unmodified incumbent")
     for field in ("candidate_hashes", "incumbent_hashes", "task_hashes"):
@@ -684,6 +708,9 @@ def adapt(
         "producer_schema": TASK_RECEIPT_SCHEMA,
         "promotion_control": "incumbent",
         "oracle_role": "absolute_report_only",
+        "task_entrypoint": task["task_entrypoint"],
+        "candidate_dispatch": task["candidate_dispatch"],
+        "incumbent_dispatch": task["incumbent_dispatch"],
         "canonical_input_sha256": task["canonical_input_sha256"],
         "protocol": task["protocol"],
         "protocol_hash": task["protocol_hash"],

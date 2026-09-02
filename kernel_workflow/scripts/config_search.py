@@ -1000,7 +1000,8 @@ def _parser() -> argparse.ArgumentParser:
     smoke = sub.add_parser("smoke")
     smoke.add_argument("--task-manifest", required=True)
     smoke.add_argument("--workspace", required=True)
-    smoke.add_argument("--case", default="")
+    smoke.add_argument("--case", required=True,
+                       help="candidate-owned route whose winner dispatch must be confirmed")
     return parser
 
 

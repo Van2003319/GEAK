@@ -121,6 +121,40 @@ class FakeHarness:
         }
 
 
+def fake_confirm(contract, *, artifact, route_name, output_dir):
+    candidate_id = artifact["config_id"]
+    receipt = FakeHarness.measure_paired_arms(
+        {
+            candidate_id: lambda slot: None,
+            integration.CANONICAL_CONTROL_ARM: lambda slot: None,
+        },
+        [{"slot_id": "unit"}],
+        protocol=dict(contract.protocol),
+        metric=contract.score_metric_id,
+    )
+    gate = integration._candidate_vs_canonical_gate(
+        receipt, route=route_name, candidate_id=candidate_id,
+        evidence_phase="independent_materialized_task_dispatch",
+    )
+    gate["confirmation"] = {
+        "workspace": "isolated_materialized_copy",
+        "task_entrypoint": contract.value["bindings"]["entrypoint"]["symbol"],
+        "runtime_table_schema": "geak.runtime_table/v3",
+        "table_digest": "d" * 64,
+        "correctness": {"passed": True, "max_relative_error": 0.0},
+        "dispatch_receipt": {
+            "route": route_name,
+            "config_id": candidate_id,
+            "symbol": artifact["symbol"],
+            "table_digest": "d" * 64,
+            "artifact_sha256": artifact["artifact_sha256"],
+            "source_sha256": artifact["source_sha256"],
+            "compile_manifest_sha256": artifact["compile_manifest_sha256"],
+        },
+    }
+    return gate
+
+
 def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     tmp_path, monkeypatch,
 ):
@@ -134,6 +168,7 @@ def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     monkeypatch.setenv("GEAK_GPU_FENCE_HELD", "1")
     monkeypatch.setattr(integration, "ShardCompiler", FakeCompiler)
     monkeypatch.setattr(integration, "_CompiledCallable", FakeCallable)
+    monkeypatch.setattr(integration, "_confirm_materialized_candidate", fake_confirm)
     monkeypatch.setattr(integration, "_task_import_path", lambda path: contextlib.nullcontext())
     monkeypatch.setattr(
         integration, "_canonical_task_callable",
@@ -161,6 +196,10 @@ def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     assert len(first["release"]["route_rankings"]["prefill_m2048_square"]) == 2
     assert measured["comparison"] == "candidate_vs_canonical_task_implementation"
     assert measured["outcome"]["status"] == "winner"
+    assert measured["selected"][0]["selection_gate"]["pair_ids"] != \
+        measured["selected"][0]["task_dispatch_confirmation_gate"]["pair_ids"]
+    assert measured["selected"][0]["task_dispatch_confirmation_gate"]["evidence_phase"] == \
+        "independent_materialized_task_dispatch"
     untouched = {
         route: ranking for route, ranking in first["release"]["route_rankings"].items()
         if route != "prefill_m2048_square"
@@ -206,6 +245,7 @@ def test_all_slower_candidates_record_no_winner_and_keep_every_route_canonical(
     monkeypatch.setenv("GEAK_GPU_FENCE_HELD", "1")
     monkeypatch.setattr(integration, "ShardCompiler", FakeCompiler)
     monkeypatch.setattr(integration, "_CompiledCallable", FakeCallable)
+    monkeypatch.setattr(integration, "_confirm_materialized_candidate", fake_confirm)
     monkeypatch.setattr(integration, "_task_import_path", lambda path: contextlib.nullcontext())
     monkeypatch.setattr(
         integration, "_canonical_task_callable",
@@ -247,6 +287,7 @@ def test_one_five_percent_candidate_only_owns_the_measured_route(tmp_path, monke
     monkeypatch.setenv("GEAK_GPU_FENCE_HELD", "1")
     monkeypatch.setattr(integration, "ShardCompiler", FakeCompiler)
     monkeypatch.setattr(integration, "_CompiledCallable", FakeCallable)
+    monkeypatch.setattr(integration, "_confirm_materialized_candidate", fake_confirm)
     monkeypatch.setattr(integration, "_task_import_path", lambda path: contextlib.nullcontext())
     monkeypatch.setattr(
         integration, "_canonical_task_callable",

@@ -105,6 +105,17 @@ def raw_suite(routes=("target", "guard"), metric_id="sustained_throughput") -> d
         "inner": score_metric["inner"],
         "secondary_metric": secondary_metric,
         "promotion_control": "incumbent",
+        "task_entrypoint": "dense_test_gemm",
+        "candidate_dispatch": {
+            "execution_path": "gemm_wrapper.runtime_table",
+            "table_digest": "a" * 64,
+            "release_id": "candidate-release",
+        },
+        "incumbent_dispatch": {
+            "execution_path": "gemm_wrapper.runtime_table",
+            "table_digest": "b" * 64,
+            "release_id": "incumbent-release",
+        },
         "oracle_role": "absolute_report_only",
         "routes": rows,
     }
@@ -155,6 +166,9 @@ def test_task_receipt_to_adapter_to_python_gate(tmp_path: Path) -> None:
     assert gate_input["measurement"]["gpu_lock"]["path"] == LOCK
     assert gate_input["measurement"]["priming"]["all_samples_primed"] is True
     assert gate_input["measurement"]["output_lifecycle"]["all_arms_rotated"] is True
+    assert gate_input["measurement"]["task_entrypoint"] == "dense_test_gemm"
+    assert gate_input["measurement"]["candidate_dispatch"]["execution_path"] == \
+        "gemm_wrapper.runtime_table"
     assert gate_input["paired_routes"][0]["candidate"]["pair_ids"] == [
         f"lane-session-1:block-{index:04d}" for index in range(8)]
     assert "oracle" not in json.dumps(gate_input["paired_routes"])

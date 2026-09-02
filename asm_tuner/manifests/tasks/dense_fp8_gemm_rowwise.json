@@ -65,9 +65,15 @@
     "config.yaml",
     "scripts/task_runner.py",
     "harness_lib.py",
+    "gemm_wrapper.py",
+    "kernel_loader.py",
     "oracle_wrapper.py",
     "route_manifest.py",
-    "geak_tuner_runtime.py"
+    "geak_tuner_runtime.py",
+    "src/fp8_gemm_bindings.cpp",
+    "src/dense_fp8_gemm.h",
+    "src/dense_fp8_gemm.hip",
+    "src/custom_fp8_gemm.hip"
   ],
   "task": "dense_fp8_gemm_rowwise",
   "task_root": "examples/tasks/dense_fp8_gemm_rowwise",

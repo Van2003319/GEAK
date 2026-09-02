@@ -22,8 +22,11 @@ _TASK_ROOT = Path(__file__).resolve().parent
 _TABLE_RELATIVE_PATH = "asm_tuner_runtime_table.json"
 _TABLE_PATH = _TASK_ROOT / _TABLE_RELATIVE_PATH
 _LIBRARIES: Dict[str, Any] = {}
+_FUNCTIONS: Dict[Tuple[str, str], Any] = {}
+_ROUTES_BY_SHAPE: Dict[Tuple[int, int, int], Optional[Tuple[str, Mapping[str, Any]]]] = {}
 _TABLE: Optional[Mapping[str, Any]] = None
-_TABLE_LOADED = False
+_UNLOADED = object()
+_TABLE_IDENTITY: Any = _UNLOADED
 
 
 class TunerDispatchError(RuntimeError):
@@ -79,19 +82,42 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             pass
 
 
+def _table_identity(path: Path) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
+
+
 def _load_table() -> Optional[Mapping[str, Any]]:
-    global _TABLE, _TABLE_LOADED
-    if _TABLE_LOADED:
+    global _TABLE, _TABLE_IDENTITY, _FUNCTIONS, _ROUTES_BY_SHAPE
+    identity = _table_identity(_TABLE_PATH)
+    if identity == _TABLE_IDENTITY:
+        if _TABLE is None and os.environ.get("GEAK_TUNER_REQUIRED") == "1":
+            raise TunerDispatchError(
+                "asm_tuner is required but no materialized runtime table exists")
         return _TABLE
-    _TABLE_LOADED = True
-    if not _TABLE_PATH.is_file():
+    if identity is None:
+        _TABLE = None
+        _TABLE_IDENTITY = None
+        _FUNCTIONS = {}
+        _ROUTES_BY_SHAPE = {}
         if os.environ.get("GEAK_TUNER_REQUIRED") == "1":
             raise TunerDispatchError("asm_tuner is required but no materialized runtime table exists")
         return None
-    try:
-        value = json.loads(_TABLE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise TunerDispatchError("cannot read materialized runtime table: %s" % exc) from exc
+    for _attempt in range(3):
+        before = _table_identity(_TABLE_PATH)
+        try:
+            value = json.loads(_TABLE_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TunerDispatchError("cannot read materialized runtime table: %s" % exc) from exc
+        after = _table_identity(_TABLE_PATH)
+        if before is not None and before == after:
+            identity = after
+            break
+    else:
+        raise TunerDispatchError("runtime table changed repeatedly while loading")
     if value.get("schema") != _TABLE_SCHEMA or value.get("table_digest") != _table_digest(value):
         raise TunerDispatchError("runtime table schema/digest mismatch")
     suite = value.get("suite") or {}
@@ -128,6 +154,10 @@ def _load_table() -> Optional[Mapping[str, Any]]:
     ambient_metric = os.environ.get("GEAK_SCORE_METRIC")
     if ambient_metric is not None and ambient_metric != score_metric["id"]:
         raise TunerDispatchError("runtime table score metric differs from GEAK_SCORE_METRIC")
+    functions: Dict[Tuple[str, str], Any] = {}
+    routes_by_shape: Dict[
+        Tuple[int, int, int], Optional[Tuple[str, Mapping[str, Any]]]
+    ] = {}
     for route_id, row in routes.items():
         entries = row.get("entries") or []
         selection = row.get("selection") or {}
@@ -142,6 +172,9 @@ def _load_table() -> Optional[Mapping[str, Any]]:
               or selection.get("status") not in ("unmeasured", "no_winner")
               or route_fallback.get("kind") != "canonical"):
             raise TunerDispatchError("route %s has no explicit canonical fallback" % route_id)
+        route_shape = row.get("shape") or {}
+        shape = tuple(int(route_shape.get(key, -1)) for key in ("m", "n", "k"))
+        routes_by_shape[shape] = (route_id, entries[0]) if entries else None
         for rank, entry in enumerate(entries):
             if entry.get("rank") != rank:
                 raise TunerDispatchError("route %s ranks are not contiguous" % route_id)
@@ -151,31 +184,24 @@ def _load_table() -> Optional[Mapping[str, Any]]:
                     or entry.get("metric_id") != score_metric.get("id")
                     or entry.get("metric_inner") != score_metric.get("inner")):
                 raise TunerDispatchError("route %s rank %d binding mismatch" % (route_id, rank))
+            functions[(route_id, str(entry["config_id"]))] = _prepare_entry(entry)
     _TABLE = value
+    _TABLE_IDENTITY = identity
+    _FUNCTIONS = functions
+    _ROUTES_BY_SHAPE = routes_by_shape
     return value
 
 
 def _select(table: Mapping[str, Any], shape: Tuple[int, int, int]) -> Optional[Tuple[str, Mapping[str, Any]]]:
-    for route_id in table["suite"]["route_ids"]:
-        row = table["routes"][route_id]
-        route_shape = row.get("shape") or {}
-        if tuple(int(route_shape.get(k, -1)) for k in ("m", "n", "k")) == shape:
-            entries = row.get("entries") or []
-            if not entries:
-                fallback = row.get("fallback") or {}
-                selection = row.get("selection") or {}
-                if (fallback.get("kind") == "canonical"
-                        and selection.get("kind") == "canonical"):
-                    return None
-                raise TunerDispatchError("selected route has no executable fallback")
-            return route_id, entries[0]
+    if shape in _ROUTES_BY_SHAPE:
+        return _ROUTES_BY_SHAPE[shape]
     fallback = table.get("fallback") or {}
     if fallback.get("kind") == "canonical":
         return None
     raise TunerDispatchError("shape %r is absent and fallback is fail_closed" % (shape,))
 
 
-def _library(entry: Mapping[str, Any]) -> Any:
+def _prepare_entry(entry: Mapping[str, Any]) -> Any:
     artifact = (_TASK_ROOT / str(entry["artifact"])).resolve()
     source = (_TASK_ROOT / str(entry["source"])).resolve()
     compile_manifest = (_TASK_ROOT / str(entry["compile_manifest"])).resolve()
@@ -191,15 +217,22 @@ def _library(entry: Mapping[str, Any]) -> Any:
     if (not compile_manifest.is_file() or compile_manifest.is_symlink() or
             _sha256(compile_manifest) != entry.get("compile_manifest_sha256")):
         raise TunerDispatchError("materialized compile-manifest hash mismatch")
-    key = str(artifact)
+    key = "%s:%s" % (artifact, entry["artifact_sha256"])
     library = _LIBRARIES.get(key)
     if library is None:
         try:
-            library = ctypes.CDLL(key)
+            library = ctypes.CDLL(str(artifact))
         except OSError as exc:
             raise TunerDispatchError("cannot load selected artifact: %s" % exc) from exc
         _LIBRARIES[key] = library
-    return library
+    symbol = str(entry["symbol"])
+    try:
+        launch = getattr(library, symbol)
+    except AttributeError as exc:
+        raise TunerDispatchError("artifact lacks selected symbol %s" % symbol) from exc
+    launch.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int] + [ctypes.c_void_p] * 6
+    launch.restype = ctypes.c_int
+    return launch
 
 
 def _trace(table: Mapping[str, Any], route: str, entry: Mapping[str, Any]) -> None:
@@ -247,14 +280,7 @@ def dispatch(adapter: str, args: Tuple[Any, ...]) -> Optional[Any]:
     if selected is None:
         return None
     route, entry = selected
-    library = _library(entry)
-    symbol = str(entry["symbol"])
-    try:
-        launch = getattr(library, symbol)
-    except AttributeError as exc:
-        raise TunerDispatchError("artifact lacks selected symbol %s" % symbol) from exc
-    launch.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int] + [ctypes.c_void_p] * 6
-    launch.restype = ctypes.c_int
+    launch = _FUNCTIONS[(route, str(entry["config_id"]))]
 
     import torch
     out = torch.empty((shape[0], shape[1]), device=a.device, dtype=torch.bfloat16)

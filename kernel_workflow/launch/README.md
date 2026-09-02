@@ -125,6 +125,15 @@ tuner task/protocol/score-metric contracts, authenticated API, credential permis
 lane and GPU flocks, GPU idle/VRAM, disk/inodes, SLURM coverage, and non-overlapping GPUs. A metric
 drift is a permanent manifest/configuration failure, not a retryable lane fault.
 
+If a clean fresh clone has the tracked registry/table/selection but lacks their
+ignored content-addressed artifacts, use `supervise --prepare-tuner` on the
+initial non-dry-run start. Before creating state, the launcher runs tuner
+`prepare` under that lane's GPU lock and fence, verifies that only the three
+publication JSON files changed, commits those files, then reruns the complete
+strict preflight against the new clean HEAD. `preflight` and
+`supervise --dry-run` remain read-only. Do not combine `--prepare-tuner` with
+`--resume` or `--dry-run`.
+
 ## Formal start (operator action only)
 
 After both dry runs are green, replace `preflight` with `supervise`. Start each

@@ -56,10 +56,27 @@ def test_contract_binds_cases_builders_correctness_protocol_and_oracle(manifest,
                 manifest, task_root=copied, require_oracle_compatible=True)
 
     assert len(contract.task_digest) == 64
-    assert set(contract.binding_hashes) == {"cases", "input_builder", "correctness"}
+    expected_bindings = {"cases", "entrypoint", "input_builder", "correctness"}
+    if contract.adapter_name == "fp8_rowwise":
+        expected_bindings.add("reference")
+    assert set(contract.binding_hashes) == expected_bindings
     assert "scripts/task_runner.py" in contract.semantic_hashes
     assert "harness_lib.py" in contract.semantic_hashes
     assert "geak_tuner_runtime.py" in contract.semantic_hashes
+    assert "gemm_wrapper.py" in contract.semantic_hashes
+    assert "kernel_loader.py" in contract.semantic_hashes
+    expected_sources = (
+        {
+            "src/gemm_bindings.cpp", "src/dense_bf16_gemm.h",
+            "src/dense_bf16_gemm.hip", "src/custom_gemm.hip",
+        }
+        if contract.adapter_name == "bf16" else
+        {
+            "src/fp8_gemm_bindings.cpp", "src/dense_fp8_gemm.h",
+            "src/dense_fp8_gemm.hip", "src/custom_fp8_gemm.hip",
+        }
+    )
+    assert expected_sources <= set(contract.semantic_hashes)
     assert len(contract.source_digest) == 64
     assert contract.materialization_relative_path("registry") == Path("asm_tuner_registry.json")
     assert contract.materialization_relative_path("runtime_table") == Path(
@@ -137,6 +154,27 @@ def test_semantic_task_drift_changes_digest(manifest, tmp_path):
     runner.write_text(runner.read_text() + "\n# semantic drift\n")
     changed = TaskContract.load(manifest, task_root=copied)
     assert changed.task_digest != original.task_digest
+
+
+@pytest.mark.parametrize("manifest", MANIFESTS, ids=lambda p: p.stem)
+def test_candidate_source_and_entrypoint_drift_invalidate_task_digest(manifest, tmp_path):
+    original = TaskContract.load(manifest)
+    for relative in (
+        "gemm_wrapper.py",
+        ("src/custom_gemm.hip" if original.adapter_name == "bf16"
+         else "src/custom_fp8_gemm.hip"),
+    ):
+        copied = tmp_path / relative.replace("/", "_")
+        shutil.copytree(
+            original.task_root, copied,
+            ignore=shutil.ignore_patterns("build", ".torch_ext", ".geak_tuner"),
+        )
+        path = copied / relative
+        comment = "# semantic candidate drift\n" if path.suffix == ".py" else "// semantic candidate drift\n"
+        path.write_text(path.read_text() + "\n" + comment)
+        changed = TaskContract.load(manifest, task_root=copied)
+        assert changed.task_digest != original.task_digest
+        assert changed.source_digest != original.source_digest
 
 
 def test_runtime_loader_is_identical_for_bf16_and_fp8():
