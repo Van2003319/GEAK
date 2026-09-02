@@ -11,7 +11,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from .adapters import get_adapter
 from .adapters.base import AxisState
-from .pruning import PruneResult, RejectedConfig, route_static_prune, shape_sort_key, static_prune
+from .pruning import (
+    SHAPE_OBJECTIVES, PruneResult, RejectedConfig, route_static_prune,
+    shape_sort_components, shape_sort_key, static_prune,
+)
 from .schema import KernelConfig, Mfma, Route
 
 
@@ -44,6 +47,10 @@ class RouteCandidatePlan:
     rejected_count: int
     ranked_count: int
     candidates: Tuple[KernelConfig, ...]
+    selection: Tuple[Mapping[str, Any], ...] = ()
+
+    def selection_by_id(self) -> Dict[str, Dict[str, Any]]:
+        return {str(row["config_id"]): dict(row) for row in self.selection}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -52,6 +59,7 @@ class RouteCandidatePlan:
             "rejected": self.rejected_count,
             "ranked": self.ranked_count,
             "selected": [config.config_id for config in self.candidates],
+            "selection": [dict(row) for row in self.selection],
         }
 
 
@@ -306,91 +314,288 @@ def policy_for(manifest: Mapping[str, Any], bootstrap: bool) -> Dict[str, int]:
     return {str(key): int(value) for key, value in raw.items()}
 
 
-def _stratum(config: KernelConfig) -> Tuple[int, str]:
-    return (int(config.pgr), str(config.provenance.get("sweep") or "declared"))
+def _geometry(config: KernelConfig) -> Tuple[int, ...]:
+    return (
+        config.bm, config.bn, config.bk,
+        config.wave_grid.m, config.wave_grid.n, config.pgr,
+    )
 
 
-def _profile(config: KernelConfig) -> Tuple[Any, ...]:
-    sweep = str(config.provenance.get("sweep") or "declared")
+def _tile_family(config: KernelConfig) -> str:
+    # Quarter-octave bins preserve meaningful neighboring tile families without
+    # naming any vendor geometry or relying on configuration identities.
+    bins = tuple(int(round(math.log2(value) * 4.0)) for value in (
+        config.bm, config.bn, config.bk,
+    ))
+    return "m%d-n%d-k%d" % bins
+
+
+def _cta_tail_band(config: KernelConfig, route: Route, cu_count: int) -> str:
+    grid = config.grid_for(route)[2]
+    cus = max(1, int(cu_count))
+    nearest = max(1, int(round(grid / float(cus))))
+    distance = abs(grid - nearest * cus) / float(nearest * cus)
+    if distance <= 0.05:
+        return "exact_cu_round"
+    if distance <= 0.20:
+        return "near_cu_round"
+    return "partial_cu_round"
+
+
+def _profile_sweep(config: KernelConfig) -> str:
+    return str(config.provenance.get("sweep") or "declared")
+
+
+def _profile_novelty(config: KernelConfig) -> int:
+    sweep = _profile_sweep(config)
     if sweep == "pipeline_memory":
-        return (
-            config.a_lds.buffers, config.a_lds.pad_elements,
-            config.b_lds.buffers, config.b_lds.pad_elements,
-        )
+        return sum((
+            int(config.a_lds.buffers != 1), int(config.b_lds.buffers != 1),
+            int(bool(config.a_lds.pad_elements)), int(bool(config.b_lds.pad_elements)),
+        ))
     if sweep == "global_epilogue_io":
-        return (
-            config.vector_widths.a, config.vector_widths.b,
-            config.vector_widths.store, config.store.mode.value,
-        )
+        return sum((
+            int(config.vector_widths.a != 1), int(config.vector_widths.b != 1),
+            int(config.vector_widths.store != 1),
+            int(config.store.mode.value == "non_temporal"),
+        ))
     if sweep == "mapping_schedule":
-        return (config.wgm, config.stagger)
-    return ("declared",)
+        return int(config.wgm != 1) + int(config.stagger != 0)
+    return 0
 
 
-def _profile_round_robin(
-    configs: Sequence[KernelConfig], *, salt: str, stratum: Tuple[int, str],
-) -> List[KernelConfig]:
-    profiles: Dict[Tuple[Any, ...], List[KernelConfig]] = {}
-    for config in configs:
-        profiles.setdefault(_profile(config), []).append(config)
-    keys = sorted(profiles, key=lambda value: repr(value))
-    if len(keys) > 1:
-        digest = hashlib.sha256((salt + repr(stratum)).encode("utf-8")).digest()
-        shift = int.from_bytes(digest[:4], "big") % len(keys)
-        keys = keys[shift:] + keys[:shift]
-    ordered: List[KernelConfig] = []
-    depth = 0
-    while True:
-        progressed = False
-        for key in keys:
-            bucket = profiles[key]
-            if depth < len(bucket):
-                ordered.append(bucket[depth])
-                progressed = True
-        if not progressed:
-            return ordered
-        depth += 1
+def _pareto_ranks(
+    configs: Sequence[KernelConfig], components: Mapping[str, Mapping[str, float]],
+) -> Dict[Tuple[int, ...], int]:
+    """Assign exact non-dominated sorting ranks to a bounded diverse pool."""
 
-
-def _diverse_prefix(
-    ranked: Sequence[KernelConfig], limit: int, *, salt: str,
-) -> Tuple[KernelConfig, ...]:
-    raw_buckets: Dict[Tuple[int, str], List[KernelConfig]] = {}
-    for config in ranked:
-        raw_buckets.setdefault(_stratum(config), []).append(config)
-    buckets = {
-        key: _profile_round_robin(configs, salt=salt, stratum=key)
-        for key, configs in raw_buckets.items()
+    keys = [_geometry(config) for config in configs]
+    vectors = {
+        _geometry(config): tuple(float(components[config.config_id][name]) for name in SHAPE_OBJECTIVES)
+        for config in configs
     }
-    ordered_keys = sorted(buckets)
-    chosen: List[KernelConfig] = []
-    seen = set()
-    index = 0
-    while len(chosen) < limit:
-        progressed = False
-        for key in ordered_keys:
-            bucket = buckets[key]
-            if index >= len(bucket):
-                continue
-            config = bucket[index]
-            progressed = True
-            if config.config_id not in seen:
-                seen.add(config.config_id)
-                chosen.append(config)
-                if len(chosen) == limit:
-                    break
-        if not progressed:
+    dominates: Dict[Tuple[int, ...], List[Tuple[int, ...]]] = {key: [] for key in keys}
+    counts = {key: 0 for key in keys}
+    for index, left in enumerate(keys):
+        lv = vectors[left]
+        for right in keys[index + 1:]:
+            rv = vectors[right]
+            left_dominates = all(a <= b for a, b in zip(lv, rv)) and any(
+                a < b for a, b in zip(lv, rv)
+            )
+            right_dominates = all(b <= a for a, b in zip(lv, rv)) and any(
+                b < a for a, b in zip(lv, rv)
+            )
+            if left_dominates:
+                dominates[left].append(right)
+                counts[right] += 1
+            elif right_dominates:
+                dominates[right].append(left)
+                counts[left] += 1
+    frontier = [key for key in keys if counts[key] == 0]
+    ranks: Dict[Tuple[int, ...], int] = {}
+    rank = 0
+    while frontier:
+        next_frontier: List[Tuple[int, ...]] = []
+        for key in frontier:
+            ranks[key] = rank
+            for other in dominates[key]:
+                counts[other] -= 1
+                if counts[other] == 0:
+                    next_frontier.append(other)
+        frontier = next_frontier
+        rank += 1
+    return ranks
+
+
+def _stratified_pareto_prefix(
+    ranked: Sequence[KernelConfig], route: Route, cu_count: int, limit: int, *, salt: str,
+) -> Tuple[Tuple[KernelConfig, ...], Tuple[Mapping[str, Any], ...]]:
+    """Select a weighted/Pareto prefix with objective and architecture diversity."""
+
+    components = {
+        config.config_id: shape_sort_components(config, route, cu_count)
+        for config in ranked
+    }
+    members: Dict[Tuple[int, ...], List[KernelConfig]] = {}
+    for config in ranked:
+        members.setdefault(_geometry(config), []).append(config)
+    representatives = [
+        min(group, key=lambda config: (
+            components[config.config_id]["weighted_score"], config.config_id,
+        ))
+        for group in members.values()
+    ]
+    representatives.sort(key=lambda config: (
+        components[config.config_id]["weighted_score"], config.config_id,
+    ))
+
+    # Pareto sorting is performed on a bounded union of weighted, objective,
+    # tile-family, wave-count and CTA-tail champions. This avoids quadratic work
+    # over tens of thousands of profile-equivalent generated configurations.
+    pool: Dict[Tuple[int, ...], KernelConfig] = {}
+
+    def admit(values: Sequence[KernelConfig], count: int) -> None:
+        for config in values[:count]:
+            pool.setdefault(_geometry(config), config)
+
+    breadth = max(8, min(32, int(limit) * 2))
+    admit(representatives, max(64, int(limit) * 8))
+    pgr_values = sorted({config.pgr for config in representatives})
+    for pgr in pgr_values:
+        group = [config for config in representatives if config.pgr == pgr]
+        admit(group, breadth)
+        for objective in SHAPE_OBJECTIVES:
+            admit(sorted(group, key=lambda config: (
+                components[config.config_id][objective],
+                components[config.config_id]["weighted_score"],
+                config.config_id,
+            )), breadth)
+    for wave_count in sorted({config.nw for config in representatives}):
+        admit([config for config in representatives if config.nw == wave_count], 4)
+    for classifier in (
+        lambda config: _tile_family(config),
+        lambda config: _cta_tail_band(config, route, cu_count),
+    ):
+        groups: Dict[str, List[KernelConfig]] = {}
+        for config in representatives:
+            groups.setdefault(classifier(config), []).append(config)
+        for group in groups.values():
+            admit(group, 2)
+
+    pareto_rank = _pareto_ranks(tuple(pool.values()), components)
+    chosen_geometries: List[Tuple[int, ...]] = []
+    reasons: Dict[Tuple[int, ...], str] = {}
+
+    def choose(config: KernelConfig, reason: str) -> None:
+        key = _geometry(config)
+        if key not in reasons and len(chosen_geometries) < limit:
+            chosen_geometries.append(key)
+            reasons[key] = reason
+
+    # Two weighted representatives per PGR retain both overlap/resource models.
+    # Objective extrema then prevent a good edge, tail, or reuse trade-off from
+    # being hidden by the aggregate score.
+    by_pgr = {
+        pgr: [config for config in representatives if config.pgr == pgr]
+        for pgr in pgr_values
+    }
+    for depth in range(2):
+        for pgr in pgr_values:
+            if depth < len(by_pgr[pgr]):
+                choose(by_pgr[pgr][depth], "weighted_pgr_stratum")
+
+    edge_ranked = sorted(representatives, key=lambda config: (
+        components[config.config_id]["edge_waste_normalized"],
+        pareto_rank.get(_geometry(config), 999),
+        components[config.config_id]["weighted_score"],
+        config.config_id,
+    ))
+    added = 0
+    for config in edge_ranked:
+        before = len(chosen_geometries)
+        choose(config, "pareto_edge_frontier")
+        if len(chosen_geometries) > before:
+            added += 1
+        if added == 2 or len(chosen_geometries) == limit:
             break
-        index += 1
-    if len(chosen) < limit:
-        for config in ranked:
-            if config.config_id in seen:
-                continue
-            chosen.append(config)
-            seen.add(config.config_id)
-            if len(chosen) == limit:
+
+    # Ensure the bounded prefix contains more than one wave-count hypothesis.
+    seen_waves = {key[3] * key[4] for key in chosen_geometries}
+    for wave_count in sorted({config.nw for config in representatives}):
+        if wave_count in seen_waves:
+            continue
+        group = [config for config in representatives if config.nw == wave_count]
+        if group:
+            choose(group[0], "wave_count_diversity")
+            seen_waves.add(wave_count)
+        if len(chosen_geometries) == limit:
+            break
+
+    for objective in (
+        "cta_tail_fraction", "lds_read_per_mfma", "reuse_penalty", "resource_pressure",
+    ):
+        ordered = sorted(representatives, key=lambda config: (
+            components[config.config_id][objective],
+            pareto_rank.get(_geometry(config), 999),
+            components[config.config_id]["weighted_score"],
+            config.config_id,
+        ))
+        for config in ordered[:breadth]:
+            choose(config, "pareto_objective:%s" % objective)
+            if len(chosen_geometries) == limit:
                 break
-    return tuple(chosen)
+        if len(chosen_geometries) == limit:
+            break
+
+    # Greedy category novelty covers tile families and target CTA-tail behavior.
+    seen_families = set()
+    seen_tails = set()
+    for key in chosen_geometries:
+        config = pool.get(key) or representatives[0]
+        seen_families.add(_tile_family(config))
+        seen_tails.add(_cta_tail_band(config, route, cu_count))
+    while len(chosen_geometries) < limit:
+        remaining = [config for config in representatives if _geometry(config) not in reasons]
+        if not remaining:
+            break
+        config = min(remaining, key=lambda candidate: (
+            -int(_tile_family(candidate) not in seen_families)
+            -int(_cta_tail_band(candidate, route, cu_count) not in seen_tails),
+            pareto_rank.get(_geometry(candidate), 999),
+            components[candidate.config_id]["weighted_score"],
+            candidate.config_id,
+        ))
+        choose(config, "tile_tail_diversity")
+        seen_families.add(_tile_family(config))
+        seen_tails.add(_cta_tail_band(config, route, cu_count))
+
+    for config in representatives:
+        choose(config, "weighted_fill")
+        if len(chosen_geometries) == limit:
+            break
+
+    # Rotate profile sweep representatives independently of geometry ranking so
+    # the shortlist also exercises every dependent profile family.
+    sweeps = sorted({_profile_sweep(config) for config in ranked})
+    if sweeps:
+        digest = hashlib.sha256(salt.encode("utf-8")).digest()
+        shift = int.from_bytes(digest[:4], "big") % len(sweeps)
+        sweeps = sweeps[shift:] + sweeps[:shift]
+
+    selected: List[KernelConfig] = []
+    selection: List[Mapping[str, Any]] = []
+    for index, key in enumerate(chosen_geometries):
+        group = members[key]
+        desired_sweep = sweeps[index % len(sweeps)] if sweeps else _profile_sweep(group[0])
+        eligible = [config for config in group if _profile_sweep(config) == desired_sweep] or group
+        config = min(eligible, key=lambda candidate: (
+            -_profile_novelty(candidate),
+            components[candidate.config_id]["weighted_score"], candidate.config_id,
+        ))
+        scores = components[config.config_id]
+        layer = pareto_rank.get(key, 999)
+        reason = reasons[key]
+        reason += ";pareto_frontier" if layer == 0 else ";pareto_layer=%d" % layer
+        row = {
+            "rank": index + 1,
+            "config_id": config.config_id,
+            "selection_reason": reason,
+            "weighted_score": scores["weighted_score"],
+            "pareto_rank": layer,
+            "pareto_scope": "geometry_best_profile",
+            "score_components": {name: scores[name] for name in sorted(scores)},
+            "diversity": {
+                "wave_count": config.nw,
+                "pgr": config.pgr,
+                "tile_family": _tile_family(config),
+                "cta_tail_band": _cta_tail_band(config, route, cu_count),
+                "profile_sweep": _profile_sweep(config),
+            },
+        }
+        selected.append(config)
+        selection.append(row)
+    return tuple(selected), tuple(selection)
 
 
 def plan_route_candidates(
@@ -407,5 +612,9 @@ def plan_route_candidates(
         configs, route, dependencies=dependencies, assume_static_valid=assume_static_valid,
     )
     ranked = sorted(result.accepted, key=lambda config: shape_sort_key(config, route, cu_count))
-    selected = _diverse_prefix(ranked, min(int(limit), len(ranked)), salt=route.name)
-    return RouteCandidatePlan(route, len(result.accepted), len(result.rejected), len(ranked), selected)
+    selected, selection = _stratified_pareto_prefix(
+        ranked, route, cu_count, min(int(limit), len(ranked)), salt=route.name,
+    )
+    return RouteCandidatePlan(
+        route, len(result.accepted), len(result.rejected), len(ranked), selected, selection,
+    )

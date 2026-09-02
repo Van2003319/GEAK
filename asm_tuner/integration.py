@@ -332,8 +332,7 @@ def search_release(
         "score_metric": dict(contract.score_metric),
         "policy": policy,
         "bootstrap": bool(bootstrap),
-        "routes": {name: [config.config_id for config in plans[name].candidates]
-                   for name in sorted(plans)},
+        "routes": {name: plans[name].to_dict() for name in sorted(plans)},
         "artifacts": {config_id: {
             "artifact_sha256": by_id[config_id]["artifact_sha256"],
             "source_sha256": by_id[config_id]["source_sha256"],
@@ -453,12 +452,16 @@ def search_release(
                         raise IntegrationError("protocol-v2 receipt invariant failed for %s" % case_id)
                     if (receipt.get("gpu_lock") or {}).get("mode") != "external":
                         raise IntegrationError("measurement did not inherit the lane GPU lock")
+                    plan_selection = plans[case_id].selection_by_id()
                     cached = {
                         "schema": "geak.asm-canonical-search-round/v2",
                         "search_id": search_id,
                         "route": case_id,
                         "round": round_index,
                         "candidate_ids": candidate_ids,
+                        "candidate_selection": {
+                            config_id: plan_selection[config_id] for config_id in candidate_ids
+                        },
                         "fingerprints": fingerprints,
                         "protocol_hash": contract.protocol["hash"],
                         "score_metric": dict(contract.score_metric),

@@ -86,57 +86,154 @@ def route_static_prune(
     return PruneResult(tuple(accepted), tuple(rejected))
 
 
+# These are normalized minimization objectives. Keeping the names public makes
+# the planner's Pareto decisions and the emitted search receipts reproducible.
+SHAPE_OBJECTIVES = (
+    "edge_waste_normalized",
+    "wave_target_distance",
+    "cta_tail_fraction",
+    "reuse_penalty",
+    "lds_read_per_mfma",
+    "resource_pressure",
+    "prefetch_regime_penalty",
+    "aspect_distance_normalized",
+)
+
+
+def _unit_log_waste(value: float) -> float:
+    # A logarithm preserves useful resolution for decode (where all BM values
+    # over-cover M) without letting edge waste erase every other objective.
+    return min(1.0, math.log2(1.0 + max(0.0, value)) / 12.0)
+
+
 def shape_sort_components(config: KernelConfig, route: Route, cu_count: int) -> Dict[str, float]:
-    """Return route-aware soft scores; lower is better for every component."""
+    """Return explainable route-aware objectives and their weighted aggregate.
+
+    The route arithmetic intensity continuously blends 4- and 8-waves/CU
+    hypotheses: compute-heavy routes favor four resident waves while decode and
+    bandwidth-heavy routes favor eight. No individual objective is a hard gate.
+    """
 
     gx, gy, grid = config.grid_for(route)
     covered_m = gy * config.bm
     covered_n = gx * config.bn
     useful = max(1, route.m * route.n)
-    edge_waste = (covered_m * covered_n - useful) / float(useful)
+    edge_waste = max(0.0, (covered_m * covered_n - useful) / float(useful))
+    edge_normalized = _unit_log_waste(edge_waste)
+
     cus = max(1, int(cu_count))
     launched_waves = grid * config.nw
-    target_waves = cus * 8
-    grid_deficit = max(0.0, target_waves - launched_waves) / float(target_waves)
     waves_per_cu = launched_waves / float(cus)
-    coverage_distance = abs(math.log2(max(waves_per_cu, 1.0 / cus) / 8.0))
-    # Larger M/N tiles reuse each K value across more FMAs. Keep this a score,
-    # never a legality rule: decode routes often prefer the opposite trade-off.
-    reuse_inverse = (config.bm + config.bn) / float(config.bm * config.bn)
-    k_reuse_inverse = 1.0 / float(min(max(1, route.k), config.bk))
+
+    # GEMM-level roofline proxy. Output accumulation is conservatively treated
+    # as two-byte traffic for both supported adapters.
+    input_bytes = config.dtype_bytes * route.k * (route.m + route.n)
+    output_bytes = 2 * route.m * route.n
+    route_ai = (2.0 * route.m * route.n * route.k) / float(max(1, input_bytes + output_bytes))
+    compute_weight = route_ai / (route_ai + 64.0)
+    bandwidth_weight = 1.0 - compute_weight
+    effective_target_waves_per_cu = 4.0 * compute_weight + 8.0 * bandwidth_weight
+
+    def wave_distance(target: float) -> float:
+        ratio = max(waves_per_cu, 1.0 / cus) / target
+        return min(1.0, abs(math.log2(ratio)) / 3.0)
+
+    distance_4 = wave_distance(4.0)
+    distance_8 = wave_distance(8.0)
+    wave_target_distance = compute_weight * distance_4 + bandwidth_weight * distance_8
+
+    nearest_cu_round = max(1, int(round(grid / float(cus))))
+    cta_tail_fraction = min(
+        1.0,
+        abs(grid - nearest_cu_round * cus) / float(nearest_cu_round * cus),
+    )
+
+    # Tile arithmetic intensity captures K reuse; LDS reads per MFMA captures
+    # the orthogonal wave-tile reuse that favors balanced MFMA grids.
+    tile_traffic = (
+        config.dtype_bytes * config.bk * (config.bm + config.bn)
+        + 2 * config.bm * config.bn
+    )
+    tile_ai = (2.0 * config.bm * config.bn * config.bk) / float(max(1, tile_traffic))
+    reuse_penalty = 1.0 / (1.0 + tile_ai / 32.0)
+    lds_reads_raw = 1.0 / config.miwt.m + 1.0 / config.miwt.n
+    lds_read_per_mfma = min(1.0, lds_reads_raw / 2.0)
+
     aspect_distance = abs(math.log(
         (config.bm / float(config.bn)) /
         max(route.m / float(route.n), 1e-12)
     ))
+    aspect_normalized = min(1.0, aspect_distance / 4.0)
     register_pressure = config.register_estimate.unified_vgpr / float(
         config.arch_spec.vgprs_per_simd
     )
     lds_pressure = config.lds.total_bytes / float(config.arch_spec.lds_bytes_per_cu)
+    resource_pressure = min(1.0, 0.55 * register_pressure + 0.45 * lds_pressure)
+
+    # PGR2 has an overlap benefit on compute-heavy routes and an explicit
+    # pressure cost on bandwidth-heavy routes. Resource pressure remains a
+    # separate objective, so PGR1 and PGR2 can both remain Pareto-relevant.
+    prefetch_penalty = (
+        compute_weight * float(max(0, 2 - config.pgr))
+        + bandwidth_weight * float(max(0, config.pgr - 1))
+    )
+
+    weights = {
+        "edge_waste_normalized": 0.16,
+        "wave_target_distance": 0.20,
+        "cta_tail_fraction": 0.10 + 0.08 * compute_weight,
+        "reuse_penalty": 0.08 + 0.10 * compute_weight,
+        "lds_read_per_mfma": 0.08 + 0.12 * compute_weight,
+        "resource_pressure": 0.16 - 0.06 * compute_weight,
+        "prefetch_regime_penalty": 0.12,
+        "aspect_distance_normalized": 0.005,
+    }
+    objectives = {
+        "edge_waste_normalized": edge_normalized,
+        "wave_target_distance": wave_target_distance,
+        "cta_tail_fraction": cta_tail_fraction,
+        "reuse_penalty": reuse_penalty,
+        "lds_read_per_mfma": lds_read_per_mfma,
+        "resource_pressure": resource_pressure,
+        "prefetch_regime_penalty": min(1.0, prefetch_penalty),
+        "aspect_distance_normalized": aspect_normalized,
+    }
+    weight_total = sum(weights.values())
+    weighted_score = sum(weights[name] * objectives[name] for name in SHAPE_OBJECTIVES) / weight_total
+
     return {
+        # Raw/informational values are retained for receipts and diagnostics.
         "edge_waste": edge_waste,
-        "grid_deficit": grid_deficit,
-        "coverage_distance": coverage_distance,
-        "reuse_inverse": reuse_inverse,
-        "k_reuse_inverse": k_reuse_inverse,
+        "grid_deficit": max(0.0, effective_target_waves_per_cu - waves_per_cu) / effective_target_waves_per_cu,
+        "coverage_distance": wave_target_distance,
+        "reuse_inverse": reuse_penalty,
+        "k_reuse_inverse": 1.0 / float(min(max(1, route.k), config.bk)),
         "aspect_distance": aspect_distance,
         "register_pressure": register_pressure,
         "lds_pressure": lds_pressure,
+        "route_arithmetic_intensity": route_ai,
+        "compute_regime_weight": compute_weight,
+        "effective_target_waves_per_cu": effective_target_waves_per_cu,
+        "waves_per_cu": waves_per_cu,
+        "distance_to_4_waves_per_cu": distance_4,
+        "distance_to_8_waves_per_cu": distance_8,
+        "tile_arithmetic_intensity": tile_ai,
+        "lds_reads_per_mfma_raw": lds_reads_raw,
+        **objectives,
+        "weighted_score": weighted_score,
     }
+
+
+def shape_objective_vector(config: KernelConfig, route: Route, cu_count: int) -> Tuple[float, ...]:
+    scores = shape_sort_components(config, route, cu_count)
+    return tuple(scores[name] for name in SHAPE_OBJECTIVES)
 
 
 def shape_sort_key(config: KernelConfig, route: Route, cu_count: int) -> Tuple[Any, ...]:
     scores = shape_sort_components(config, route, cu_count)
-    return (
-        scores["edge_waste"],
-        scores["grid_deficit"],
-        scores["reuse_inverse"],
-        scores["coverage_distance"],
-        scores["k_reuse_inverse"],
-        scores["aspect_distance"],
-        scores["register_pressure"],
-        scores["lds_pressure"],
-        config.config_id,
-    )
+    # Weighted aggregation is deliberate: this key no longer gives edge waste
+    # veto power through a lexicographic first position.
+    return (scores["weighted_score"], config.config_id)
 
 
 def rank_for_route(configs: Sequence[KernelConfig], route: Route, cu_count: int) -> List[KernelConfig]:

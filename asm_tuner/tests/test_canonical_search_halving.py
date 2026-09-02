@@ -115,6 +115,15 @@ def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     measured = first["summary"]["measurements"]["prefill_m2048_square"]
     assert [len(row["candidate_ids"]) for row in measured["rounds"]] == [8, 4]
     assert len(first["release"]["route_rankings"]["prefill_m2048_square"]) == 2
+    selection = measured["candidate_plan"]["selection"]
+    assert len(selection) == 8
+    assert all(row["score_components"] and row["selection_reason"] for row in selection)
+    round_receipt = json.loads(Path(measured["rounds"][0]["receipt"]).read_text())
+    assert set(round_receipt["candidate_selection"]) == set(measured["rounds"][0]["candidate_ids"])
+    assert all(
+        row["score_components"] and row["selection_reason"]
+        for row in round_receipt["candidate_selection"].values()
+    )
     assert first["summary"]["cache"] == {
         "round_hits": 0, "round_misses": 2, "compile_hits": 0, "compile_misses": 1,
     }
