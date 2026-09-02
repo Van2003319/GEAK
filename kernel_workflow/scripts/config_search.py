@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 from asm_tuner.contracts import ContractError, TaskContract
 from asm_tuner.integration import (
     IntegrationError,
+    SELECTION_SCHEMA,
     create_release,
     load_release,
     materialize_release,
@@ -213,7 +214,10 @@ def _entry_valid(entry: Mapping[str, Any], registry: Path) -> tuple[bool, str]:
     artifact = _entry_path(registry, entry.get("artifact"))
     if not _regular(artifact):
         return False, "artifact_missing"
-    actual = _sha256(artifact)
+    try:
+        actual = _sha256(artifact)
+    except OSError as exc:
+        return False, "artifact_hash_unavailable(%s)" % type(exc).__name__
     if actual != entry.get("artifact_sha256"):
         return False, f"artifact_hash_mismatch(expected={entry.get('artifact_sha256')},actual={actual})"
     artifact_set = entry.get("artifact_set") or []
@@ -224,7 +228,12 @@ def _entry_valid(entry: Mapping[str, Any], registry: Path) -> tuple[bool, str]:
         expected = str((row or {}).get("sha256") or "")
         if not _regular(path):
             return False, "nested_artifact_missing(%s)" % path
-        nested_actual = _sha256(path)
+        try:
+            nested_actual = _sha256(path)
+        except OSError as exc:
+            return False, "nested_artifact_hash_unavailable(%s:%s)" % (
+                path, type(exc).__name__,
+            )
         if nested_actual != expected:
             return False, "nested_artifact_hash_mismatch(%s)" % path
     return True, ""
@@ -374,6 +383,18 @@ def select_config(
         "reason": "config_not_found",
         "config_id": config_id,
     }
+
+
+def _registry_entry_by_id(
+    registry_value: os.PathLike[str] | str, config_id: str,
+) -> dict[str, Any] | None:
+    registry_path = _registry_path(registry_value)
+    with _locked(registry_path):
+        registry = _load_registry(registry_path)
+        for entry in registry["configs"]:
+            if entry.get("id") == config_id:
+                return dict(entry)
+    return None
 
 
 def create_config(
@@ -836,15 +857,50 @@ def prepare_asm_config(
     contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
     operations: list[dict[str, Any]] = []
     requested = config_id.strip()
+    explicit_request = bool(requested)
+    implicit_tracked_request = False
     selection_file = contract.materialization_path(
         "selection_file", task_root=Path(workspace),
     )
     if not requested and selection_file.is_file():
         incumbent = _read_object(selection_file)
-        if (incumbent.get("task") == contract.task
-                and incumbent.get("task_digest") == contract.task_digest
-                and incumbent.get("score_metric") == dict(contract.score_metric)):
-            requested = str(incumbent.get("registry_id") or "").strip()
+        expected_selection = {
+            "schema": SELECTION_SCHEMA,
+            "task": contract.task,
+            "task_digest": contract.task_digest,
+            "source_digest": contract.source_digest,
+            "protocol_hash": contract.protocol["hash"],
+            "score_metric": dict(contract.score_metric),
+            "score_metric_id": contract.score_metric_id,
+            "score_metric_inner": contract.score_metric_inner,
+            "oracle_manifest_sha256": contract.oracle_sha256,
+        }
+        mismatches = {
+            key: {"tracked": incumbent.get(key), "expected": expected}
+            for key, expected in expected_selection.items()
+            if incumbent.get(key) != expected
+        }
+        requested = str(incumbent.get("registry_id") or "").strip()
+        if mismatches or not requested:
+            operations.append({
+                "operation": "validate_tracked_selection",
+                "ok": False,
+                "registry_id": requested,
+                "mismatches": mismatches,
+            })
+            return {
+                "ok": False,
+                "schema": SCHEMA,
+                "phase_independent": True,
+                "reason": "tracked_selection_contract_mismatch",
+                "operations": operations,
+            }
+        implicit_tracked_request = True
+        operations.append({
+            "operation": "validate_tracked_selection",
+            "ok": True,
+            "registry_id": requested,
+        })
 
     query = {
         "kind": "asm_tuner_release",
@@ -865,16 +921,76 @@ def prepare_asm_config(
         int((row.get("config") or {}).get("priority", 1000000)), str(row.get("id") or "")))
     if requested:
         if not any(row.get("id") == requested for row in matches):
-            exact = select_config(registry_value, config_id=requested)
-            operations.append({"operation": "select_requested", "id": requested,
-                               "ok": bool(exact.get("ok")), "reason": exact.get("reason")})
-            if not exact.get("ok"):
+            invalidated_entry = _registry_entry_by_id(registry_value, requested)
+            invalidation = next(
+                (row for row in found["invalidated"] if row.get("id") == requested),
+                None,
+            )
+            invalidation_reason = str(
+                (invalidation or {}).get("reason")
+                or (
+                    invalidated_entry.get("invalidated_reason")
+                    if invalidated_entry is not None
+                    and invalidated_entry.get("status") == "invalidated"
+                    else ""
+                )
+                or ""
+            )
+            hydration_unavailable = (
+                invalidation_reason == "artifact_missing"
+                or invalidation_reason.startswith("nested_artifact_missing(")
+                or invalidation_reason.startswith("artifact_hash_unavailable(")
+                or invalidation_reason.startswith("nested_artifact_hash_unavailable(")
+            )
+            invalidation_contract_match = (
+                invalidated_entry is not None and _matches(invalidated_entry, query)
+            )
+            if (implicit_tracked_request and hydration_unavailable
+                    and invalidation_contract_match):
+                operations.append({
+                    "operation": "clear_implicit_requested",
+                    "id": requested,
+                    "reason": invalidation_reason,
+                    "recovery": "bounded_search_create_materialize",
+                })
+                requested = ""
+                found = search_configs(registry_value, query=query)
+                operations.append({
+                    "operation": "search_after_invalidation",
+                    "matches": len(found["matches"]),
+                    "invalidated": found["invalidated"],
+                })
+                matches = sorted(found["matches"], key=lambda row: (
+                    int((row.get("config") or {}).get("priority", 1000000)),
+                    str(row.get("id") or ""),
+                ))
+            else:
+                exact = select_config(registry_value, config_id=requested)
+                contract_match = bool(exact.get("ok")) and _matches(exact["config"], query)
+                operations.append({
+                    "operation": "select_requested",
+                    "id": requested,
+                    "source": "explicit" if explicit_request else "tracked_selection",
+                    "ok": bool(exact.get("ok")) and contract_match,
+                    "reason": (
+                        exact.get("reason") if not exact.get("ok")
+                        else ("requested_contract_mismatch" if not contract_match else None)
+                    ),
+                })
                 return {"ok": False, "schema": SCHEMA, "phase_independent": True,
                         "reason": "requested_config_not_viable", "operations": operations}
-        selected_id = requested
+        if requested:
+            selected_id = requested
+        elif matches:
+            selected_id = str(matches[0]["id"])
+        else:
+            selected_id = ""
     elif matches:
         selected_id = str(matches[0]["id"])
     else:
+        selected_id = ""
+
+    if not selected_id:
         bootstrap = contract.search_space.get("bootstrap_search") or {}
         variants = list(bootstrap.get("variants") or [])
         cases = list(bootstrap.get("cases") or [])
