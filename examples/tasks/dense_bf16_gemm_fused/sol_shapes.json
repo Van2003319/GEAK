@@ -1,0 +1,18 @@
+{
+  "_generated_from": "scripts/task_runner.py:CASES",
+  "_why": "The launch preflight validates these 11 route shapes against both the oracle manifest and the task suite before creating state.",
+  "dtype": "bf16",
+  "routes": [
+    {"route": "decode_m2_square", "m": 2, "n": 4096, "k": 4096},
+    {"route": "decode_m8_up", "m": 8, "n": 11008, "k": 4096},
+    {"route": "decode_m16_square", "m": 16, "n": 4096, "k": 4096},
+    {"route": "decode_m32_down", "m": 32, "n": 4096, "k": 11008},
+    {"route": "decode_m64_square", "m": 64, "n": 8192, "k": 8192},
+    {"route": "decode_m96_up", "m": 96, "n": 11008, "k": 4096},
+    {"route": "prefill_m128_square", "m": 128, "n": 4096, "k": 4096},
+    {"route": "prefill_m256_down", "m": 256, "n": 4096, "k": 11008},
+    {"route": "prefill_m512_up", "m": 512, "n": 11008, "k": 4096},
+    {"route": "prefill_m1024_down", "m": 1024, "n": 4096, "k": 11008},
+    {"route": "prefill_m2048_square", "m": 2048, "n": 4096, "k": 4096}
+  ]
+}

@@ -32,11 +32,15 @@ The task uses `geak.measurement-protocol/v2`; the formal default rotates semanti
 
 The checked-in route manifest is deliberately untrusted because the historical BF16 oracle had only rocBLAS. Before a new lane, bake and freeze the per-shape best-of under the GPU lock:
 
+Run as user `yxh`; set `ROOT` to the exact clean worktree that will be launched:
+
 ```bash
-cd /home/yxh/GEAK_measure
-bash kernel_workflow/scripts/gpu_lock.sh 2 \
-  python3 examples/tasks/dense_bf16_gemm_fused/scripts/task_runner.py \
-  oracle-bakeoff --confirm-oracle-bakeoff
+ROOT=/absolute/path/to/the/expected/GEAK-worktree
+cd "$ROOT"
+GEAK_GPU_ALLOWED=2 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 2 \
+  bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
+  python3 "$ROOT/examples/tasks/dense_bf16_gemm_fused/scripts/task_runner.py" \
+    oracle-bakeoff --confirm-oracle-bakeoff
 ```
 
 See `e2e_workflow/MEASUREMENT_PROTOCOL_V2.md` for protocol and adapter limits. A formal performance run fails closed if the route-manifest protocol hash does not match.

@@ -122,6 +122,10 @@ COVERED_ELSEWHERE = {
 # deleting it, both mean editing this list -- which is the point. The tests below check BOTH
 # directions, because an entry that quietly gained a caller is as misleading as one that lost it.
 OPERATOR_TOOLS = {
+    "lane_48h.py":
+        "The fail-closed fresh-lane LAUNCHER and therefore an operator root, not a pipeline target. "
+        "It owns read-only preflight, the persistent 48-hour deadline, bounded restarts, watchdogs, "
+        "and per-lane single-instance locking before it invokes kernel_workflow.js.",
     "fp8_two_day_run.sh":
         "The LAUNCHER, so it is a root of this search and never a target of it. It runs the lane "
         "for a fixed wall-clock budget in waves, which is where 'two days' lives now that the lane "

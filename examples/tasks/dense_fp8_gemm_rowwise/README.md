@@ -99,15 +99,21 @@ The checked-in manifest preserves the historical table above but identifies it a
 
 ## Gates
 
+Run as user `yxh`; set `ROOT` to the exact clean worktree that will be launched:
+
 ```bash
-cd /home/yxh/GEAK_measure
-bash kernel_workflow/scripts/gpu_lock.sh 2 \
-  python3 examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py compile
-bash kernel_workflow/scripts/gpu_lock.sh 2 \
-  python3 examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py correctness
-bash kernel_workflow/scripts/gpu_lock.sh 2 \
-  python3 examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py \
-  oracle-bakeoff --confirm-oracle-bakeoff
+ROOT=/absolute/path/to/the/expected/GEAK-worktree
+cd "$ROOT"
+GEAK_GPU_ALLOWED=5 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 5 \
+  bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
+  python3 "$ROOT/examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py" compile
+GEAK_GPU_ALLOWED=5 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 5 \
+  bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
+  python3 "$ROOT/examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py" correctness
+GEAK_GPU_ALLOWED=5 bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" 5 \
+  bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
+  python3 "$ROOT/examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py" \
+    oracle-bakeoff --confirm-oracle-bakeoff
 ```
 
 Run `performance` through the same lock after the v2 manifest has been baked.
