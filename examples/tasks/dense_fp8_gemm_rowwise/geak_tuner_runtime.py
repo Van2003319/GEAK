@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 
-_TABLE_SCHEMA = "geak.runtime_table/v2"
+_TABLE_SCHEMA = "geak.runtime_table/v3"
 _EXPECTED_SCORE_METRIC_ID = "sustained_throughput"
 _EXPECTED_SCORE_METRIC_INNER = 16
 _TASK_ROOT = Path(__file__).resolve().parent
@@ -130,8 +130,18 @@ def _load_table() -> Optional[Mapping[str, Any]]:
         raise TunerDispatchError("runtime table score metric differs from GEAK_SCORE_METRIC")
     for route_id, row in routes.items():
         entries = row.get("entries") or []
-        if not entries:
-            raise TunerDispatchError("route %s has no ranked artifacts" % route_id)
+        selection = row.get("selection") or {}
+        route_fallback = row.get("fallback") or {}
+        if entries:
+            if (selection.get("kind") != "candidate"
+                    or selection.get("status") != "winner"
+                    or selection.get("config_ids")
+                    != [entry.get("config_id") for entry in entries]):
+                raise TunerDispatchError("route %s candidate selection differs from entries" % route_id)
+        elif (selection.get("kind") != "canonical"
+              or selection.get("status") not in ("unmeasured", "no_winner")
+              or route_fallback.get("kind") != "canonical"):
+            raise TunerDispatchError("route %s has no explicit canonical fallback" % route_id)
         for rank, entry in enumerate(entries):
             if entry.get("rank") != rank:
                 raise TunerDispatchError("route %s ranks are not contiguous" % route_id)
@@ -152,7 +162,12 @@ def _select(table: Mapping[str, Any], shape: Tuple[int, int, int]) -> Optional[T
         if tuple(int(route_shape.get(k, -1)) for k in ("m", "n", "k")) == shape:
             entries = row.get("entries") or []
             if not entries:
-                raise TunerDispatchError("selected route has no artifact")
+                fallback = row.get("fallback") or {}
+                selection = row.get("selection") or {}
+                if (fallback.get("kind") == "canonical"
+                        and selection.get("kind") == "canonical"):
+                    return None
+                raise TunerDispatchError("selected route has no executable fallback")
             return route_id, entries[0]
     fallback = table.get("fallback") or {}
     if fallback.get("kind") == "canonical":

@@ -38,7 +38,7 @@ TEMPLATE_SCHEMA = "geak.lane-template/v1"
 ALLOCATION_SCHEMA = "geak.gpu-allocation/v1"
 CONFIG_REGISTRY_SCHEMA = "geak.config-search/v2"
 CONFIG_REGISTRY_VERSION = 2
-RUNTIME_TABLE_SCHEMA = "geak.runtime_table/v2"
+RUNTIME_TABLE_SCHEMA = "geak.runtime_table/v3"
 LAUNCH_CONTRACT_SCHEMA = "geak.asm-launch-contract/v1"
 ARTIFACT_SET_SCHEMA = "geak.asm-artifact-set/v1"
 BASE_COMMIT = "a9876692ed1039b85b2fdafb8c1751548fd13da1"
@@ -1045,8 +1045,8 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
 
     registry_artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
     raw_artifact_set = selected_row.get("artifact_set")
-    if not isinstance(raw_artifact_set, list) or not raw_artifact_set:
-        raise LaunchError("tuner selected registry row has no artifact set",
+    if not isinstance(raw_artifact_set, list):
+        raise LaunchError("tuner selected registry row artifact set is not an array",
                           code=EXIT_TUNER, category="tuner")
     for raw in raw_artifact_set:
         if not isinstance(raw, dict) or raw.get("kind") not in {
@@ -1070,6 +1070,10 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
 
     table_artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
     table_config_ids: set[str] = set()
+    selection_outcomes = selection.get("route_outcomes")
+    if not isinstance(selection_outcomes, dict) or set(selection_outcomes) != set(routes):
+        raise LaunchError("tuner selection does not cover the complete route set",
+                          code=EXIT_TUNER, category="tuner")
     for name, shape in routes.items():
         row = table_routes[name]
         if not isinstance(row, dict):
@@ -1083,9 +1087,40 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
             raise LaunchError(f"tuner runtime-table route {name} has invalid dimensions",
                               code=EXIT_TUNER, category="tuner") from exc
         entries = row.get("entries")
-        if got != shape or not isinstance(entries, list) or not entries:
+        selection_doc = row.get("selection") or {}
+        route_fallback = row.get("fallback") or {}
+        outcome_doc = selection_outcomes.get(name) or {}
+        if got != shape or not isinstance(entries, list):
             raise LaunchError(f"tuner runtime-table route {name} is incomplete",
                               code=EXIT_TUNER, category="tuner")
+        if entries:
+            if (selection_doc.get("kind") != "candidate"
+                    or selection_doc.get("status") != "winner"
+                    or selection_doc.get("config_ids")
+                    != [entry.get("config_id") for entry in entries]):
+                raise LaunchError(
+                    f"tuner runtime-table route {name} candidate selection differs",
+                    code=EXIT_TUNER, category="tuner",
+                )
+        elif (selection_doc.get("kind") != "canonical"
+              or selection_doc.get("status") not in ("unmeasured", "no_winner")
+              or route_fallback.get("kind") != "canonical"):
+            raise LaunchError(
+                f"tuner runtime-table route {name} lacks canonical fallback",
+                code=EXIT_TUNER, category="tuner",
+            )
+        expected_kind = "candidate" if outcome_doc.get("selection") == "candidate" else "canonical"
+        if (selection_doc.get("kind") != expected_kind
+                or selection_doc.get("status") != outcome_doc.get("status")
+                or selection_doc.get("reason") != outcome_doc.get("reason")
+                or selection_doc.get("candidate_gates")
+                != (outcome_doc.get("candidate_gates") or [])
+                or selection_doc.get("config_ids")
+                != (outcome_doc.get("config_ids") or [])):
+            raise LaunchError(
+                f"tuner table/selection route outcome differs for {name}",
+                code=EXIT_TUNER, category="tuner",
+            )
         for rank, entry in enumerate(entries):
             if (not isinstance(entry, dict) or entry.get("rank") != rank
                     or entry.get("task_digest") != task_digest

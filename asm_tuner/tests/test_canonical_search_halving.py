@@ -65,6 +65,9 @@ class FakeRunner:
 
 
 class FakeHarness:
+    candidate_ratios = {}
+    default_candidate_ratio = 0.90
+
     @staticmethod
     def correct(output, reference, tolerance):
         return True, 0.0
@@ -75,11 +78,44 @@ class FakeHarness:
         for call in arms.values():
             call(slots[0])
         assert metric == "sustained_throughput"
+        medians = {
+            name: (
+                1.0 if name == integration.CANONICAL_CONTROL_ARM
+                else float(FakeHarness.candidate_ratios.get(
+                    name, FakeHarness.default_candidate_ratio,
+                ))
+            )
+            for name in names
+        }
+        blocks = []
+        samples = []
+        for block in range(10):
+            block_samples = {
+                name: {
+                    "block": block,
+                    "cycle": block,
+                    "arm": name,
+                    "slot_id": "unit",
+                    "slot_fingerprint": "same-slot",
+                    "ms": value,
+                }
+                for name, value in medians.items()
+            }
+            blocks.append({
+                "block": block,
+                "cycle": block,
+                "slot_id": "unit",
+                "slot_fingerprint": "same-slot",
+                "samples": block_samples,
+            })
+            samples.extend(block_samples.values())
         return {
             "protocol_hash": protocol["hash"],
             "metric_id": metric,
             "metric": dict(protocol["metrics"][metric]),
-            "medians_ms": {name: float(index + 1) for index, name in enumerate(reversed(names))},
+            "medians_ms": medians,
+            "blocks": blocks,
+            "samples": samples,
             "invariants": {"paired": True, "semantic_slots": True},
             "gpu_lock": {"mode": "external"},
         }
@@ -99,6 +135,14 @@ def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     monkeypatch.setattr(integration, "ShardCompiler", FakeCompiler)
     monkeypatch.setattr(integration, "_CompiledCallable", FakeCallable)
     monkeypatch.setattr(integration, "_task_import_path", lambda path: contextlib.nullcontext())
+    monkeypatch.setattr(
+        integration, "_canonical_task_callable",
+        lambda contract: (lambda slot: FakeCallable("", {"config_id": "canonical"})(
+            *slot["args"]
+        )),
+    )
+    FakeHarness.candidate_ratios = {}
+    FakeHarness.default_candidate_ratio = 0.90
 
     def fake_import(path, name):
         sys.modules["harness_lib"] = FakeHarness
@@ -115,10 +159,25 @@ def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     measured = first["summary"]["measurements"]["prefill_m2048_square"]
     assert [len(row["candidate_ids"]) for row in measured["rounds"]] == [8, 4]
     assert len(first["release"]["route_rankings"]["prefill_m2048_square"]) == 2
+    assert measured["comparison"] == "candidate_vs_canonical_task_implementation"
+    assert measured["outcome"]["status"] == "winner"
+    untouched = {
+        route: ranking for route, ranking in first["release"]["route_rankings"].items()
+        if route != "prefill_m2048_square"
+    }
+    assert len(untouched) == 10
+    assert all(ranking == [] for ranking in untouched.values())
+    assert all(
+        outcome["status"] == "unmeasured" and outcome["selection"] == "canonical"
+        for route, outcome in first["release"]["route_outcomes"].items()
+        if route != "prefill_m2048_square"
+    )
     selection = measured["candidate_plan"]["selection"]
     assert len(selection) == 8
     assert all(row["score_components"] and row["selection_reason"] for row in selection)
     round_receipt = json.loads(Path(measured["rounds"][0]["receipt"]).read_text())
+    assert round_receipt["canonical_control"]["arm"] == integration.CANONICAL_CONTROL_ARM
+    assert integration.CANONICAL_CONTROL_ARM in round_receipt["receipt"]["medians_ms"]
     assert set(round_receipt["candidate_selection"]) == set(measured["rounds"][0]["candidate_ids"])
     assert all(
         row["score_components"] and row["selection_reason"]
@@ -132,3 +191,95 @@ def test_canonical_generated_search_halves_per_route_keeps_top_k_and_resumes(
     assert second["release"]["route_rankings"] == first["release"]["route_rankings"]
     assert second["summary"]["cache"]["round_hits"] == 2
     assert second["summary"]["cache"]["round_misses"] == 0
+
+
+def test_all_slower_candidates_record_no_winner_and_keep_every_route_canonical(
+    tmp_path, monkeypatch,
+):
+    loaded = TaskContract.load(MANIFEST)
+    contract = replace(
+        loaded, oracle_compatible=True,
+        oracle={**loaded.oracle, "selection_metric": loaded.score_metric_id,
+                "score_metric": dict(loaded.score_metric)},
+    )
+    monkeypatch.setenv("GEAK_GPU_LOCK_HELD", "1")
+    monkeypatch.setenv("GEAK_GPU_FENCE_HELD", "1")
+    monkeypatch.setattr(integration, "ShardCompiler", FakeCompiler)
+    monkeypatch.setattr(integration, "_CompiledCallable", FakeCallable)
+    monkeypatch.setattr(integration, "_task_import_path", lambda path: contextlib.nullcontext())
+    monkeypatch.setattr(
+        integration, "_canonical_task_callable",
+        lambda contract: (lambda slot: FakeCallable("", {"config_id": "canonical"})(
+            *slot["args"]
+        )),
+    )
+    monkeypatch.setattr(
+        integration, "_import_path",
+        lambda path, name: (
+            sys.modules.__setitem__("harness_lib", FakeHarness) or FakeRunner
+        ),
+    )
+    FakeHarness.candidate_ratios = {}
+    FakeHarness.default_candidate_ratio = 1.05
+
+    result = integration.search_release(
+        contract, cache_root=tmp_path / "cache", output_dir=tmp_path / "output",
+        case_ids=["prefill_m2048_square"], bootstrap=True,
+    )
+
+    assert all(ranking == [] for ranking in result["release"]["route_rankings"].values())
+    assert all(selection is None for selection in result["release"]["route_selection"].values())
+    target = result["release"]["route_outcomes"]["prefill_m2048_square"]
+    assert target["status"] == "no_winner"
+    assert target["selection"] == "canonical"
+    assert target["candidate_gates"]
+    assert all(not gate["accepted"] for gate in target["candidate_gates"])
+
+
+def test_one_five_percent_candidate_only_owns_the_measured_route(tmp_path, monkeypatch):
+    loaded = TaskContract.load(MANIFEST)
+    contract = replace(
+        loaded, oracle_compatible=True,
+        oracle={**loaded.oracle, "selection_metric": loaded.score_metric_id,
+                "score_metric": dict(loaded.score_metric)},
+    )
+    monkeypatch.setenv("GEAK_GPU_LOCK_HELD", "1")
+    monkeypatch.setenv("GEAK_GPU_FENCE_HELD", "1")
+    monkeypatch.setattr(integration, "ShardCompiler", FakeCompiler)
+    monkeypatch.setattr(integration, "_CompiledCallable", FakeCallable)
+    monkeypatch.setattr(integration, "_task_import_path", lambda path: contextlib.nullcontext())
+    monkeypatch.setattr(
+        integration, "_canonical_task_callable",
+        lambda contract: (lambda slot: FakeCallable("", {"config_id": "canonical"})(
+            *slot["args"]
+        )),
+    )
+    monkeypatch.setattr(
+        integration, "_import_path",
+        lambda path, name: (
+            sys.modules.__setitem__("harness_lib", FakeHarness) or FakeRunner
+        ),
+    )
+    target_route = next(
+        route for route in contract.routes if route.name == "prefill_m2048_square"
+    )
+    plan = integration.plan_route_candidates(
+        contract.search_space, contract.search_configs, target_route,
+        cu_count=304, limit=8, assume_static_valid=True,
+    )
+    winner = min(config.config_id for config in plan.candidates)
+    FakeHarness.candidate_ratios = {winner: 0.95}
+    FakeHarness.default_candidate_ratio = 1.10
+
+    result = integration.search_release(
+        contract, cache_root=tmp_path / "cache", output_dir=tmp_path / "output",
+        case_ids=[target_route.name], bootstrap=True,
+    )
+
+    assert result["release"]["route_rankings"][target_route.name] == [winner]
+    assert result["release"]["route_selection"][target_route.name] == winner
+    assert result["release"]["route_outcomes"][target_route.name]["status"] == "winner"
+    assert all(
+        ranking == [] for route, ranking in result["release"]["route_rankings"].items()
+        if route != target_route.name
+    )

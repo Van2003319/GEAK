@@ -13,7 +13,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from .compiler import ShardCompiler
 from .contracts import TaskContract, canonical_json, read_object, sha256_file
@@ -22,15 +22,174 @@ from .schema import KernelConfig
 from .search_space import plan_route_candidates, policy_for
 
 
-RELEASE_SCHEMA = "geak.asm-release/v2"
-SELECTION_SCHEMA = "geak.asm-selection/v1"
-MATERIALIZATION_SCHEMA = "geak.asm-materialization/v1"
+RELEASE_SCHEMA = "geak.asm-release/v3"
+SELECTION_SCHEMA = "geak.asm-selection/v2"
+MATERIALIZATION_SCHEMA = "geak.asm-materialization/v2"
 VERIFICATION_SCHEMA = "geak.asm-materialization-verification/v1"
 SMOKE_SCHEMA = "geak.asm-canonical-smoke/v1"
+PAIR_GATE_SCHEMA = "geak.asm-candidate-vs-canonical-gate/v1"
+PAIR_GATE_ALGORITHM = "paired-log-trimmed-bootstrap/v1"
+CANONICAL_CONTROL_ARM = "__canonical_task_implementation__"
+PAIR_GATE_CONFIDENCE = 0.95
+PAIR_GATE_TRIM_FRACTION = 0.20
+PAIR_GATE_RESAMPLES = 4096
+PAIR_GATE_SEED = 20260902
+PAIR_GATE_MIN_PAIRS = 8
+PAIR_GATE_MDE = 0.02
 
 
 class IntegrationError(RuntimeError):
     """A release cannot cross the canonical task execution boundary safely."""
+
+
+class _SplitMix64:
+    _MASK = (1 << 64) - 1
+
+    def __init__(self, seed: int) -> None:
+        self.state = seed & self._MASK
+
+    def next_u64(self) -> int:
+        self.state = (self.state + 0x9E3779B97F4A7C15) & self._MASK
+        value = self.state
+        value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & self._MASK
+        value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & self._MASK
+        return (value ^ (value >> 31)) & self._MASK
+
+    def randbelow(self, size: int) -> int:
+        return self.next_u64() % size
+
+
+def _trimmed_mean(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    trim = int(math.floor(len(ordered) * PAIR_GATE_TRIM_FRACTION))
+    kept = ordered[trim:len(ordered) - trim] if trim else ordered
+    return sum(kept) / len(kept)
+
+
+def _quantile(values: Sequence[float], probability: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * probability
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] + (position - lower) * (ordered[upper] - ordered[lower])
+
+
+def _paired_estimate(values: Sequence[float], route: str, candidate_id: str) -> Tuple[float, float]:
+    point = _trimmed_mean(values)
+    label = "%d:route:%s:candidate:%s" % (PAIR_GATE_SEED, route, candidate_id)
+    seed = int.from_bytes(hashlib.sha256(label.encode("utf-8")).digest()[:8], "big")
+    rng = _SplitMix64(seed)
+    count = len(values)
+    bootstrap = [
+        _trimmed_mean([values[rng.randbelow(count)] for _ in range(count)])
+        for _ in range(PAIR_GATE_RESAMPLES)
+    ]
+    return point, _quantile(bootstrap, 1.0 - PAIR_GATE_CONFIDENCE)
+
+
+def _candidate_vs_canonical_gate(
+    receipt: Mapping[str, Any],
+    *,
+    route: str,
+    candidate_id: str,
+    practical_mde: float = PAIR_GATE_MDE,
+) -> Dict[str, Any]:
+    if not (0.0 < practical_mde < 1.0):
+        raise IntegrationError("candidate-vs-canonical practical MDE must be in (0, 1)")
+    pairs: List[Dict[str, Any]] = []
+    log_ratios: List[float] = []
+    for block in receipt.get("blocks") or []:
+        samples = block.get("samples") or {}
+        candidate = samples.get(candidate_id) or {}
+        control = samples.get(CANONICAL_CONTROL_ARM) or {}
+        try:
+            candidate_ms = float(candidate["ms"])
+            control_ms = float(control["ms"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IntegrationError(
+                "paired receipt lacks candidate/canonical timing for %s" % candidate_id
+            ) from exc
+        if (not math.isfinite(candidate_ms) or not math.isfinite(control_ms)
+                or candidate_ms <= 0.0 or control_ms <= 0.0
+                or candidate.get("slot_fingerprint") != control.get("slot_fingerprint")):
+            raise IntegrationError("candidate/canonical pair is not same-slot finite timing")
+        pair_binding = {
+            "route": route,
+            "block": block.get("block"),
+            "cycle": block.get("cycle"),
+            "slot_id": block.get("slot_id"),
+            "slot_fingerprint": block.get("slot_fingerprint"),
+            "protocol_hash": receipt.get("protocol_hash"),
+            "metric_id": receipt.get("metric_id"),
+        }
+        pair_id = hashlib.sha256(canonical_json(pair_binding).encode("utf-8")).hexdigest()
+        pairs.append({
+            "pair_id": pair_id,
+            "block": block.get("block"),
+            "slot_id": block.get("slot_id"),
+            "slot_fingerprint": block.get("slot_fingerprint"),
+            "candidate_ms": candidate_ms,
+            "canonical_ms": control_ms,
+        })
+        log_ratios.append(math.log(control_ms / candidate_ms))
+    if len(pairs) < PAIR_GATE_MIN_PAIRS:
+        raise IntegrationError(
+            "candidate-vs-canonical gate has %d pairs; need %d"
+            % (len(pairs), PAIR_GATE_MIN_PAIRS)
+        )
+    point, lower = _paired_estimate(log_ratios, route, candidate_id)
+    threshold = -math.log1p(-practical_mde)
+    accepted = lower > threshold
+    return {
+        "schema": PAIR_GATE_SCHEMA,
+        "comparison": "candidate_vs_canonical_task_implementation",
+        "decision": "winner" if accepted else "no_winner",
+        "accepted": accepted,
+        "route": route,
+        "candidate_id": candidate_id,
+        "canonical_control_arm": CANONICAL_CONTROL_ARM,
+        "protocol_hash": receipt.get("protocol_hash"),
+        "metric_id": receipt.get("metric_id"),
+        "metric_inner": (receipt.get("metric") or {}).get("inner"),
+        "candidate_median_ms": float((receipt.get("medians_ms") or {})[candidate_id]),
+        "canonical_median_ms": float(
+            (receipt.get("medians_ms") or {})[CANONICAL_CONTROL_ARM]
+        ),
+        "n_pairs": len(pairs),
+        "pair_ids": [pair["pair_id"] for pair in pairs],
+        "pairs": pairs,
+        "estimate_log_ratio": point,
+        "estimate_speedup": math.exp(point),
+        "ci95_lower_log_ratio": lower,
+        "ci95_lower_speedup": math.exp(lower),
+        "practical_mde": practical_mde,
+        "threshold_log_ratio": threshold,
+        "algorithm": {
+            "name": PAIR_GATE_ALGORITHM,
+            "effect": "log(canonical_ms/candidate_ms)",
+            "estimator": "20% trimmed mean",
+            "confidence": PAIR_GATE_CONFIDENCE,
+            "interval": "one-sided paired percentile bootstrap lower bound",
+            "resamples": PAIR_GATE_RESAMPLES,
+            "seed": PAIR_GATE_SEED,
+            "min_pairs": PAIR_GATE_MIN_PAIRS,
+        },
+        "reason": (
+            "paired lower bound proves candidate improvement over canonical"
+            if accepted else
+            "paired lower bound does not prove MDE improvement over canonical"
+        ),
+    }
+
+
+def _canonical_task_callable(contract: TaskContract) -> Callable[[Mapping[str, Any]], Any]:
+    import kernel_loader
+
+    entrypoint = str(contract.value["bindings"]["entrypoint"]["symbol"])
+    operation = getattr(kernel_loader.gemm_ext, entrypoint)
+    return lambda slot: operation(*slot["args"])
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -99,7 +258,11 @@ def create_release(
     optimization: str = "-O3",
     selection_reason: str = "declared correctness seed; not performance tuned",
 ) -> Dict[str, Any]:
-    """Compile one declared config and make it a complete canonical-suite release."""
+    """Create a complete canonical-fallback release without claiming a performance winner.
+
+    Declared configs remain reproducible search seeds.  They cannot own a route until
+    same-slot paired evidence proves an MDE improvement over the task implementation.
+    """
     if not contract.oracle_compatible:
         raise IntegrationError(
             "canonical oracle is not frozen under measurement protocol v2; refusing a lane release"
@@ -107,13 +270,18 @@ def create_release(
     if config is None:
         config = contract.config_variant(variant or str(contract.search_space["default_variant"]))
     contract.adapter.validate(config)
-    # A config outside the committed search-space is not reproducible by a verifier.
     contract.config_by_id(config.config_id)
-    compiler = ShardCompiler(Path(cache_root), hipcc=hipcc, optimization=optimization)
-    result = compiler.compile_shard(contract.adapter, [config], shared=True)
-    artifact = _artifact_row(contract, result, config)
-    route_selection = {route.name: config.config_id for route in contract.routes}
-    route_rankings = {route.name: [config.config_id] for route in contract.routes}
+    route_selection = {route.name: None for route in contract.routes}
+    route_rankings = {route.name: [] for route in contract.routes}
+    route_outcomes = {
+        route.name: {
+            "status": "unmeasured",
+            "selection": "canonical",
+            "reason": "declared seed has no candidate-vs-canonical paired evidence",
+            "candidate_gates": [],
+        }
+        for route in contract.routes
+    }
     payload: Dict[str, Any] = {
         "schema": RELEASE_SCHEMA,
         "task": contract.identity(),
@@ -135,7 +303,8 @@ def create_release(
         "selection_reason": selection_reason,
         "route_selection": route_selection,
         "route_rankings": route_rankings,
-        "artifacts": [artifact],
+        "route_outcomes": route_outcomes,
+        "artifacts": [],
     }
     payload["release_id"] = _release_identity(payload)
     payload["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -188,6 +357,7 @@ def _search_round_cache(
     round_index: int,
     candidate_ids: Sequence[str],
     fingerprints: Mapping[str, Mapping[str, str]],
+    canonical_control: Mapping[str, str],
     protocol_hash: str,
     score_metric: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
@@ -197,21 +367,22 @@ def _search_round_cache(
         value = read_object(path)
     except Exception:
         return None
-    if (value.get("schema") != "geak.asm-canonical-search-round/v2" or
+    if (value.get("schema") != "geak.asm-canonical-search-round/v3" or
             value.get("search_id") != search_id or value.get("route") != route or
             int(value.get("round", -1)) != round_index or
             value.get("candidate_ids") != list(candidate_ids) or
             value.get("fingerprints") != dict(fingerprints) or
+            value.get("canonical_control") != dict(canonical_control) or
             value.get("protocol_hash") != protocol_hash or
             value.get("score_metric") != dict(score_metric)):
         return None
     receipt = value.get("receipt") or {}
     medians = receipt.get("medians_ms") or {}
-    if set(medians) != set(candidate_ids):
+    if set(medians) != set(candidate_ids) | {CANONICAL_CONTROL_ARM}:
         return None
     try:
         if not all(math.isfinite(float(medians[name])) and float(medians[name]) > 0
-                   for name in candidate_ids):
+                   for name in list(candidate_ids) + [CANONICAL_CONTROL_ARM]):
             return None
     except (TypeError, ValueError):
         return None
@@ -330,6 +501,14 @@ def search_release(
         "task_digest": contract.task_digest,
         "protocol_hash": contract.protocol["hash"],
         "score_metric": dict(contract.score_metric),
+        "candidate_vs_canonical_gate": {
+            "schema": PAIR_GATE_SCHEMA,
+            "algorithm": PAIR_GATE_ALGORITHM,
+            "practical_mde": PAIR_GATE_MDE,
+            "confidence": PAIR_GATE_CONFIDENCE,
+            "resamples": PAIR_GATE_RESAMPLES,
+            "seed": PAIR_GATE_SEED,
+        },
         "policy": policy,
         "bootstrap": bool(bootstrap),
         "routes": {name: plans[name].to_dict() for name in sorted(plans)},
@@ -345,7 +524,7 @@ def search_release(
     output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / "search_state.json"
     state: Dict[str, Any] = {
-        "schema": "geak.asm-canonical-search-state/v2",
+        "schema": "geak.asm-canonical-search-state/v3",
         "search_id": search_id,
         "identity": search_identity,
         "status": "running",
@@ -361,8 +540,17 @@ def search_release(
             pass
     _atomic_json(state_path, state)
 
-    route_selection = {route.name: contract.default_config.config_id for route in contract.routes}
-    route_rankings = {route.name: [contract.default_config.config_id] for route in contract.routes}
+    route_selection = {route.name: None for route in contract.routes}
+    route_rankings = {route.name: [] for route in contract.routes}
+    route_outcomes: Dict[str, Any] = {
+        route.name: {
+            "status": "unmeasured",
+            "selection": "canonical",
+            "reason": "route was outside this search target",
+            "candidate_gates": [],
+        }
+        for route in contract.routes
+    }
     measurements: Dict[str, Any] = {}
     cache_hits = 0
     cache_misses = 0
@@ -376,6 +564,13 @@ def search_release(
         harness = sys.modules.get("harness_lib")
         if harness is None:
             raise IntegrationError("canonical task runner did not load its harness")
+        canonical_call = _canonical_task_callable(contract)
+        canonical_control = {
+            "arm": CANONICAL_CONTROL_ARM,
+            "kind": "canonical_task_implementation",
+            "task_digest": contract.task_digest,
+            "source_digest": contract.source_digest,
+        }
         for case in contract.cases:
             case_id = str(case["id"])
             if case_id not in plans:
@@ -408,6 +603,7 @@ def search_release(
                     round_index=round_index,
                     candidate_ids=candidate_ids,
                     fingerprints=fingerprints,
+                    canonical_control=canonical_control,
                     protocol_hash=str(contract.protocol["hash"]),
                     score_metric=contract.score_metric,
                 )
@@ -434,10 +630,24 @@ def search_release(
                                 raise IntegrationError(
                                     "%s failed %s correctness" % (config_id, case_id)
                                 )
+                        canonical_output = canonical_call(slots[0])
+                        canonical_ok, canonical_error = harness.correct(
+                            canonical_output, reference,
+                            float(contract.value.get("tolerance", 0.02)),
+                        )
+                        correctness[CANONICAL_CONTROL_ARM] = {
+                            "passed": bool(canonical_ok),
+                            "max_relative_error": canonical_error,
+                        }
+                        if not canonical_ok:
+                            raise IntegrationError(
+                                "canonical task implementation failed %s correctness" % case_id
+                            )
                     arms = {
                         config_id: (lambda slot, fn=calls[config_id]: fn(*slot["args"]))
                         for config_id in candidate_ids
                     }
+                    arms[CANONICAL_CONTROL_ARM] = canonical_call
                     receipt = harness.measure_paired_arms(
                         arms, slots, protocol=dict(contract.protocol),
                         metric=contract.score_metric_id,
@@ -454,7 +664,7 @@ def search_release(
                         raise IntegrationError("measurement did not inherit the lane GPU lock")
                     plan_selection = plans[case_id].selection_by_id()
                     cached = {
-                        "schema": "geak.asm-canonical-search-round/v2",
+                        "schema": "geak.asm-canonical-search-round/v3",
                         "search_id": search_id,
                         "route": case_id,
                         "round": round_index,
@@ -463,6 +673,7 @@ def search_release(
                             config_id: plan_selection[config_id] for config_id in candidate_ids
                         },
                         "fingerprints": fingerprints,
+                        "canonical_control": canonical_control,
                         "protocol_hash": contract.protocol["hash"],
                         "score_metric": dict(contract.score_metric),
                         "correctness": correctness,
@@ -512,18 +723,46 @@ def search_release(
                 survivors,
                 key=lambda config: (last_medians[config.config_id], config.config_id),
             )[:top_k]
-            selected_ids = [config.config_id for config in selected]
-            route_selection[case_id] = selected_ids[0]
+            candidate_gates = [
+                _candidate_vs_canonical_gate(
+                    cached["receipt"], route=case_id, candidate_id=config.config_id,
+                )
+                for config in selected
+            ]
+            gate_by_id = {gate["candidate_id"]: gate for gate in candidate_gates}
+            selected_ids = [
+                config.config_id for config in selected
+                if gate_by_id[config.config_id]["accepted"]
+            ]
+            route_selection[case_id] = selected_ids[0] if selected_ids else None
             route_rankings[case_id] = selected_ids
+            if selected_ids:
+                route_outcomes[case_id] = {
+                    "status": "winner",
+                    "selection": "candidate",
+                    "reason": "candidate-vs-canonical paired MDE gate passed",
+                    "config_ids": selected_ids,
+                    "candidate_gates": candidate_gates,
+                }
+            else:
+                route_outcomes[case_id] = {
+                    "status": "no_winner",
+                    "selection": "canonical",
+                    "reason": "no candidate proved paired MDE improvement over canonical",
+                    "candidate_gates": candidate_gates,
+                }
             measurements[case_id] = {
                 "candidate_plan": plans[case_id].to_dict(),
                 "rounds": rounds,
+                "comparison": "candidate_vs_canonical_task_implementation",
+                "outcome": route_outcomes[case_id],
                 "selected": [{
                     "rank": rank,
-                    "config_id": config_id,
-                    "median_ms": last_medians[config_id],
-                    "isa_hash": by_id[config_id]["isa_hash"],
-                } for rank, config_id in enumerate(selected_ids)],
+                    "config_id": config.config_id,
+                    "median_ms": last_medians[config.config_id],
+                    "isa_hash": by_id[config.config_id]["isa_hash"],
+                    "candidate_vs_canonical_gate": gate_by_id[config.config_id],
+                } for rank, config in enumerate(selected)],
             }
 
     selected_config_ids = sorted({
@@ -542,7 +781,10 @@ def search_release(
             "selection_metric": contract.oracle.get("selection_metric"),
             "score_metric": contract.oracle.get("score_metric"),
         },
-        "fallback": {"kind": "canonical", "reason": "shape absent from canonical CASES"},
+        "fallback": {
+            "kind": "canonical",
+            "reason": "route is unmeasured or has no paired MDE winner",
+        },
         "search_space_manifest": str(contract.value["search_space_manifest"]),
         "variant": ("declared:" + ",".join(requested_variants)
                     if requested_variants else "generated-successive-halving"),
@@ -551,6 +793,7 @@ def search_release(
         "measured_routes": sorted(wanted),
         "route_selection": route_selection,
         "route_rankings": route_rankings,
+        "route_outcomes": route_outcomes,
         "search": {
             "search_id": search_id,
             "policy": policy,
@@ -566,7 +809,7 @@ def search_release(
     _atomic_json(target, payload)
     validate_release(payload, contract)
     summary = {
-        "schema": "geak.asm-canonical-search/v2",
+        "schema": "geak.asm-canonical-search/v3",
         "ok": True,
         "task": contract.task,
         "release_id": payload["release_id"],
@@ -579,6 +822,7 @@ def search_release(
         "measured_routes": sorted(wanted),
         "route_selection": route_selection,
         "route_rankings": route_rankings,
+        "route_outcomes": route_outcomes,
         "search_space": contract.search_materialization.to_dict(),
         "budget": payload["search"],
         "cache": {"round_hits": cache_hits, "round_misses": cache_misses,
@@ -622,15 +866,77 @@ def validate_release(value: Mapping[str, Any], contract: TaskContract) -> None:
     rankings = value.get("route_rankings")
     if not isinstance(rankings, dict) or set(rankings) != route_names:
         raise IntegrationError("release does not rank the complete canonical suite")
+    outcomes = value.get("route_outcomes")
+    if not isinstance(outcomes, dict) or set(outcomes) != route_names:
+        raise IntegrationError("release does not record every route outcome")
     for route_name, config_ids in rankings.items():
-        if (not isinstance(config_ids, list) or not config_ids or
-                len(config_ids) != len(set(config_ids))):
-            raise IntegrationError("route %s rankings must be a non-empty unique list" % route_name)
-        if routes[route_name] != config_ids[0]:
-            raise IntegrationError("route %s winner differs from ranking zero" % route_name)
+        if not isinstance(config_ids, list) or len(config_ids) != len(set(config_ids)):
+            raise IntegrationError("route %s rankings must be a unique list" % route_name)
+        outcome = outcomes[route_name]
+        if not isinstance(outcome, dict):
+            raise IntegrationError("route %s outcome must be an object" % route_name)
+        if config_ids:
+            if (routes[route_name] != config_ids[0]
+                    or outcome.get("status") != "winner"
+                    or outcome.get("selection") != "candidate"
+                    or outcome.get("config_ids") != config_ids):
+                raise IntegrationError("route %s candidate winner/outcome differs" % route_name)
+            gates = outcome.get("candidate_gates")
+            if not isinstance(gates, list) or not gates:
+                raise IntegrationError(
+                    "route %s lacks candidate-vs-canonical winner evidence" % route_name
+                )
+            accepted = set()
+            seen_gate_ids = set()
+            for gate in gates:
+                if not isinstance(gate, dict):
+                    raise IntegrationError("route %s gate is not an object" % route_name)
+                candidate_id = gate.get("candidate_id")
+                try:
+                    lower = float(gate["ci95_lower_log_ratio"])
+                    threshold = float(gate["threshold_log_ratio"])
+                    n_pairs = int(gate["n_pairs"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise IntegrationError(
+                        "route %s gate lacks deterministic paired statistics" % route_name
+                    ) from exc
+                pair_ids = gate.get("pair_ids")
+                accepted_gate = gate.get("accepted")
+                if (gate.get("schema") != PAIR_GATE_SCHEMA
+                        or gate.get("comparison") !=
+                        "candidate_vs_canonical_task_implementation"
+                        or gate.get("route") != route_name
+                        or candidate_id in seen_gate_ids
+                        or not isinstance(candidate_id, str)
+                        or gate.get("protocol_hash") != contract.protocol["hash"]
+                        or gate.get("metric_id") != contract.score_metric_id
+                        or gate.get("metric_inner") != contract.score_metric_inner
+                        or (gate.get("algorithm") or {}).get("name") != PAIR_GATE_ALGORITHM
+                        or n_pairs < PAIR_GATE_MIN_PAIRS
+                        or not isinstance(pair_ids, list) or len(pair_ids) != n_pairs
+                        or any(not isinstance(pair_id, str) or len(pair_id) != 64
+                               for pair_id in pair_ids)
+                        or not math.isfinite(lower) or not math.isfinite(threshold)
+                        or not isinstance(accepted_gate, bool)
+                        or accepted_gate != (lower > threshold)):
+                    raise IntegrationError(
+                        "route %s has stale candidate-vs-canonical gate" % route_name
+                    )
+                seen_gate_ids.add(candidate_id)
+                if accepted_gate:
+                    accepted.add(candidate_id)
+            if set(config_ids) != accepted:
+                raise IntegrationError(
+                    "route %s winner list differs from accepted paired gates" % route_name
+                )
+        elif (routes[route_name] is not None
+              or outcome.get("status") not in ("unmeasured", "no_winner")
+              or outcome.get("selection") != "canonical"
+              or not isinstance(outcome.get("candidate_gates"), list)):
+            raise IntegrationError("route %s lacks explicit canonical fallback outcome" % route_name)
     artifacts = value.get("artifacts")
-    if not isinstance(artifacts, list) or not artifacts:
-        raise IntegrationError("release has no compiled artifacts")
+    if not isinstance(artifacts, list):
+        raise IntegrationError("release artifacts must be a list")
     by_id = {}
     for row in artifacts:
         config = KernelConfig.from_dict(row.get("config") or {})
@@ -649,8 +955,8 @@ def validate_release(value: Mapping[str, Any], contract: TaskContract) -> None:
             raise IntegrationError("release launch symbol does not match config")
         by_id[config.config_id] = row
     ranked_ids = {config_id for config_ids in rankings.values() for config_id in config_ids}
-    if ranked_ids - set(by_id):
-        raise IntegrationError("a route ranking selects a config without an artifact")
+    if ranked_ids != set(by_id):
+        raise IntegrationError("release artifacts must exactly equal paired-gate winners")
 
 
 def load_release(path: Path, contract: TaskContract) -> Dict[str, Any]:
@@ -775,6 +1081,9 @@ def materialize_release(
         "oracle": value["oracle"],
         "fallback": value["fallback"],
         "search": dict(value.get("search") or {}),
+        "route_outcomes": {
+            route: dict(outcome) for route, outcome in value["route_outcomes"].items()
+        },
     }
     table_path = local_contract.materialization_path("runtime_table", task_root=workspace)
     table = RuntimeTableStore(
@@ -804,6 +1113,9 @@ def materialize_release(
         "config_ids": sorted({
             config_id for ranking in value["route_rankings"].values() for config_id in ranking
         }),
+        "route_outcomes": {
+            route: dict(outcome) for route, outcome in value["route_outcomes"].items()
+        },
     }
     selection_path = local_contract.materialization_path("selection_file", task_root=workspace)
     _atomic_json(selection_path, selection)
@@ -827,6 +1139,7 @@ def materialize_release(
         "oracle_manifest_sha256": local_contract.oracle_sha256,
         "route_count": len(local_contract.routes),
         "config_ids": selection["config_ids"],
+        "route_outcomes": selection["route_outcomes"],
         "selection_file": str(selection_path),
         "selection_sha256": selection_sha256,
         "release_manifest": str(release_manifest_path),
@@ -950,6 +1263,10 @@ def _verify_workspace(
         "table_digest": table["table_digest"],
         "release_id": table["release_id"],
         "routes_verified": len(symbol_rows),
+        "route_selections": {
+            route_id: dict(table["routes"][route_id]["selection"])
+            for route_id in table["suite"]["route_ids"]
+        },
         "symbols": symbol_rows,
         "rebuilt": rebuilt,
     }
@@ -1019,7 +1336,15 @@ def smoke_materialization(
     verification = verify_materialization(contract, workspace=workspace, independent=False)
     case_id = case_id or str(contract.cases[0]["id"])
     case = contract.case(case_id)
+    table = RuntimeTableStore(
+        contract.materialization_path("runtime_table", task_root=workspace),
+        state_root=workspace / ".geak_tuner" / "runtime_table_state",
+    ).load()
+    route_row = table["routes"][case_id]
+    route_selection = dict(route_row["selection"])
+    expect_candidate = bool(route_row["entries"])
     trace = workspace / ".geak_tuner" / ("dispatch-%s.json" % case_id)
+    trace.unlink(missing_ok=True)
     old_required = os.environ.get("GEAK_TUNER_REQUIRED")
     old_trace = os.environ.get("GEAK_TUNER_TRACE")
     os.environ["GEAK_TUNER_REQUIRED"] = "1"
@@ -1043,9 +1368,20 @@ def smoke_materialization(
             torch.cuda.synchronize()
         if not ok:
             raise IntegrationError("canonical task correctness failed: max_relative_error=%s" % max_relative_error)
-        dispatch = read_object(trace)
-        if dispatch.get("route") != case_id or not dispatch.get("symbol") or not dispatch.get("config_id"):
-            raise IntegrationError("task dispatch did not consume the versioned runtime table")
+        if expect_candidate:
+            dispatch = read_object(trace)
+            if (dispatch.get("route") != case_id or not dispatch.get("symbol")
+                    or not dispatch.get("config_id")):
+                raise IntegrationError("task dispatch did not consume the versioned runtime table")
+        else:
+            if trace.exists():
+                raise IntegrationError("canonical-fallback route unexpectedly dispatched a tuner artifact")
+            dispatch = {
+                "config_id": None,
+                "symbol": None,
+                "artifact_sha256": None,
+                "source_sha256": None,
+            }
         return {
             "schema": SMOKE_SCHEMA,
             "ok": True,
@@ -1056,13 +1392,15 @@ def smoke_materialization(
             "protocol_hash": contract.protocol["hash"],
             "score_metric": dict(contract.score_metric),
             "table_digest": verification["table_digest"],
+            "dispatch": "candidate" if expect_candidate else "canonical",
+            "route_selection": route_selection,
             "config_id": dispatch["config_id"],
             "symbol": dispatch["symbol"],
             "artifact_sha256": dispatch["artifact_sha256"],
             "source_sha256": dispatch["source_sha256"],
             "max_relative_error": max_relative_error,
             "gpu_lock": {"mode": "external", "path": os.environ.get("GEAK_GPU_LOCK_FILE")},
-            "dispatch_receipt": str(trace),
+            "dispatch_receipt": str(trace) if expect_candidate else None,
         }
     finally:
         if old_required is None:

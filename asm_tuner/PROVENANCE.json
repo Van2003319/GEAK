@@ -11,9 +11,9 @@
     "materialization": "task-local explicit shared artifact loaded by versioned route table",
     "measurement_protocol": "geak.measurement-protocol/v2",
     "registry_bridge": "kernel_workflow/scripts/config_search.py (geak.config-search/v2)",
-    "runtime_table": "geak.runtime_table/v2; complete-suite atomic top-K publication bound to score metric",
+    "runtime_table": "geak.runtime_table/v3; complete-suite atomic routes with explicit canonical fallback and paired-gate winners",
     "score_metric": "geak.score-metric/v1 sustained_throughput inner=16; protocol-bound hash",
-    "search": "dependent domains + route-static pruning + score-metric-bound protocol-v2 per-route successive halving",
+    "search": "dependent domains + route-static pruning + same-slot canonical control + deterministic paired-MDE-gated per-route halving",
     "task_manifests": [
       "manifests/tasks/dense_bf16_gemm_fused.json",
       "manifests/tasks/dense_fp8_gemm_rowwise.json"

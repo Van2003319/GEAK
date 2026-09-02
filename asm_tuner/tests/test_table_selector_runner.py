@@ -16,7 +16,7 @@ from asm_tuner.schema_survival import default_seed
 import pytest
 
 
-def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
+def test_legacy_unpaired_halving_refuses_to_publish_runtime_table_v3(tmp_path):
     seed = default_seed(DType.BF16)
     configs = [replace(seed, wgm=value) for value in (1, 2, 3)]
     candidates = []
@@ -87,37 +87,6 @@ def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
         budgets=(1, 3), eta=2, top_k=2, warmups=1,
         measure=measure, release=release,
     )
-    summary = runner.run(candidates, [route_a, route_b])
-    assert [row["config_id"] for row in summary["routes"]["route_a"]["selected"]] == [
-        configs[0].config_id, configs[1].config_id,
-    ]
-    assert [row["config_id"] for row in summary["routes"]["route_b"]["selected"]] == [
-        configs[2].config_id, configs[1].config_id,
-    ]
-
-    table = RuntimeTableStore(table_path).load()
-    assert table["revision"] == 1
-    assert table["score_metric"] == score_metric
-    assert table["suite"] == {"atomic": True, "complete": True,
-                               "route_ids": ["route_a", "route_b"]}
-    assert (tmp_path / "runtime_table.json.v1.json").exists()
-    assert not (tmp_path / "runtime_table.json.v2.json").exists()
-    assert RuntimeSelector(table).select("route_a")["config_id"] == configs[0].config_id
-    assert RuntimeSelector(table).select("route_a", rank=1)["config_id"] == configs[1].config_id
-    assert RuntimeSelector.from_path(table_path).select_shape(65, 64, 32)["config_id"] == configs[2].config_id
-
-    drifted = copy.deepcopy(table)
-    drifted["score_metric"]["id"] = "single_call_latency"
-    drifted["score_metric"]["inner"] = 1
-    drifted["table_digest"] = table_digest(drifted)
-    drift_path = tmp_path / "metric-drift.json"
-    drift_path.write_text(json.dumps(drifted))
-    with pytest.raises(RuntimeTableError, match="score metric"):
-        RuntimeTableStore(drift_path).load()
-
-    receipts = list((tmp_path / "out" / "receipts").rglob("*.json"))
-    assert len(receipts) == 10
-    raw = json.loads(receipts[0].read_text())
-    assert raw["schema"] == "geak.raw_measurement_receipt/v1"
-    assert raw["status"] == "ok"
-    assert raw["measurement"]["timer"]["dispatch_primed"] is True
+    with pytest.raises(RuntimeError, match="same-slot canonical control"):
+        runner.run(candidates, [route_a, route_b])
+    assert not table_path.exists()

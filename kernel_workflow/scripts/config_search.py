@@ -485,7 +485,10 @@ def create_asm_config(
         "oracle_manifest_sha256": contract.oracle_sha256,
         "release_id": release["release_id"],
         "variant": chosen,
-        "config_ids": sorted(set(release["route_selection"].values())),
+        "config_ids": sorted({
+            config_id for config_id in release["route_selection"].values()
+            if config_id is not None
+        }),
         "priority": 100 if chosen == contract.search_space["default_variant"] else 200,
     }
     result = register_config(
@@ -571,8 +574,6 @@ def _materialized_artifact_set(
                     )
                 row = {"kind": kind, "path": raw.as_posix(), "sha256": expected}
                 unique[(kind, row["path"], expected)] = row
-    if not unique:
-        raise ConfigSearchError("materialized runtime table has no artifact set")
     return [unique[key] for key in sorted(unique)]
 
 
@@ -623,7 +624,7 @@ def _publish_launch_registry(
         for entry in (route.get("entries") or [])
     })
     config = dict(source_entry.get("config") or {})
-    if (not table_config_ids or "" in table_config_ids
+    if ("" in table_config_ids
             or table_config_ids != sorted(set(config.get("config_ids") or []))):
         raise ConfigSearchError("selected registry release and runtime-table config sets differ")
     if (config.get("release_id") != table.get("release_id")

@@ -273,13 +273,22 @@ class TunerContractTest(unittest.TestCase):
                     "variant": "unit",
                     "selection_reason": "unit contract",
                     "route_selection": {
-                        route.name: config_id for route in contract.routes
+                        route.name: None for route in contract.routes
                     },
                     "route_rankings": {
-                        route.name: [config_id] for route in contract.routes
+                        route.name: [] for route in contract.routes
+                    },
+                    "route_outcomes": {
+                        route.name: {
+                            "status": "unmeasured",
+                            "selection": "canonical",
+                            "reason": "route was outside this unit search target",
+                            "candidate_gates": [],
+                        }
+                        for route in contract.routes
                     },
                     "search": {"search_id": "b" * 64, "compiled_candidates": 1},
-                    "artifacts": [artifact_row],
+                    "artifacts": [],
                 }
                 release["release_id"] = tuner_integration._release_identity(release)
                 release["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -299,7 +308,7 @@ class TunerContractTest(unittest.TestCase):
                     "oracle_manifest_sha256": contract.oracle_sha256,
                     "release_id": release["release_id"],
                     "variant": "unit",
-                    "config_ids": [config_id],
+                    "config_ids": [],
                     "priority": 0,
                 }
                 return CS.register_config(

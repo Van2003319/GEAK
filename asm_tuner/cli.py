@@ -124,7 +124,7 @@ def _cmd_compile(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     raise RuntimeError(
-        "the legacy standalone runner used synthetic inputs and cannot publish runtime_table/v2; "
+        "the legacy standalone runner used synthetic inputs and cannot publish runtime_table/v3; "
         "use kernel_workflow/scripts/config_search.py search-asm with a canonical task manifest"
     )
 

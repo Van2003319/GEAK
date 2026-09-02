@@ -11,17 +11,24 @@ def test_protocol_v2_round_cache_is_resumable_and_artifact_bound(tmp_path):
                     "id": "sustained_throughput", "inner": 16,
                     "protocol_hash": protocol_hash, "hash": "c" * 64}
     candidates = ["cfg-a", "cfg-b", "cfg-c"]
+    canonical_control = {
+        "arm": "__canonical_task_implementation__",
+        "kind": "canonical_task_implementation",
+        "task_digest": "d" * 64,
+        "source_digest": "e" * 64,
+    }
     fingerprints = {
         name: {"artifact_sha256": str(index + 1) * 64, "isa_hash": str(index + 4) * 64}
         for index, name in enumerate(candidates)
     }
     value = {
-        "schema": "geak.asm-canonical-search-round/v2",
+        "schema": "geak.asm-canonical-search-round/v3",
         "search_id": search_id,
         "route": "large_m",
         "round": 0,
         "candidate_ids": candidates,
         "fingerprints": fingerprints,
+        "canonical_control": canonical_control,
         "protocol_hash": protocol_hash,
         "score_metric": score_metric,
         "correctness": {name: {"passed": True} for name in candidates},
@@ -29,7 +36,10 @@ def test_protocol_v2_round_cache_is_resumable_and_artifact_bound(tmp_path):
             "protocol_hash": protocol_hash,
             "metric_id": "sustained_throughput",
             "metric": {"id": "sustained_throughput", "inner": 16},
-            "medians_ms": {name: float(index + 1) for index, name in enumerate(candidates)},
+            "medians_ms": {
+                **{name: float(index + 1) for index, name in enumerate(candidates)},
+                "__canonical_task_implementation__": 4.0,
+            },
             "invariants": {"paired": True, "slots_shared": True},
             "gpu_lock": {"mode": "external"},
         },
@@ -38,6 +48,7 @@ def test_protocol_v2_round_cache_is_resumable_and_artifact_bound(tmp_path):
     loaded = _search_round_cache(
         path, search_id=search_id, route="large_m", round_index=0,
         candidate_ids=candidates, fingerprints=fingerprints,
+        canonical_control=canonical_control,
         protocol_hash=protocol_hash, score_metric=score_metric,
     )
     assert loaded == value
@@ -47,5 +58,6 @@ def test_protocol_v2_round_cache_is_resumable_and_artifact_bound(tmp_path):
     assert _search_round_cache(
         path, search_id=search_id, route="large_m", round_index=0,
         candidate_ids=candidates, fingerprints=changed,
+        canonical_control=canonical_control,
         protocol_hash=protocol_hash, score_metric=score_metric,
     ) is None

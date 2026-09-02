@@ -47,15 +47,19 @@ inactive at `0` and `1`; GSU and StreamK remain unsupported at `1` and `0`. All 
 
 `kernel_workflow/scripts/config_search.py search-asm` expands and prunes domains, compiles bounded
 shards, then performs per-route successive halving under `gpu_lock.sh` and `gpu_fence_run.sh`.
+Every measured round includes the untouched canonical task implementation as a same-slot control.
+A candidate owns a route only when the deterministic paired one-sided 95% lower bound proves at
+least the practical MDE improvement under the task's score metric.
 `prepare`/`materialize` install immutable content-addressed artifacts below the task's ignored
 `.geak_tuner/` directory, then atomically publish the complete suite to three stable task-root files:
 `asm_tuner_registry.json`, `asm_tuner_runtime_table.json`, and `asm_tuner_selection.json`. The
 registry's versioned `launch_contract` cross-binds the task/source/oracle digests, protocol and score
 metric, tracked table and selection hashes, workflow consumer, task-local loader, and normalized
 artifact-set digest. Publication also writes a content-addressed receipt below
-`.geak_tuner/receipts/`. Each measured route carries its ranked top-K; the task-local bridge consumes
-the tracked table, validates contiguous ranks and task/protocol/score-metric bindings, and dispatches
-rank zero. Shapes outside the eleven-case suite use the declared canonical fallback.
+`.geak_tuner/receipts/`. The table always carries all eleven routes atomically. Untested routes and
+routes with no MDE winner have empty entries plus an explicit canonical fallback; they are never
+filled from a generic config. Winner routes carry only paired-gate-approved candidates. The task-local
+bridge validates these outcomes and dispatches rank zero only for a winner route.
 
 The committed oracle files still describe the earlier latency bake and are deliberately incompatible
 with these task contracts. Before `search-asm`, run each task's full-suite `oracle-bakeoff

@@ -13,8 +13,8 @@ from typing import Any, Dict, Iterator, Mapping, Sequence
 from .schema import Route
 
 
-LEGACY_RUNTIME_TABLE_VERSION = "geak.runtime_table/v1"
-RUNTIME_TABLE_VERSION = "geak.runtime_table/v2"
+LEGACY_RUNTIME_TABLE_VERSIONS = {"geak.runtime_table/v1", "geak.runtime_table/v2"}
+RUNTIME_TABLE_VERSION = "geak.runtime_table/v3"
 
 
 class RuntimeTableError(ValueError):
@@ -142,8 +142,20 @@ def _validate_v2(value: Mapping[str, Any]) -> None:
             raise RuntimeTableError("invalid or duplicate shape for route %s" % route_id)
         expected_shapes.add(shape_key)
         entries = row.get("entries")
-        if not isinstance(entries, list) or not entries:
-            raise RuntimeTableError("route %s has no selected artifact" % route_id)
+        selection = row.get("selection")
+        route_fallback = row.get("fallback") or {}
+        if not isinstance(entries, list) or not isinstance(selection, dict):
+            raise RuntimeTableError("route %s lacks entries/selection contract" % route_id)
+        if entries:
+            if (selection.get("kind") != "candidate"
+                    or selection.get("status") != "winner"
+                    or selection.get("config_ids")
+                    != [entry.get("config_id") for entry in entries]):
+                raise RuntimeTableError("route %s candidate selection differs from entries" % route_id)
+        elif (selection.get("kind") != "canonical"
+              or selection.get("status") not in ("unmeasured", "no_winner")
+              or route_fallback.get("kind") != "canonical"):
+            raise RuntimeTableError("route %s has no explicit canonical fallback" % route_id)
         for rank, entry in enumerate(entries):
             if entry.get("rank") != rank:
                 raise RuntimeTableError("route %s ranks are not contiguous" % route_id)
@@ -167,7 +179,7 @@ def _validate_v2(value: Mapping[str, Any]) -> None:
 class RuntimeTableStore:
     """One atomic publication per complete route suite.
 
-    v1 updated one route at a time, exposing mixed revisions to readers.  v2 builds
+    v1 updated one route at a time, exposing mixed revisions to readers.  v3 builds
     the whole object under one lock and makes the single os.replace the publication
     point.  Artifacts are immutable and installed before this method is called.
     """
@@ -200,7 +212,7 @@ class RuntimeTableStore:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeTableError("cannot read runtime table: %s" % exc) from exc
-        if value.get("schema") == LEGACY_RUNTIME_TABLE_VERSION:
+        if value.get("schema") in LEGACY_RUNTIME_TABLE_VERSIONS:
             raise RuntimeTableError("legacy per-route runtime tables are not executable; republish the full suite")
         _validate_v2(value)
         return value
@@ -225,6 +237,7 @@ class RuntimeTableStore:
         oracle = dict(release.get("oracle") or {})
         fallback = dict(release.get("fallback") or {})
         search = dict(release.get("search") or {})
+        route_outcomes = release.get("route_outcomes") or {}
         semantic_hashes = task.get("semantic_hashes") or {}
         binding_hashes = task.get("binding_hashes") or {}
         source_digest = hashlib.sha256(_canonical({
@@ -241,6 +254,8 @@ class RuntimeTableStore:
         _validate_score_metric(score_metric, protocol)
         if fallback.get("kind") not in ("canonical", "fail_closed"):
             raise RuntimeTableError("release requires an explicit fallback")
+        if set(route_outcomes) != set(names):
+            raise RuntimeTableError("release requires one selection outcome per route")
 
         lock_path = (
             self.state_root / "locks" / (self.path.name + ".lock")
@@ -248,14 +263,25 @@ class RuntimeTableStore:
             else self.path.with_suffix(self.path.suffix + ".lock")
         )
         with _lock(lock_path):
-            previous = self.load() if self.path.exists() else self.empty()
+            if self.path.exists():
+                raw_previous = json.loads(self.path.read_text(encoding="utf-8"))
+                if raw_previous.get("schema") in LEGACY_RUNTIME_TABLE_VERSIONS:
+                    if (raw_previous.get("table_digest") != table_digest(raw_previous)
+                            or (raw_previous.get("suite") or {}).get("atomic") is not True):
+                        raise RuntimeTableError("legacy runtime table is not hash-valid for migration")
+                    previous = self.empty()
+                    previous["revision"] = int(raw_previous.get("revision", 0))
+                    previous["history"] = list(raw_previous.get("history") or [])
+                    previous["table_digest"] = raw_previous.get("table_digest")
+                else:
+                    previous = self.load()
+            else:
+                previous = self.empty()
             revision = int(previous.get("revision", 0)) + 1
             now = dt.datetime.now(dt.timezone.utc).isoformat()
             table_routes: Dict[str, Any] = {}
             for route in routes:
                 selected = entries_by_route[route.name]
-                if not selected:
-                    raise RuntimeTableError("cannot publish route %s without an artifact" % route.name)
                 ranked = []
                 for rank, raw in enumerate(selected):
                     row = dict(raw)
@@ -268,11 +294,20 @@ class RuntimeTableStore:
                         "metric_inner": score_metric["inner"],
                     })
                     ranked.append(row)
+                outcome = dict(route_outcomes[route.name])
+                selection = {
+                    "kind": "candidate" if ranked else "canonical",
+                    "status": outcome.get("status"),
+                    "reason": outcome.get("reason"),
+                    "config_ids": [entry["config_id"] for entry in ranked],
+                    "candidate_gates": list(outcome.get("candidate_gates") or []),
+                }
                 table_routes[route.name] = {
                     "route": route.name,
                     "shape": {"m": route.m, "n": route.n, "k": route.k},
                     "weight": route.weight,
                     "entries": ranked,
+                    "selection": selection,
                     "fallback": fallback,
                 }
             history = list(previous.get("history") or [])
@@ -316,7 +351,7 @@ class RuntimeTableStore:
 
     def update_route(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         raise RuntimeTableError(
-            "per-route publication was removed in runtime_table/v2; call publish_suite once"
+            "per-route publication was removed in runtime_table/v3; call publish_suite once"
         )
 
 

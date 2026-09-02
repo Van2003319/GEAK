@@ -62,9 +62,49 @@ def fake_release(contract, tmp_path):
             "source": str(source),
             "source_sha256": sha256_file(source),
         })
-    route_selection = {route.name: configs[0].config_id for route in contract.routes}
+    winner_route = contract.routes[0].name
+    route_selection = {
+        route.name: configs[0].config_id if route.name == winner_route else None
+        for route in contract.routes
+    }
     route_rankings = {
-        route.name: [configs[0].config_id, configs[1].config_id]
+        route.name: (
+            [configs[0].config_id, configs[1].config_id]
+            if route.name == winner_route else []
+        )
+        for route in contract.routes
+    }
+    route_outcomes = {
+        route.name: (
+            {
+                "status": "winner",
+                "selection": "candidate",
+                "reason": "unit candidate-vs-canonical paired MDE gate passed",
+                "config_ids": [configs[0].config_id, configs[1].config_id],
+                "candidate_gates": [{
+                    "schema": integration.PAIR_GATE_SCHEMA,
+                    "comparison": "candidate_vs_canonical_task_implementation",
+                    "route": winner_route,
+                    "candidate_id": config.config_id,
+                    "accepted": True,
+                    "protocol_hash": contract.protocol["hash"],
+                    "metric_id": contract.score_metric_id,
+                    "metric_inner": contract.score_metric_inner,
+                    "n_pairs": 8,
+                    "pair_ids": ["%064x" % index for index in range(8)],
+                    "ci95_lower_log_ratio": 0.05,
+                    "threshold_log_ratio": 0.02,
+                    "algorithm": {"name": integration.PAIR_GATE_ALGORITHM},
+                } for config in configs],
+            }
+            if route.name == winner_route else
+            {
+                "status": "unmeasured",
+                "selection": "canonical",
+                "reason": "route was outside this unit search target",
+                "candidate_gates": [],
+            }
+        )
         for route in contract.routes
     }
     release = {
@@ -85,6 +125,7 @@ def fake_release(contract, tmp_path):
         "selection_reason": "unit test",
         "route_selection": route_selection,
         "route_rankings": route_rankings,
+        "route_outcomes": route_outcomes,
         "search": {"search_id": "a" * 64, "compiled_candidates": 2},
         "artifacts": rows,
     }
@@ -109,8 +150,11 @@ def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(
     assert table["suite"]["atomic"] is True
     assert table["suite"]["complete"] is True
     assert len(table["routes"]) == 11
-    assert all([entry["rank"] for entry in row["entries"]] == [0, 1]
-               for row in table["routes"].values())
+    assert [entry["rank"] for entry in table["routes"][contract.routes[0].name]["entries"]] == [0, 1]
+    assert all(
+        row["entries"] == [] and row["selection"]["kind"] == "canonical"
+        for route, row in table["routes"].items() if route != contract.routes[0].name
+    )
     assert table["fallback"]["kind"] == "canonical"
     assert table["task"]["source_digest"] == contract.source_digest
     assert table["search"]["compiled_candidates"] == 2
@@ -134,12 +178,17 @@ def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(
     assert route_id == first_route.name
     assert selected["rank"] == 0
     assert selected["config_id"] == release["route_selection"][first_route.name]
+    fallback_route = contract.routes[1]
+    assert runtime._select(
+        loaded, (fallback_route.m, fallback_route.n, fallback_route.k),
+    ) is None
 
     verified = verify_materialization(contract, workspace=workspace,
                                         rebuild=False, independent=True)
     assert verified["ok"] is True
     assert verified["independent_workspace"] is True
-    assert verified["routes_verified"] == 22
+    assert verified["routes_verified"] == 2
+    assert verified["route_selections"][fallback_route.name]["status"] == "unmeasured"
     assert verified["task_digest"] == contract.task_digest
 
 
@@ -152,7 +201,9 @@ def test_materialized_source_tamper_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(integration.ctypes, "CDLL", lambda path: FakeLibrary())
     materialize_release(contract, release, workspace=workspace, registry_id="cfg-unit")
     table = RuntimeTableStore(workspace / "asm_tuner_runtime_table.json").load()
-    entry = table["routes"][table["suite"]["route_ids"][0]]["entries"][1]
+    entry = next(
+        row["entries"][1] for row in table["routes"].values() if row["entries"]
+    )
     (workspace / entry["source"]).write_text("tampered\n")
     with pytest.raises(IntegrationError, match="source hash mismatch"):
         verify_materialization(contract, workspace=workspace, independent=False)

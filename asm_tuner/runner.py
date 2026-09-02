@@ -76,6 +76,13 @@ def _slug(value: str) -> str:
 
 
 class SuccessiveHalvingRunner:
+    """Legacy unpaired runner retained only to fail closed.
+
+    The executable search path is :func:`asm_tuner.integration.search_release`,
+    which measures candidates and the canonical task implementation in the same
+    semantic slot.  This API accepts one arm at a time and therefore cannot
+    produce admissible candidate-vs-canonical evidence.
+    """
     def __init__(
         self,
         adapter: TaskAdapter,
@@ -120,6 +127,10 @@ class SuccessiveHalvingRunner:
         )
 
     def run(self, candidates: Sequence[Candidate], routes: Sequence[Route]) -> Mapping[str, Any]:
+        raise RuntimeError(
+            "legacy unpaired successive halving cannot publish runtime_table/v3; "
+            "use integration.search_release for same-slot canonical control and paired MDE gating"
+        )
         if not candidates:
             raise ValueError("no unique-ISA candidates to run")
         if not routes:
