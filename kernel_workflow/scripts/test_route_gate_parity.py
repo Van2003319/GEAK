@@ -14,12 +14,16 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
+import paired_verify as PV  # noqa: E402
 import route_gate as RG  # noqa: E402
+from test_paired_verify import task_receipt as paired_task_receipt  # noqa: E402
+from test_route_gate import measurement_binding  # noqa: E402
 
 LANE = SCRIPTS.parent / "kernel_lane.js"
 
@@ -58,6 +62,7 @@ def spec(gain: float = 0.03) -> dict:
         "expected_route_count": 2,
         "target_routes": ["target"],
         "paired_routes": routes,
+        "measurement": measurement_binding(["target", "guard"]),
     }
 
 
@@ -75,12 +80,25 @@ class ReceiptConsumerParityTest(unittest.TestCase):
             grab(r"^const ROUTE_GATE_BOOTSTRAP_SEED = .*?;$", "seed", src),
             grab(r"^const ROUTE_GATE_BOOTSTRAP_RESAMPLES = .*?;$", "resamples", src),
             grab(r"^const ROUTE_GATE_MIN_PAIRS = .*?;$", "minimum pairs", src),
+            grab(r"^const ROUTE_GATE_DEFAULT_PRACTICAL_MDE = .*?;$", "default MDE", src),
+            grab(r"^const ROUTE_GATE_DEFAULT_NON_REGRESSION_MARGIN = .*?;$", "default non-regression", src),
+            grab(r"^const ROUTE_GATE_DEFAULT_SUITE_MARGIN = .*?;$", "default suite margin", src),
+            grab(r"^const ROUTE_GATE_CATASTROPHIC_REGRESSION = .*?;$", "catastrophic fence", src),
+            grab(r"^const PAIRED_VERIFY_TASK_SCHEMA = .*?;$", "task schema", src),
+            grab(r"^const PAIRED_VERIFY_BINDING_SCHEMA = .*?;$", "binding schema", src),
+            grab(r"^const ROUTE_GATE_ALGORITHM_EFFECTIVE = .*?^};", "effective algorithm", src),
             f"const ROUTE_GATE_SCRIPT = {json.dumps(str(SCRIPTS / 'route_gate.py'))};",
         ])
         helpers = "\n".join([
             grab(r"^const sortedStrings = .*?;$", "sortedStrings", src),
             grab(r"^const sameStrings = .*?;$", "sameStrings", src),
             grab(r"^const finiteNumber = .*?;$", "finiteNumber", src),
+            grab(r"^const canonicalJSONString = .*?^};", "canonical JSON", src),
+            grab(r"^const sha256Ascii = .*?^};", "SHA-256", src),
+            grab(r"^const canonicalSha256 = .*?;$", "canonical digest", src),
+            grab(r"^const sameCanonical = .*?;$", "canonical equality", src),
+            grab(r"^const applicableRouteValues = .*?^};", "route values", src),
+            grab(r"^const expectedGateEffective = .*?^};", "effective parameters", src),
             grab(r"^const routeGateInvocationFailure = .*?\n\}\);", "invocation failure", src),
             grab(r"^const validateRouteGateReceipt = .*?\n\};", "receipt validator", src),
             grab(r"^const routeGateCommand = .*?^\};", "gate command", src),
@@ -97,6 +115,7 @@ class ReceiptConsumerParityTest(unittest.TestCase):
             }
           }
           function commandFor(spec) { return routeGateCommand(spec); }
+          function digestFor(value) { return canonicalSha256(value); }
         """)
 
     def consume(self, gate_spec: dict, receipt: dict) -> dict:
@@ -119,6 +138,16 @@ class ReceiptConsumerParityTest(unittest.TestCase):
         self.assertEqual(python_receipt["decision"], "refuse")
         self.assertEqual(self.consume(gate_spec, python_receipt), python_receipt)
 
+    def test_configured_effective_parameters_cross_boundary_exactly(self):
+        gate_spec = spec(0.07)
+        gate_spec["practical_mde"] = {"target": 0.03, "guard": 0.04}
+        gate_spec["non_regression_margin"] = {"target": 0.01, "guard": 0.03}
+        gate_spec["suite_non_inferiority_margin"] = 0.025
+        gate_spec["route_weights"] = {"target": 3.0, "guard": 1.0}
+        python_receipt = RG.decide(gate_spec)
+        self.assertEqual(self.consume(gate_spec, python_receipt), python_receipt)
+        self.assertEqual(python_receipt["route_weights"], {"guard": 0.25, "target": 0.75})
+
     def test_invalid_evidence_receipt_is_consumed_but_never_accepted(self):
         gate_spec = spec()
         gate_spec.pop("paired_routes")
@@ -126,6 +155,51 @@ class ReceiptConsumerParityTest(unittest.TestCase):
         out = self.consume(gate_spec, receipt)
         self.assertEqual(out["decision"], "invalid_evidence")
         self.assertFalse(out["accepted"])
+
+    def test_canonical_digest_matches_for_unicode_and_integral_floats(self):
+        value = {"路线": ["目标🔥", 1.0, {"δ": -0.0}]}
+        self.assertEqual(RG._input_digest(value), self.ctx.call("digestFor", value))
+
+    def test_python_and_v8_recompute_the_same_task_receipt_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = paired_task_receipt(Path(tmp))
+            unhashed = dict(task)
+            recorded = unhashed.pop("canonical_input_sha256")
+            self.assertEqual(recorded, PV.canonical_sha256(unhashed))
+            self.assertEqual(recorded, self.ctx.call("digestFor", unhashed))
+
+    def test_task_v2_receipt_crosses_adapter_python_gate_and_js(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "paired-task.json"
+            task_path.write_text(json.dumps(paired_task_receipt(root)), encoding="utf-8")
+            adapted = subprocess.run([
+                sys.executable, str(SCRIPTS / "paired_verify.py"), "adapt",
+                "--receipt", str(task_path), "--session-id", "lane-cross-component",
+                "--expected-route", "target", "--expected-route", "guard",
+                "--target-route", "target",
+            ], text=True, capture_output=True, check=False)
+            self.assertEqual(adapted.returncode, 0, adapted.stderr)
+            gate_spec = json.loads(adapted.stdout)
+            gated = subprocess.run([
+                sys.executable, str(SCRIPTS / "route_gate.py"), "-", "--json",
+            ], input=json.dumps(gate_spec), text=True, capture_output=True, check=False)
+            self.assertEqual(gated.returncode, 0, gated.stderr)
+            python_receipt = json.loads(gated.stdout)
+            self.assertTrue(python_receipt["accepted"], python_receipt["reason"])
+            self.assertEqual(self.consume(gate_spec, python_receipt), python_receipt)
+
+    def test_fake_input_hash_or_effective_parameters_fail_closed(self):
+        gate_spec = spec()
+        receipt = RG.decide(gate_spec)
+        receipt["input_sha256"] = "a" * 64
+        self.assert_invocation_error(gate_spec, receipt, "digest")
+        receipt = RG.decide(gate_spec)
+        receipt["effective_margins"]["practical_mde"]["target"] = 0.99
+        self.assert_invocation_error(gate_spec, receipt, "effective margins")
+        receipt = RG.decide(gate_spec)
+        receipt["route_weights"] = {"target": 0.9, "guard": 0.1}
+        self.assert_invocation_error(gate_spec, receipt, "effective route weights")
 
     def test_wrong_schema_or_algorithm_seed_fails_closed(self):
         gate_spec = spec()
@@ -175,8 +249,8 @@ class ReceiptConsumerParityTest(unittest.TestCase):
 
     def test_relay_schema_declares_every_receipt_field(self):
         schema = grab(r"^const ROUTE_GATE_OUTPUT_SCHEMA = .*?^};", "relay schema", self.source)
-        for field in ("session_id", "expected_route_count", "input_sha256", "algorithm",
-                      "effective_margins", "route_weights", "suite", "routes", "failures"):
+        for field in ("session_id", "expected_route_count", "input_sha256", "measurement",
+                      "algorithm", "effective_margins", "route_weights", "suite", "routes", "failures"):
             with self.subTest(field=field):
                 self.assertRegex(schema, rf"\b{field}:")
         self.assertIn("type: ['object', 'null']", schema)

@@ -168,3 +168,60 @@ def test_phase_log_tail_must_match_persisted_control_cursor(tmp_path: Path) -> N
     broken["phase_log"][-1]["phase"] = "phase1_source"
     with pytest.raises(WS.StateError, match="phase_log tail"):
         WS.persist_state(tmp_path / "state", tree, broken)
+
+
+def test_first_unbanked_checkpoint_is_immediately_resumable(tmp_path: Path) -> None:
+    tree = canonical(tmp_path / "canonical")
+    state_dir = tmp_path / "state"
+    receipt = WS.persist_state(state_dir, tree, payload(), refresh_best=False)
+    assert receipt["best_refreshed"] is True
+    assert receipt["refresh_best_requested"] is False
+    assert (state_dir / "current").is_symlink()
+    assert (state_dir / "best").is_dir()
+    assert (state_dir / "STATE.json").is_file()
+    verdict = WS.inspect_state(state_dir)
+    assert verdict["continuation_state"] == "resume"
+    assert verdict["status"] == "valid"
+
+
+def test_best_and_state_switch_as_one_generation(tmp_path: Path) -> None:
+    tree = canonical(tmp_path / "canonical")
+    state_dir = tmp_path / "state"
+    first = WS.persist_state(state_dir, tree, payload(), refresh_best=False)
+    first_target = (state_dir / "current").readlink()
+    (tree / "kernel.py").write_text("print('second generation')\n", encoding="utf-8")
+    second_payload = payload()
+    second_payload["last_round"] = 9
+    second = WS.persist_state(state_dir, tree, second_payload, refresh_best=False)
+    second_target = (state_dir / "current").readlink()
+    assert first["generation"] != second["generation"]
+    assert first_target != second_target
+    assert (state_dir / "best").resolve().parent == (state_dir / "STATE.json").resolve().parent
+    state = WS.load_state(state_dir / "STATE.json")
+    assert state["generation"] == second["generation"]
+    assert state["last_round"] == 9
+    assert WS.validate_state(state, state_dir / "best")["status"] == "valid"
+
+
+def test_inspect_has_explicit_first_resume_invalid_states(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    assert WS.inspect_state(state_dir)["continuation_state"] == "first"
+    state_dir.mkdir()
+    (state_dir / "STATE.json").write_text("{}", encoding="utf-8")
+    invalid = WS.inspect_state(state_dir)
+    assert invalid["continuation_state"] == "invalid"
+    assert "partial continuation" in invalid["invalidate_reason"]
+
+
+def test_inspect_cli_persists_the_explicit_tri_state_receipt(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    receipt = tmp_path / "inspect.json"
+    rc = WS.main(["inspect", "--state-dir", str(state_dir), "--receipt", str(receipt)])
+    assert rc == 0
+    assert json.loads(receipt.read_text(encoding="utf-8"))["continuation_state"] == "first"
+
+    tree = canonical(tmp_path / "canonical")
+    WS.persist_state(state_dir, tree, payload(), refresh_best=False)
+    rc = WS.main(["inspect", "--state-dir", str(state_dir), "--receipt", str(receipt)])
+    assert rc == 0
+    assert json.loads(receipt.read_text(encoding="utf-8"))["continuation_state"] == "resume"

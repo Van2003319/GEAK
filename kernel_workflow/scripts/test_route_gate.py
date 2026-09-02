@@ -16,6 +16,41 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import route_gate as rg
 
 
+def measurement_binding(routes):
+    protocol = {"schema": "geak.measurement-protocol/v2", "version": 2,
+                "name": "semantic_weight_rotating", "warmup_cycles": 1}
+    protocol["hash"] = rg._input_digest(protocol)
+    lifecycle = {"ring_size": 3, "observed_addresses": 12,
+                 "unique_addresses": 3, "addresses_rotated": True}
+    hashes = {kind: {"algorithm": "sha256", "sha256": ({"source": "1", "asm": "a", "binary": "b"}[kind] * 64),
+                     "files": 1, "present": True}
+              for kind in ("source", "asm", "binary")}
+    return {
+        "schema": "geak.paired-verify-binding/v2",
+        "producer_schema": "geak.paired-verify-task-receipt/v2",
+        "promotion_control": "incumbent", "oracle_role": "absolute_report_only",
+        "canonical_input_sha256": "c" * 64,
+        "protocol": protocol, "protocol_hash": protocol["hash"],
+        "metric_id": "single_call_latency",
+        "gpu_lock": {"mode": "external", "path": "/tmp/geak-test-gpu.lock"},
+        "priming": {"required": True, "all_samples_primed": True,
+                    "warmup_cycles": 1, "timer": "cuda_event"},
+        "invariants": {"all_arms_in_every_block": True,
+                       "same_slot_within_block": True,
+                       "same_outer_blocks_across_suite": True,
+                       "single_call_latency_inner_is_one": True,
+                       "semantic_slot_policy_bound": True},
+        "output_lifecycle": {"policy": "bounded-live-ring", "all_arms_rotated": True,
+                             "per_route": {route: {"candidate": dict(lifecycle),
+                                                   "incumbent": dict(lifecycle)}
+                                           for route in routes}},
+        "candidate_hashes": hashes, "incumbent_hashes": hashes,
+        "task_root": "/immutable/task", "task_hashes": hashes,
+        "incumbent_unchanged": True,
+        "route_measurement_sha256": {route: "d" * 64 for route in routes},
+    }
+
+
 def make_spec(gains, targets, *, n=12, session="session-1", arm_log_noise=None):
     """Build complete paired blocks; gain > 0 means lower candidate latency."""
     pair_ids = [f"pair-{i:02d}" for i in range(n)]
@@ -42,6 +77,7 @@ def make_spec(gains, targets, *, n=12, session="session-1", arm_log_noise=None):
         "expected_route_count": len(gains),
         "target_routes": list(targets),
         "paired_routes": blocks,
+        "measurement": measurement_binding(list(gains)),
     }
 
 
@@ -197,6 +233,27 @@ class StatisticalDecisionTest(unittest.TestCase):
 class FailClosedEvidenceTest(unittest.TestCase):
     def setUp(self):
         self.spec = make_spec({"target": 0.07, "guard": 0.0}, ["target"])
+
+    def test_measurement_protocol_lock_priming_and_lifecycle_are_bound(self):
+        mutations = (
+            ("protocol hash", lambda m: m["protocol"].__setitem__("seed", 9)),
+            ("promotion control", lambda m: m.__setitem__("promotion_control", "oracle")),
+            ("report-only", lambda m: m.__setitem__("oracle_role", "promotion")),
+            ("external GPU lock", lambda m: m["gpu_lock"].__setitem__("mode", "none")),
+            ("priming", lambda m: m["priming"].__setitem__("all_samples_primed", False)),
+            ("output lifecycle", lambda m: m["output_lifecycle"].__setitem__("all_arms_rotated", False)),
+            ("canonical input SHA", lambda m: m.__setitem__("canonical_input_sha256", "fake")),
+        )
+        for token, mutate in mutations:
+            with self.subTest(token=token):
+                spec = copy.deepcopy(self.spec)
+                mutate(spec["measurement"])
+                self.assertIn(token, invalid(spec)["reason"])
+
+    def test_receipt_losslessly_echoes_measurement_binding(self):
+        receipt = rg.decide(self.spec)
+        self.assertEqual(receipt["measurement"], self.spec["measurement"])
+        self.assertEqual(receipt["input_sha256"], rg._input_digest(self.spec))
 
     def test_missing_top_level_session_is_invalid(self):
         self.spec.pop("session_id")

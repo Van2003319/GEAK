@@ -297,6 +297,20 @@ class OracleAdapterContractTest(unittest.TestCase):
                           "candidate_timing", "timer_unprimed"):
                 self.assertIn(f'"{field}"', runner + (HERE.parent / "harness_lib.py").read_text())
 
+    def test_task_paired_verify_uses_incumbent_for_promotion_and_oracle_for_report_only(self):
+        for task in ("dense_bf16_gemm_fused", "dense_fp8_gemm_rowwise"):
+            runner = (REPO / "examples/tasks" / task / "scripts/task_runner.py").read_text()
+            self.assertIn('"paired-verify"', runner)
+            self.assertIn('"candidate": lambda slot', runner)
+            self.assertIn('"incumbent": lambda slot', runner)
+            self.assertIn('"promotion_control": "incumbent"', runner)
+            self.assertIn('"oracle_role": "absolute_report_only"', runner)
+            self.assertIn('"geak.paired-measurement-suite/v2"', runner)
+            self.assertIn("common_slot_count = max", runner)
+            self.assertIn("_make_measurement_slots(case, protocol, common_slot_count)", runner)
+            self.assertIn('if trusted:', runner)
+            self.assertNotIn("oracle routes unavailable for absolute report", runner)
+
     def test_checked_in_manifests_fail_closed_for_v2_until_rebaked(self):
         protocol = hl.measurement_protocol(
             "semantic_weight_rotating", seed=73, latency_cycles=3,

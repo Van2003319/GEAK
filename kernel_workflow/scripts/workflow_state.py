@@ -217,21 +217,56 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
     return ignored
 
 
-def sync_best(canonical: Path, state_dir: Path) -> Path:
-    """Atomically publish a symlink-preserving, build-free continuation tree."""
-    state_dir.mkdir(parents=True, exist_ok=True)
-    tmp = state_dir / f"best.tmp.{os.getpid()}.{uuid.uuid4().hex}"
-    best = state_dir / "best"
-    backup = state_dir / f"best.old.{time.time_ns()}.{os.getpid()}"
+def _fsync_dir(path: Path) -> None:
     try:
-        shutil.copytree(canonical, tmp, symlinks=True, ignore=_copy_ignore)
-        if best.exists() or best.is_symlink():
-            os.replace(best, backup)
-        os.replace(tmp, best)
-    except Exception:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise
-    return best
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _atomic_symlink(path: Path, target: str) -> None:
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        os.symlink(target, tmp)
+        os.replace(tmp, path)
+        _fsync_dir(path.parent)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _install_alias(state_root: Path, name: str, target: str) -> None:
+    """Install a stable alias without deleting a pre-generation legacy snapshot."""
+    path = state_root / name
+    if path.is_symlink() and os.readlink(path) == target:
+        return
+    if path.exists() or path.is_symlink():
+        backup = state_root / f"legacy.{name.replace('/', '_')}.{time.time_ns()}.{os.getpid()}"
+        os.replace(path, backup)
+    _atomic_symlink(path, target)
+
+
+def _generation_state(
+    payload: Mapping[str, Any], hashes: Mapping[str, object], generation: str,
+) -> dict[str, Any]:
+    state = dict(payload)
+    state.update({
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "generation": generation,
+        "canonical_hashes": hashes,
+        "canonical_source_hash": hashes["source"]["sha256"],
+        "canonical_asm_hash": hashes["asm"]["sha256"],
+        "canonical_binary_hash": hashes["binary"]["sha256"],
+        "updated_unix_ns": time.time_ns(),
+    })
+    return state
 
 
 def persist_state(
@@ -241,39 +276,105 @@ def persist_state(
     *,
     refresh_best: bool = False,
 ) -> dict[str, Any]:
+    """Publish one immutable best+state generation, then atomically switch ``current``.
+
+    Every barrier snapshots the canonical tree, including the first barrier and a round that did
+    not bank.  Consequently ``STATE.json`` can never describe bytes from a different ``best``:
+    the two live in one generation and the only commit point is one symlink replacement.
+    ``refresh_best`` remains in the CLI for compatibility and is reported as the caller's intent;
+    it no longer weakens an unbanked checkpoint into state-without-best.
+    """
     _validate_payload(payload)
     state_root = Path(state_dir)
     canonical_root = Path(canonical)
+    state_root.mkdir(parents=True, exist_ok=True)
+    generations = state_root / "generations"
+    generations.mkdir(exist_ok=True)
+    generation = f"g{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex}"
+    tmp = generations / f".{generation}.tmp"
+    final = generations / generation
     hashes = canonical_hashes(canonical_root)
-    if refresh_best:
-        best = sync_best(canonical_root, state_root)
+    try:
+        tmp.mkdir()
+        best = tmp / "best"
+        shutil.copytree(canonical_root, best, symlinks=True, ignore=_copy_ignore)
         copied = canonical_hashes(best)
         if copied != hashes:
             raise StateError(
-                "best/ copy hash mismatch; refusing to publish STATE.json: "
+                "generation best copy hash mismatch; refusing to switch current: "
                 + json.dumps({"canonical": hashes, "best": copied}, sort_keys=True)
             )
-    state = dict(payload)
-    state.update({
-        "schema": SCHEMA,
-        "schema_version": SCHEMA_VERSION,
-        "canonical_hashes": hashes,
-        # Explicit aliases keep the three identities visible to simple state readers while the
-        # nested object carries counts/algorithm metadata for validation.
-        "canonical_source_hash": hashes["source"]["sha256"],
-        "canonical_asm_hash": hashes["asm"]["sha256"],
-        "canonical_binary_hash": hashes["binary"]["sha256"],
-        "updated_unix_ns": time.time_ns(),
-    })
-    state_file = state_root / "STATE.json"
-    _atomic_json(state_file, state)
+        state = _generation_state(payload, hashes, generation)
+        _atomic_json(tmp / "STATE.json", state)
+        _fsync_dir(tmp)
+        os.replace(tmp, final)
+        _fsync_dir(generations)
+        _atomic_symlink(state_root / "current", f"generations/{generation}")
+        # Stable compatibility paths resolve through the single atomic pointer.  They are aliases,
+        # never independently replaced payloads.
+        _install_alias(state_root, "best", "current/best")
+        _install_alias(state_root, "STATE.json", "current/STATE.json")
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return {
         "ok": True,
         "schema": SCHEMA,
-        "state_file": str(state_file),
-        "best_refreshed": refresh_best,
+        "state_file": str(state_root / "STATE.json"),
+        "canonical": str(state_root / "best"),
+        "generation": generation,
+        "current": str(state_root / "current"),
+        "best_refreshed": True,
+        "refresh_best_requested": bool(refresh_best),
         "canonical_hashes": hashes,
     }
+
+
+def inspect_state(state_dir: os.PathLike[str] | str) -> dict[str, Any]:
+    """Return exactly one continuation state: ``first``, ``resume``, or ``invalid``."""
+    root = Path(state_dir)
+    current = root / "current"
+    if current.exists() or current.is_symlink():
+        try:
+            generation = current.resolve(strict=True)
+        except OSError as exc:
+            return {"ok": False, "continuation_state": "invalid", "status": "invalidated",
+                    "invalidate_reason": f"current pointer is unreadable: {exc}",
+                    "state_dir": str(root.resolve())}
+        state_file, canonical = generation / "STATE.json", generation / "best"
+        source = "generation"
+    else:
+        state_file, canonical = root / "STATE.json", root / "best"
+        have_state = state_file.exists() or state_file.is_symlink()
+        have_best = canonical.exists() or canonical.is_symlink()
+        if not have_state and not have_best:
+            return {"ok": True, "continuation_state": "first", "status": "first",
+                    "invalidate_reason": "", "state_dir": str(root.resolve())}
+        if have_state != have_best:
+            return {"ok": False, "continuation_state": "invalid", "status": "invalidated",
+                    "invalidate_reason": "partial continuation: STATE.json and best must both exist",
+                    "state_dir": str(root.resolve())}
+        source = "legacy"
+    if not state_file.is_file() or not canonical.is_dir():
+        return {"ok": False, "continuation_state": "invalid", "status": "invalidated",
+                "invalidate_reason": "continuation generation lacks STATE.json or best",
+                "state_dir": str(root.resolve()), "source": source}
+    try:
+        state = load_state(state_file)
+        verdict = validate_state(state, canonical)
+    except StateError as exc:
+        verdict = {"valid": False, "status": "invalidated",
+                   "invalidate_reason": str(exc), "mismatches": []}
+    result = {
+        **verdict,
+        "ok": bool(verdict.get("valid")),
+        "continuation_state": "resume" if verdict.get("valid") else "invalid",
+        "state_dir": str(root.resolve()),
+        "state_file": str(state_file.resolve()),
+        "canonical": str(canonical.resolve()),
+        "source": source,
+    }
+    return result
 
 
 def load_state(path: os.PathLike[str] | str) -> dict[str, Any]:
@@ -351,7 +452,11 @@ def _parser() -> argparse.ArgumentParser:
     hash_cmd = sub.add_parser("hash", help="hash a canonical tree")
     hash_cmd.add_argument("--canonical", required=True)
 
-    persist = sub.add_parser("persist", help="atomically publish STATE.json")
+    inspect = sub.add_parser("inspect", help="classify continuation as first/resume/invalid")
+    inspect.add_argument("--state-dir", required=True)
+    inspect.add_argument("--receipt", default="")
+
+    persist = sub.add_parser("persist", help="atomically publish one best+state generation")
     persist.add_argument("--state-dir", required=True)
     persist.add_argument("--canonical", required=True)
     persist.add_argument("--payload-file", required=True)
@@ -366,7 +471,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    receipt = Path(args.receipt) if args.command == "validate" and args.receipt else None
+    receipt = (Path(args.receipt)
+               if args.command in ("validate", "inspect") and args.receipt else None)
     try:
         if args.command == "hash":
             result: dict[str, Any] = {"ok": True, "schema": SCHEMA,
@@ -377,6 +483,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = persist_state(args.state_dir, args.canonical, payload,
                                    refresh_best=args.refresh_best)
             exit_code = 0
+        elif args.command == "inspect":
+            result = inspect_state(args.state_dir)
+            exit_code = 0 if result["continuation_state"] in ("first", "resume") else 2
         else:
             state = load_state(args.state_file)
             result = validate_state(state, args.canonical)

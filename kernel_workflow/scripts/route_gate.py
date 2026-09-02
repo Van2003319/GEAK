@@ -3,13 +3,15 @@
 
 The live workflow invokes this module and consumes its versioned receipt. No
 JavaScript implementation of the statistical rule exists. Evidence is one raw,
-paired block per route: candidate and control observations carry the same
-session id and pair ids, and the complete measured route set must match the
-suite manifest exactly.
+paired block per route: candidate and untouched-incumbent observations carry
+the lane-generated session and adapter-derived pair ids, and the complete
+measured route set must match the suite manifest exactly. A mandatory
+measurement binding pins the protocol hash, GPU lock, priming, slot/raw and
+output-lifecycle invariants, immutable roots, and source task canonical SHA.
 
 The estimand is a 20%-trimmed mean of ``log(control_ms / candidate_ms)``. A
 fixed-seed paired percentile bootstrap supplies one-sided 95% lower confidence
-bounds. Protocol v1 pins 4,096 resamples, SplitMix64 stream derivation, R-type-7
+bounds. The pinned algorithm pins 4,096 resamples, SplitMix64 stream derivation, R-type-7
 5th-percentile interpolation, and seed 20260902; every parameter is repeated in
 the v2 receipt. Acceptance is an intersection-union decision:
 
@@ -34,6 +36,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import statistics
 import sys
 from dataclasses import dataclass
@@ -53,6 +56,7 @@ DEFAULT_PRACTICAL_MDE = 0.02
 DEFAULT_NON_REGRESSION_MARGIN = 0.02
 DEFAULT_SUITE_NON_INFERIORITY_MARGIN = 0.01
 CATASTROPHIC_REGRESSION = 0.10
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RouteGateError(ValueError):
@@ -104,10 +108,24 @@ def _algorithm_receipt() -> dict[str, Any]:
     }
 
 
+def _json_number_normalize(value: object) -> object:
+    # JSON has one numeric type; V8 reserializes 1.0 as 1. Normalize before hashing so the
+    # Python producer and the independent JavaScript consumer have one canonical digest.
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    if isinstance(value, list):
+        return [_json_number_normalize(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_number_normalize(item) for item in value]
+    if isinstance(value, Mapping):
+        return {str(key): _json_number_normalize(item) for key, item in value.items()}
+    return value
+
+
 def _input_digest(spec: object) -> str | None:
     try:
-        raw = json.dumps(spec, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=False, allow_nan=False).encode("utf-8")
+        raw = json.dumps(_json_number_normalize(spec), sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=True, allow_nan=False).encode("ascii")
     except (TypeError, ValueError):
         return None
     return hashlib.sha256(raw).hexdigest()
@@ -138,6 +156,9 @@ def invalid_receipt(reason: str, spec: object | None = None) -> dict[str, Any]:
         "target_routes": targets,
         "pair_ids": [],
         "input_sha256": _input_digest(spec),
+        "measurement": (spec.get("measurement")
+                        if isinstance(spec, Mapping) and isinstance(spec.get("measurement"), Mapping)
+                        else None),
         "algorithm": _algorithm_receipt(),
         "effective_margins": None,
         "route_weights": None,
@@ -310,6 +331,105 @@ def _weights(raw: object, routes: Sequence[str]) -> dict[str, float]:
     return {route: vals[route] / total for route in routes}
 
 
+def _hash_record(value: object, label: str) -> None:
+    if not isinstance(value, Mapping):
+        raise RouteGateError(f"{label} is missing")
+    for kind in ("source", "asm", "binary"):
+        row = value.get(kind)
+        if (not isinstance(row, Mapping) or row.get("algorithm") != "sha256"
+                or not isinstance(row.get("sha256"), str)
+                or SHA256_RE.fullmatch(row["sha256"]) is None
+                or isinstance(row.get("files"), bool) or not isinstance(row.get("files"), int)
+                or row["files"] < 0 or not isinstance(row.get("present"), bool)
+                or row["present"] != (row["files"] > 0)):
+            raise RouteGateError(f"{label}.{kind} is not a canonical hash record")
+
+
+def _lifecycle_row(value: object, label: str) -> None:
+    if not isinstance(value, Mapping):
+        raise RouteGateError(f"{label} is missing")
+    ring, observed, unique = (value.get("ring_size"), value.get("observed_addresses"),
+                              value.get("unique_addresses"))
+    if (isinstance(ring, bool) or not isinstance(ring, int) or ring < 2
+            or isinstance(observed, bool) or not isinstance(observed, int) or observed < 2
+            or isinstance(unique, bool) or not isinstance(unique, int) or unique < 2
+            or unique > observed or value.get("addresses_rotated") is not True):
+        raise RouteGateError(f"{label} does not prove a rotating live output ring")
+
+
+def _measurement_binding(spec: Mapping[str, object], routes: Sequence[str]) -> dict[str, Any]:
+    raw = spec.get("measurement")
+    if not isinstance(raw, Mapping) or raw.get("schema") != "geak.paired-verify-binding/v2":
+        raise RouteGateError("measurement binding is missing or not paired-verify-binding/v2")
+    if raw.get("producer_schema") != "geak.paired-verify-task-receipt/v2":
+        raise RouteGateError("measurement producer schema is not paired-verify-task-receipt/v2")
+    if raw.get("promotion_control") != "incumbent":
+        raise RouteGateError("measurement promotion control is not the untouched incumbent")
+    if raw.get("oracle_role") != "absolute_report_only":
+        raise RouteGateError("measurement oracle is not report-only")
+    canonical_input = raw.get("canonical_input_sha256")
+    if not isinstance(canonical_input, str) or SHA256_RE.fullmatch(canonical_input) is None:
+        raise RouteGateError("measurement canonical input SHA-256 is missing")
+    protocol = raw.get("protocol")
+    if not isinstance(protocol, Mapping) or protocol.get("schema") != "geak.measurement-protocol/v2":
+        raise RouteGateError("measurement protocol/v2 object is missing")
+    protocol_payload = dict(protocol)
+    protocol_digest = protocol_payload.pop("hash", None)
+    recomputed = _input_digest(protocol_payload)
+    if (not isinstance(protocol_digest, str) or protocol_digest != recomputed
+            or raw.get("protocol_hash") != protocol_digest):
+        raise RouteGateError("measurement protocol hash does not match canonical contents")
+    if raw.get("metric_id") != "single_call_latency":
+        raise RouteGateError("promotion measurement must be single_call_latency")
+    lock = raw.get("gpu_lock")
+    if (not isinstance(lock, Mapping) or lock.get("mode") != "external"
+            or not isinstance(lock.get("path"), str) or not lock.get("path")):
+        raise RouteGateError("measurement does not bind one external GPU lock")
+    priming = raw.get("priming")
+    warmups = protocol.get("warmup_cycles")
+    if (not isinstance(priming, Mapping) or priming.get("required") is not True
+            or priming.get("all_samples_primed") is not True
+            or priming.get("timer") != "cuda_event"
+            or priming.get("warmup_cycles") != warmups
+            or isinstance(warmups, bool) or not isinstance(warmups, int) or warmups < 0):
+        raise RouteGateError("measurement priming/timer binding is incomplete")
+    invariants = raw.get("invariants")
+    required = (
+        "all_arms_in_every_block", "same_slot_within_block",
+        "same_outer_blocks_across_suite", "single_call_latency_inner_is_one",
+        "semantic_slot_policy_bound",
+    )
+    if not isinstance(invariants, Mapping) or any(invariants.get(key) is not True for key in required):
+        raise RouteGateError("measurement slot/raw invariants are incomplete")
+    lifecycle = raw.get("output_lifecycle")
+    per_route = lifecycle.get("per_route") if isinstance(lifecycle, Mapping) else None
+    if (not isinstance(lifecycle, Mapping) or lifecycle.get("policy") != "bounded-live-ring"
+            or lifecycle.get("all_arms_rotated") is not True or not isinstance(per_route, Mapping)
+            or set(per_route) != set(routes)):
+        raise RouteGateError("measurement output lifecycle does not cover the complete suite")
+    for route in routes:
+        arms = per_route.get(route)
+        if not isinstance(arms, Mapping):
+            raise RouteGateError(f"measurement output lifecycle is missing route {route!r}")
+        _lifecycle_row(arms.get("candidate"), f"{route}.candidate output lifecycle")
+        _lifecycle_row(arms.get("incumbent"), f"{route}.incumbent output lifecycle")
+    receipt_hashes = raw.get("route_measurement_sha256")
+    if (not isinstance(receipt_hashes, Mapping) or set(receipt_hashes) != set(routes)
+            or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None
+                   for value in receipt_hashes.values())):
+        raise RouteGateError("measurement receipt SHA-256 map does not cover the complete suite")
+    if raw.get("incumbent_unchanged") is not True:
+        raise RouteGateError("measurement does not prove the incumbent remained unmodified")
+    _hash_record(raw.get("candidate_hashes"), "measurement.candidate_hashes")
+    _hash_record(raw.get("incumbent_hashes"), "measurement.incumbent_hashes")
+    _hash_record(raw.get("task_hashes"), "measurement.task_hashes")
+    if not isinstance(raw.get("task_root"), str) or not raw["task_root"].startswith("/"):
+        raise RouteGateError("measurement immutable task_root is missing")
+    # Canonicalise through JSON so the receipt echoes exactly serialisable evidence and no
+    # Mapping subclass can mutate under the decision.
+    return json.loads(json.dumps(raw, sort_keys=True, allow_nan=False))
+
+
 def _trimmed_mean(values: Sequence[float]) -> float:
     ordered = sorted(values)
     cut = int(len(ordered) * TRIM_FRACTION)
@@ -419,6 +539,7 @@ def decide(spec: Mapping[str, object]) -> dict[str, Any]:
     non_target_routes = sorted(set(expected_routes) - set(target_routes))
 
     paired, pair_ids = _paired_routes(spec, expected_routes, session_id)
+    measurement = _measurement_binding(spec, expected_routes)
     route_by_name = {route.route: route for route in paired}
     practical_mde = _route_values(spec.get("practical_mde"), target_routes, expected_routes,
                                   DEFAULT_PRACTICAL_MDE, "practical_mde")
@@ -506,6 +627,7 @@ def decide(spec: Mapping[str, object]) -> dict[str, Any]:
         "target_routes": target_routes,
         "pair_ids": list(pair_ids),
         "input_sha256": _input_digest(spec),
+        "measurement": measurement,
         "algorithm": _algorithm_receipt(),
         "effective_margins": {
             "practical_mde": practical_mde,

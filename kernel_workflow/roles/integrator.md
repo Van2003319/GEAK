@@ -22,7 +22,7 @@ Every combined or hand-written result is a new candidate and must be independent
    ```bash
    # NO `rm` (prompts + blocks autonomous runs). Unique private ws each time; tar-copy EXCLUDING build
    # artifacts (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited.
-   WS="$INTEGRATE_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
+   WS="$INTEGRATE_DIR/candidate"; mkdir -p "$WS"
    ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
        --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
        --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
@@ -87,20 +87,21 @@ a number produced under contention is not.
    `weighted = Σ weight_i / Σ (weight_i / speedup_i)`; that is the number compared to
    `BEST_INDIVIDUAL` (which is already the primary metric).**
 
-5b. **Measure a fresh same-session paired control for the final combined candidate.** A merge is
-   a new program; no parent's timing receipt transfers. Before timing, freeze the union of the
-   combined patches' predeclared `target_routes` (never choose targets from observed wins), create a
-   unique `measurement_session_id`, and collect at least eight interleaved candidate/control pairs for
-   every exact route in `BASELINE_PER_CASE`. Build the unpatched `CANONICAL` independently as the
-   control and restore its `.s` when present. Use the same pair-id set on every route and return the
-   raw values as `best.paired_per_case` with nested candidate/control
-   `{session_id,pair_ids,samples_ms}` blocks. Also return `best.measurement_session_id` and
-   `best.target_routes`. The orchestrator independently recomputes that target union from
-   `best.patches`; an unknown/duplicate parent or a mismatched/empty target echo fails closed.
+5b. **Prepare the deterministic paired roots.** Keep the final combined tree at exactly
+   `$INTEGRATE_DIR/candidate`. Make an independent untouched copy of `CANONICAL` at exactly
+   `$INTEGRATE_DIR/incumbent`, restoring canonical assembly when present. Do not choose a session or
+   pair ids and do not inherit a parent timing receipt. After this return the lane runs the same
+   checked-in task-v2 producer and adapter used for individual candidates, under one GPU lock over
+   every full-suite route and outer block. The planner-owned target union is supplied by the lane.
+   Oracle arms are report-only; candidate is promoted only against the untouched incumbent.
 
-   The Python gate requires exact full-suite coverage and refuses missing raw pairs, session/control,
-   too few pairs or an empty target list. `best.per_case`, medians and `BEST_INDIVIDUAL` are summaries;
-   none can substitute for this evidence and there is no cross-session fallback.
+   ```bash
+   CONTROL_WS="$INTEGRATE_DIR/incumbent"; mkdir -p "$CONTROL_WS"
+   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build \
+       --exclude='*/build' --exclude=./__pycache__ --exclude='*/__pycache__' \
+       --exclude=./.torch_ext --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) \
+     | ( cd "$CONTROL_WS" && tar -xf - )
+   ```
 
 6. **Two receipts travel with the result, and without them it is discarded (findings (69) and (87)).**
    A merge is a new candidate — it is where a link line gets rewritten and where an edit lands in one
@@ -131,15 +132,7 @@ cd "$WS" && git add -A && git diff --cached --binary > "$INTEGRATE_DIR/integrate
   "best": {"patches": ["..."], "geomean": 0.0, "arithmetic": 0.0, "weighted": 0.0,
             "patch_file": "<INTEGRATE_DIR>/integrated_patch.diff",
             "per_case": [{"name":"...","baseline_ms":0.0,"optimized_ms":0.0,"speedup":0.0,"weight":0.0}],
-            "measurement_session_id": "integrate-r3-unique",
-            "target_routes": ["predeclared route(s); never empty"],
-            "paired_per_case": [{"route":"...",
-              "candidate":{"session_id":"integrate-r3-unique",
-                "pair_ids":["pair-00","pair-01","pair-02","pair-03","pair-04","pair-05","pair-06","pair-07"],
-                "samples_ms":[0.97,0.97,0.97,0.97,0.97,0.97,0.97,0.97]},
-              "control":{"session_id":"integrate-r3-unique",
-                "pair_ids":["pair-00","pair-01","pair-02","pair-03","pair-04","pair-05","pair-06","pair-07"],
-                "samples_ms":[1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0]}}]},
+            "target_routes": ["predeclared route(s); never empty"]},
   "improved_over_best_individual": true,
   "policy_pass": true,
   "policy_receipts": {"prebuild": "path/to/prebuild.json", "postbuild": "path/to/postbuild.json"},

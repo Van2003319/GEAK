@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,7 +18,7 @@ def main() -> None:
     protocol = harness.measurement_protocol(
         "semantic_weight_rotating",
         seed=7,
-        latency_cycles=3,
+        latency_cycles=4,
         throughput_cycles=3,
         throughput_inner=2,
         warmup_cycles=1,
@@ -35,15 +36,31 @@ def main() -> None:
                       "args": (a, b)})
     arms = {
         "candidate": lambda slot: torch.add(*slot["args"]),
-        "control": lambda slot: torch.add(*slot["args"]),
-        "backend": lambda slot: torch.add(*slot["args"]),
+        "incumbent": lambda slot: torch.add(*slot["args"]),
+        "oracle:torch_add": lambda slot: torch.add(*slot["args"]),
     }
     receipt = harness.measure_paired_arms(
         arms, slots, protocol=protocol, metric="single_call_latency")
     assert all(receipt["invariants"].values()), receipt["invariants"]
     assert all(row["addresses_rotated"] for row in receipt["output_lifecycle"].values())
     assert receipt["gpu_lock"]["mode"] == "external", receipt["gpu_lock"]
-    assert len(receipt["samples"]) == 18
+    assert len(receipt["blocks"]) == 8
+    assert len(receipt["samples"]) == 24
+    expected = json.loads(os.environ.get("GEAK_PAIRED_EXPECTED_ROUTES", '["smoke_512"]'))
+    if expected != ["smoke_512"]:
+        raise AssertionError(f"smoke producer expected one smoke_512 route, got {expected}")
+    raw = {
+        "schema": "geak.paired-measurement-suite/v2",
+        "expected_routes": expected,
+        "protocol_hash": receipt["protocol_hash"],
+        "promotion_control": "incumbent",
+        "oracle_role": "absolute_report_only",
+        "routes": [{"route": "smoke_512", "measurement_receipt": receipt,
+                    "absolute_report": {"oracle_arm": "oracle:torch_add"}}],
+    }
+    output = os.environ.get("GEAK_PAIRED_RAW_RECEIPT")
+    if output:
+        harness.atomic_write_json(output, raw)
     print(json.dumps({
         "status": "ok",
         "protocol_hash": receipt["protocol_hash"],

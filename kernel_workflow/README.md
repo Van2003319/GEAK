@@ -53,49 +53,75 @@ pinned: [docs/compiler_grounded_evidence_ladder.md](docs/compiler_grounded_evide
 
 Each round's highest-ranked candidate that passes the commit gate is committed into the canonical
 workspace, so the next round builds on it. Ranking/reporting still carries absolute speedup vs the
-true baseline, but commitment is decided only by `scripts/route_gate.py` from complete same-session
-candidate/control raw pairs: one-sided 95% target MDE, non-target non-regression, suite
-non-inferiority, and the catastrophic fence. Missing raw pairs/session/control/targets refuses; there
-is no fallback to an earlier session's table or to the summary geomean.
+oracle, but oracle latency is report-only. Commitment is decided only against an untouched incumbent
+measured in the same protocol-v2 outer blocks and one complete-suite GPU-lock scope.
 
-## Commit gate protocol
+## Paired producer and commit gate
 
-The wire contracts are `geak.route-gate-input/v2` and `geak.route-gate-receipt/v2`. The benchmark's
-`num_test_cases` plus its exact unique `baseline_per_case` route names form the suite manifest. Every
-candidate must supply one non-empty planner-owned target set, one non-empty measurement session id,
-and the same set of at least eight explicit pair ids on every route. Each pair carries one finite,
-positive raw candidate observation and one raw control observation from that session. Summary
-medians, baseline repeats and old `route_bands` are never evidence.
+The production chain is:
 
-`scripts/route_gate.py` is the only decision implementation. For every route it estimates the
-20%-trimmed mean of `log(control_ms/candidate_ms)`. It uses 4,096 paired percentile-bootstrap
-resamples with fixed seed `20260902`, SplitMix64 streams derived from
-`SHA256("20260902:<route-or-suite-label>")`, and the linearly interpolated 5th percentile (R type 7)
-as the one-sided 95% lower bound. Suite resampling keeps whole pair blocks together; routes are equal
-weighted unless the workload-aligned baseline supplies positive route weights.
+1. The benchmark declares an immutable absolute `paired_verify_argv`. The task adapter reads
+   `GEAK_PAIRED_CANDIDATE_ROOT`, `GEAK_PAIRED_INCUMBENT_ROOT`,
+   `GEAK_PAIRED_EXPECTED_ROUTES`, and `GEAK_PAIRED_RAW_RECEIPT`, and writes
+   `geak.paired-measurement-suite/v2`.
+2. The lane runs `scripts/paired_verify.py produce` under one `gpu_lock.sh` +
+   `gpu_fence_run.sh` scope over the entire command. The producer hashes candidate, incumbent, and
+   immutable task roots before/after, rejects incumbent or harness mutation, and validates every
+   `geak.measurement-receipt/v2` raw block: same slot, candidate+incumbent in every block, device
+   event timing, dispatch priming, live output ring, one protocol hash, one lock, and exact full-suite
+   coverage. Optional oracle arms stay only in the sealed task receipt's absolute report.
+3. The lane—not the model—creates a unique session from eval-dir/round/candidate/ordinal and supplies
+   the planner-owned non-empty targets. `paired_verify.py adapt` derives pair ids from outer block
+   ordinals and directly emits `geak.route-gate-input/v2`.
+4. `scripts/route_gate.py` is the sole statistical decision and emits
+   `geak.route-gate-receipt/v2`.
 
-Acceptance is an intersection: every target lower bound must be strictly greater than
-`-log(1-MDE)`; every non-target lower bound must be strictly greater than
-`-log(1+non_regression_margin)`; the suite lower bound must be strictly greater than
-`-log(1+suite_non_inferiority_margin)`; and no route's trimmed-mean point estimate may be more than
-10% slower. Defaults are 2% target MDE, 2% non-target slowdown margin, and 1% suite slowdown margin.
-A margin map may name exactly the currently applicable routes or the complete suite; the complete
-suite form is reusable when different planned candidates target different routes.
+The harness-facing command shape is:
 
-The receipt records the schemas, decision/reason, session and manifest, targets and pair ids, a
-canonical input SHA-256, the complete algorithm/seed parameters, effective margins, normalized
-suite route weights, the suite endpoint, every route endpoint, failures and lossless per-stream seed
-hex strings. Workflow JS only relays the
-exact JSON through its supported command-agent bridge and validates that receipt; it contains no
-confidence-interval or catastrophic-rule twin. A missing bridge result, stale schema/session/targets,
-partial receipt, changed pair ids or malformed endpoint is an invocation error and refuses.
+```bash
+bash kernel_workflow/scripts/gpu_lock.sh <gpu-pool> \
+  bash kernel_workflow/scripts/gpu_fence_run.sh \
+  python3 kernel_workflow/scripts/paired_verify.py produce \
+    --candidate-root <verify/candidate> --incumbent-root <verify/incumbent> \
+    --task-root <immutable-task-root> \
+    --expected-route <route> ... --output <paired_task_receipt.json> -- \
+    python3 <immutable-task-root>/scripts/task_runner.py paired-verify
 
-Migration is intentionally fail-closed: old verifier artifacts without `measurement_session_id` and
-full `paired_per_case`, old plans with empty/missing targets, and warm-start records without preserved
-target provenance cannot bank. Existing `route_bands` launch arguments remain accepted but ignored.
-Because workflow JS cannot spawn processes, each gated candidate also incurs one low-effort command-agent
-relay and requires that agent's shell to have `python3` plus the configured `workflow_dir`; relay or
-schema failure is a refusal, not a legacy fallback.
+python3 kernel_workflow/scripts/paired_verify.py adapt \
+  --receipt <paired_task_receipt.json> --session-id <lane-generated> \
+  --expected-route <route> ... --target-route <planner-route> ...
+```
+
+The benchmark's `num_test_cases` and exact unique `baseline_per_case` names are the suite manifest.
+Every route uses the same set of at least eight derived outer-block ids. Summary medians, baseline
+repeats, old `route_bands`, separately timed candidate/control runs, and verifier-authored ids are
+never evidence.
+
+For every route, the Python gate estimates the 20%-trimmed mean of
+`log(incumbent_ms/candidate_ms)`. It uses 4,096 paired percentile-bootstrap resamples with fixed seed
+`20260902`, SplitMix64 streams derived from `SHA256("20260902:<route-or-suite-label>")`, and the R
+Type-7 fifth percentile as a one-sided 95% lower bound. Suite resampling keeps whole pair blocks
+together. Acceptance intersects target MDE, non-target non-regression, suite non-inferiority, and the
+10% catastrophic point-estimate fence. Defaults are 2%, 2%, and 1% respectively.
+
+The gate input and receipt both carry the task canonical SHA, measurement protocol object/hash, GPU
+lock, priming, slot/raw invariants, output lifecycle, immutable root hashes, effective margins, route
+weights, algorithm parameters, suite endpoint, and all route endpoints. Python recomputes protocol
+hashes. Workflow JS independently canonicalizes and SHA-256 hashes the exact submitted gate input,
+deep-compares the echoed measurement binding, algorithm, effective margins and normalized weights,
+and rejects a plausible-looking fake hash.
+
+Migration is fail-closed. A task without a checked-in v2 paired adapter, a partial suite, old
+verifier-authored pair arrays, an empty/missing planner target, stale protocol/hash, or any
+producer/relay failure cannot bank. There is no oracle or legacy-summary fallback.
+
+## Continuation checkpoints
+
+`workflow_state.py persist` writes immutable `generations/<id>/{best,STATE.json}` and atomically
+switches one `current` symlink; stable `best` and `STATE.json` aliases resolve through that pointer.
+Every barrier snapshots canonical bytes, including the first checkpoint and a round that banked
+nothing. `workflow_state.py inspect` reports exactly `first`, `resume`, or `invalid`; only `resume`
+imports prior control state, while invalid generations remain preserved for audit.
 
 ## Budget
 `budget` = the **total number of optimization directions** the TechLead may dispatch to engineers

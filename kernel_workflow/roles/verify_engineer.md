@@ -31,7 +31,7 @@ absolute per-case latencies. The script trusts only your numbers.
    # (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited. The big
    # immutable golden (reference_io.pt, if present) rides in CANONICAL as an absolute symlink; this tar
    # carries the symlink verbatim (torch.load + the sha check read through it) — never add -h/--dereference.
-   WS="$VERIFY_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
+   WS="$VERIFY_DIR/candidate"; mkdir -p "$WS"
    ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
        --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
        --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
@@ -198,10 +198,9 @@ absolute per-case latencies. The script trusts only your numbers.
         --scan <your ws build dir> ${ISA_ARCH:+--arch "$ISA_ARCH"}
     ```
 
-    **When `ISA_PARENT_ARCHIVE` is NOT supplied, capture the parent yourself.** You have already built
-    the unpatched canonical tree in this session for the raw `paired_per_case` control arm
-    (step 7), so its code objects are sitting in your control workspace and capturing them costs one
-    more CPU-only call:
+    **When `ISA_PARENT_ARCHIVE` is NOT supplied, capture the parent yourself.** You prepare the unpatched canonical tree at `$VERIFY_DIR/incumbent` for the deterministic
+    paired producer in step 7, so its code objects can be built/captured there without inventing a
+    model-authored timing arm:
 
     ```
     python3 "$ISA_CAPTURE_HELPER" --out "$ISA_ARCHIVE_DIR/../isa_parent" \
@@ -423,42 +422,32 @@ absolute per-case latencies. The script trusts only your numbers.
    leading word (`"pass"` followed by `10/11`, `except`, `mismatch`, `fail`) is read as NOT passing:
    a partial pass is a failure, and it is reported as `"fail"`, never as a qualified `"pass"`.
 
-7. **Produce the gate's raw SAME-SESSION paired blocks.** Build the unpatched canonical tree
-   independently in your own workspace. If the canonical tree carries a `.s`, restore it there too:
-   run `python3 "$ASM_ROUNDTRIP_HELPER" incumbent --source-root <control ws src dir>`, then build,
-   restore, and only then time. Once phase2 has banked, an unrestored control is an older program and
-   would count the same assembly win again.
+7. **Prepare deterministic candidate/incumbent roots for the paired producer.** The candidate
+   root is exactly `$VERIFY_DIR/candidate` from step 1. Build an untouched control at exactly
+   `$VERIFY_DIR/incumbent` by the same symlink-preserving, build-excluding tar copy from `CANONICAL`.
+   If canonical carries a `.s`, restore it in the incumbent root before returning. Never apply the
+   candidate patch there and leave both roots on disk:
 
-   Before timing, choose one unique, non-empty `measurement_session_id` for this verification and
-   freeze the supplied `TARGET_ROUTES`. For **every route in `BASELINE_PER_CASE`**, collect at least
-   **eight complete candidate/control pairs**, interleaved under the same GPU lock and priming policy.
-   Use explicit pair ids (`pair-00`, `pair-01`, ...). A pair id identifies the two observations made
-   under the same local conditions; do not concatenate an old control run with a new candidate run.
-   Alternate AB/BA order across pairs when the harness permits it so order drift is not aliased to the
-   patch. Every route must use the same pair-id set, even if the suite executes routes sequentially.
-
-   Return those observations verbatim in `paired_per_case`, one block per route:
-
-   ```json
-   {
-     "route": "the exact BASELINE_PER_CASE name",
-     "candidate": {"session_id": "verify-r3-d1-...", "pair_ids": ["pair-00"],
-                   "samples_ms": [0.97]},
-     "control":   {"session_id": "verify-r3-d1-...", "pair_ids": ["pair-00"],
-                   "samples_ms": [1.0]}
-   }
+   ```bash
+   CONTROL_WS="$VERIFY_DIR/incumbent"; mkdir -p "$CONTROL_WS"
+   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build \
+       --exclude='*/build' --exclude=./__pycache__ --exclude='*/__pycache__' \
+       --exclude=./.torch_ext --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) \
+     | ( cd "$CONTROL_WS" && tar -xf - )
+   # If CONTROL_WS contains banked .s files, use ASM_ROUNDTRIP_HELPER incumbent/restore before return.
    ```
 
-   The abbreviated arrays above show shape only; the real arrays need at least eight finite positive
-   values and equal lengths. Keep `per_case` and `control_per_case` summaries for reports, but the
-   commit gate does **not** infer pairs from their medians and does not consume baseline `samples_ms`.
-   It sends the raw blocks to `scripts/route_gate.py`, which works on
-   `log(control_ms/candidate_ms)` and emits the authoritative versioned receipt.
+   Do **not** choose a measurement session, pair ids, or return raw pair arrays. After your return,
+   the lane invokes the checked-in `paired_verify_argv` through `scripts/paired_verify.py produce`.
+   That capability owns one outer `gpu_lock` around the complete suite, runs candidate and untouched
+   incumbent in every measurement-protocol/v2 slot/block, validates priming and output lifetime, and
+   then derives pair ids from block ordinals. Oracle arms may be retained by the task for absolute
+   score reporting, but the adapter never selects one as the promotion control.
 
-   This evidence is mandatory for banking. Missing candidate raw samples, control raw samples,
-   session ids, pair ids, enough pairs, or any route from the full suite fails closed. The verifier's
-   correctness/measurement report may still be recorded, but the candidate cannot commit and there
-   is **no fallback** to a control table from another session or to the summary geomean.
+   A task with no protocol-v2 paired producer, a missing incumbent root, partial suite, different
+   lock/protocol across routes, unprimed sample, or stale output lifecycle cannot bank. Summary
+   medians and any verifier-authored session/pair fields are ignored; there is no compatibility
+   fallback.
 
 8. **Predeclare `target_routes`; an empty target set cannot bank.** Copy `TARGET_ROUTES` verbatim before looking at timings — never the routes that happened to improve. Every declared
    target must have a one-sided 95% lower confidence bound beyond the practical MDE (2% by default,
@@ -487,16 +476,6 @@ absolute per-case latencies. The script trusts only your numbers.
   "verified_weighted": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "weight": 0.0}],
   "control_per_case": [{"name": "...", "optimized_ms": 0.0}],
-  "measurement_session_id": "verify-r3-d1-unique",
-  "paired_per_case": [{
-    "route": "...",
-    "candidate": {"session_id": "verify-r3-d1-unique",
-      "pair_ids": ["pair-00", "pair-01", "pair-02", "pair-03", "pair-04", "pair-05", "pair-06", "pair-07"],
-      "samples_ms": [0.97, 0.97, 0.97, 0.97, 0.97, 0.97, 0.97, 0.97]},
-    "control": {"session_id": "verify-r3-d1-unique",
-      "pair_ids": ["pair-00", "pair-01", "pair-02", "pair-03", "pair-04", "pair-05", "pair-06", "pair-07"],
-      "samples_ms": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]}
-  }],
   "variance_note": "paired blocks, interleaving/order and observed spread",
   "target_routes": ["predeclared route(s); never empty"],
   "graph_safe": "pass|fail|n/a (only when REQUIRE_GRAPH_CAPTURE was set; omit otherwise)",

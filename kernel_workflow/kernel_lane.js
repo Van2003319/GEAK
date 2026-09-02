@@ -182,7 +182,30 @@ const ROUTE_GATE_ALGORITHM = 'paired-log-trimmed-bootstrap/v1';
 const ROUTE_GATE_BOOTSTRAP_SEED = 20260902;
 const ROUTE_GATE_BOOTSTRAP_RESAMPLES = 4096;
 const ROUTE_GATE_MIN_PAIRS = 8;
+const ROUTE_GATE_DEFAULT_PRACTICAL_MDE = 0.02;
+const ROUTE_GATE_DEFAULT_NON_REGRESSION_MARGIN = 0.02;
+const ROUTE_GATE_DEFAULT_SUITE_MARGIN = 0.01;
+const ROUTE_GATE_CATASTROPHIC_REGRESSION = 0.10;
+const PAIRED_VERIFY_TASK_SCHEMA = 'geak.paired-verify-task-receipt/v2';
+const PAIRED_VERIFY_BINDING_SCHEMA = 'geak.paired-verify-binding/v2';
 const ROUTE_GATE_SCRIPT = `${WORKFLOW_DIR}/scripts/route_gate.py`;
+const PAIRED_VERIFY_SCRIPT = `${WORKFLOW_DIR}/scripts/paired_verify.py`;
+const ROUTE_GATE_ALGORITHM_EFFECTIVE = {
+  name: ROUTE_GATE_ALGORITHM,
+  effect: 'log(control_ms/candidate_ms)',
+  estimator: '20% trimmed mean',
+  trim_rule: 'drop floor(n*0.20) observations from each tail',
+  confidence: 0.95,
+  interval: 'one-sided paired percentile bootstrap lower bound',
+  quantile: 'linear interpolation at p=0.05 (R type 7)',
+  resamples: ROUTE_GATE_BOOTSTRAP_RESAMPLES,
+  seed: ROUTE_GATE_BOOTSTRAP_SEED,
+  rng: 'SplitMix64; stream seed is first 64 bits of SHA256(seed:label), big-endian',
+  index_sampler: 'next_u64 modulo n',
+  min_pairs: ROUTE_GATE_MIN_PAIRS,
+  multiple_endpoints: 'intersection-union: every declared endpoint must pass',
+  catastrophic_statistic: 'trimmed-mean point estimate of candidate/control latency change',
+};
 const ROUTE_GATE_CONFIG = {
   ...(A.route_mde != null ? { practical_mde: A.route_mde } : {}),
   ...(A.route_non_regression_margin != null
@@ -201,6 +224,7 @@ const ROUTE_GATE_OUTPUT_SCHEMA = {
     target_routes: { type: 'array', items: { type: 'string' } },
     pair_ids: { type: 'array', items: { type: 'string' } },
     input_sha256: { type: ['string', 'null'] },
+    measurement: { type: ['object', 'null'], additionalProperties: true },
     algorithm: {
       type: 'object',
       properties: {
@@ -250,13 +274,204 @@ const ROUTE_GATE_OUTPUT_SCHEMA = {
   },
   required: ['schema', 'input_schema', 'decision', 'accepted', 'reason', 'session_id',
     'expected_routes', 'expected_route_count', 'target_routes', 'pair_ids', 'input_sha256',
-    'algorithm', 'effective_margins', 'route_weights', 'suite', 'routes', 'target_passed', 'regressed',
+    'measurement', 'algorithm', 'effective_margins', 'route_weights', 'suite', 'routes', 'target_passed', 'regressed',
     'catastrophic', 'failures'],
   additionalProperties: true,
 };
 const sortedStrings = (xs) => (Array.isArray(xs) ? xs.map(String).sort() : []);
 const sameStrings = (a, b) => JSON.stringify(sortedStrings(a)) === JSON.stringify(sortedStrings(b));
 const finiteNumber = (x) => typeof x === 'number' && Number.isFinite(x);
+// Canonical JSON is ASCII on purpose: route_gate.py uses the same key order, separators and
+// ensure_ascii=True. That makes the digest independently reproducible in filesystem-free V8.
+const canonicalJSONString = (value) => {
+  const quote = (text) => JSON.stringify(String(text)).replace(/[\u007f-\uffff]/g, ch =>
+    `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  const render = (v) => {
+    if (v === null) return 'null';
+    if (typeof v === 'string') return quote(v);
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (typeof v === 'number') {
+      if (!Number.isFinite(v)) throw new Error('canonical JSON does not permit non-finite numbers');
+      return JSON.stringify(v);
+    }
+    if (Array.isArray(v)) return `[${v.map(render).join(',')}]`;
+    if (v && typeof v === 'object') {
+      return `{${Object.keys(v).sort().map(key => {
+        if (v[key] === undefined) throw new Error(`canonical JSON key ${key} is undefined`);
+        return `${quote(key)}:${render(v[key])}`;
+      }).join(',')}}`;
+    }
+    throw new Error(`canonical JSON does not permit ${typeof v}`);
+  };
+  return render(value);
+};
+const sha256Ascii = (text) => {
+  const bytes = [];
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code > 0x7f) throw new Error('sha256Ascii received non-ASCII canonical JSON');
+    bytes.push(code);
+  }
+  const bitLength = bytes.length * 8;
+  bytes.push(0x80);
+  while ((bytes.length % 64) !== 56) bytes.push(0);
+  const high = Math.floor(bitLength / 0x100000000);
+  const low = bitLength >>> 0;
+  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((high >>> shift) & 0xff);
+  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((low >>> shift) & 0xff);
+  const k = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+  ];
+  const h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+    0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    const w = new Array(64);
+    for (let i = 0; i < 16; i++) {
+      const at = offset + i * 4;
+      w[i] = ((bytes[at] << 24) | (bytes[at + 1] << 16)
+        | (bytes[at + 2] << 8) | bytes[at + 3]) >>> 0;
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = (rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)) >>> 0;
+      const s1 = (rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10)) >>> 0;
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let [a,b,c,d,e,f,g,hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const s1 = (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0;
+      const choose = ((e & f) ^ (~e & g)) >>> 0;
+      const t1 = (hh + s1 + choose + k[i] + w[i]) >>> 0;
+      const s0 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0;
+      const majority = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const t2 = (s0 + majority) >>> 0;
+      hh = g; g = f; f = e; e = (d + t1) >>> 0;
+      d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h[0]=(h[0]+a)>>>0; h[1]=(h[1]+b)>>>0; h[2]=(h[2]+c)>>>0; h[3]=(h[3]+d)>>>0;
+    h[4]=(h[4]+e)>>>0; h[5]=(h[5]+f)>>>0; h[6]=(h[6]+g)>>>0; h[7]=(h[7]+hh)>>>0;
+  }
+  return h.map(word => word.toString(16).padStart(8, '0')).join('');
+};
+const canonicalSha256 = (value) => sha256Ascii(canonicalJSONString(value));
+const sameCanonical = (a, b) => canonicalJSONString(a) === canonicalJSONString(b);
+const applicableRouteValues = (raw, routes, allRoutes, fallback) => {
+  const wanted = sortedStrings(routes);
+  if (raw == null) return Object.fromEntries(wanted.map(route => [route, fallback]));
+  if (finiteNumber(raw)) return Object.fromEntries(wanted.map(route => [route, raw]));
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('gate margin is neither a number nor a route map');
+  }
+  const keys = Object.keys(raw).sort();
+  if (!sameStrings(keys, wanted) && !sameStrings(keys, allRoutes)) {
+    throw new Error('gate margin map does not match applicable routes or complete suite');
+  }
+  return Object.fromEntries(wanted.map(route => [route, raw[route]]));
+};
+const expectedGateEffective = (spec) => {
+  const expected = sortedStrings(spec.expected_routes);
+  const targets = sortedStrings(spec.target_routes);
+  const targetSet = new Set(targets);
+  const nonTargets = expected.filter(route => !targetSet.has(route));
+  const practical = applicableRouteValues(spec.practical_mde, targets, expected,
+    ROUTE_GATE_DEFAULT_PRACTICAL_MDE);
+  const nonRegression = applicableRouteValues(spec.non_regression_margin, nonTargets, expected,
+    ROUTE_GATE_DEFAULT_NON_REGRESSION_MARGIN);
+  let weights;
+  if (spec.route_weights == null) {
+    weights = Object.fromEntries(expected.map(route => [route, 1.0 / expected.length]));
+  } else {
+    const total = expected.reduce((sum, route) => sum + spec.route_weights[route], 0);
+    weights = Object.fromEntries(expected.map(route => [route, spec.route_weights[route] / total]));
+  }
+  return {
+    margins: {
+      practical_mde: practical,
+      non_regression_margin: nonRegression,
+      suite_non_inferiority_margin: spec.suite_non_inferiority_margin == null
+        ? ROUTE_GATE_DEFAULT_SUITE_MARGIN : spec.suite_non_inferiority_margin,
+      catastrophic_regression: ROUTE_GATE_CATASTROPHIC_REGRESSION,
+    },
+    weights,
+  };
+};
+const PAIRED_TASK_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    schema: { type: 'string' }, source_schema: { type: 'string' },
+    expected_routes: { type: 'array', minItems: 1, items: { type: 'string' } },
+    protocol_hash: { type: 'string' }, gpu_lock: { type: 'object', additionalProperties: true },
+    incumbent_unchanged: { type: 'boolean' }, canonical_input_sha256: { type: 'string' },
+    routes: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: true } },
+  },
+  required: ['schema', 'source_schema', 'expected_routes', 'protocol_hash', 'gpu_lock',
+    'incumbent_unchanged', 'canonical_input_sha256', 'routes'],
+  additionalProperties: true,
+};
+const ROUTE_GATE_INPUT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    schema: { type: 'string' }, session_id: { type: 'string' },
+    expected_routes: { type: 'array', minItems: 1, items: { type: 'string' } },
+    expected_route_count: { type: 'number' },
+    target_routes: { type: 'array', minItems: 1, items: { type: 'string' } },
+    paired_routes: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: true } },
+    measurement: { type: 'object', additionalProperties: true },
+    route_weights: { type: 'object', additionalProperties: true },
+    practical_mde: { type: ['number', 'object'], additionalProperties: true },
+    non_regression_margin: { type: ['number', 'object'], additionalProperties: true },
+    suite_non_inferiority_margin: { type: 'number' },
+  },
+  required: ['schema', 'session_id', 'expected_routes', 'expected_route_count', 'target_routes',
+    'paired_routes', 'measurement'],
+  additionalProperties: true,
+};
+const validateRouteGateInput = (spec, expected) => {
+  if (!spec || typeof spec !== 'object' || spec.schema !== ROUTE_GATE_INPUT_SCHEMA) {
+    throw new Error('paired adapter returned the wrong gate input schema');
+  }
+  if (spec.session_id !== expected.session_id) throw new Error('paired adapter changed lane session');
+  if (!sameStrings(spec.expected_routes, expected.expected_routes)
+      || spec.expected_route_count !== expected.expected_routes.length) {
+    throw new Error('paired adapter changed or truncated the complete suite');
+  }
+  if (!sameStrings(spec.target_routes, expected.target_routes) || !spec.target_routes.length) {
+    throw new Error('paired adapter changed planner-owned targets');
+  }
+  if (!spec.measurement || spec.measurement.schema !== PAIRED_VERIFY_BINDING_SCHEMA
+      || spec.measurement.producer_schema !== PAIRED_VERIFY_TASK_SCHEMA) {
+    throw new Error('paired adapter returned no deterministic producer binding');
+  }
+  const rows = Array.isArray(spec.paired_routes) ? spec.paired_routes : [];
+  if (rows.length !== expected.expected_routes.length
+      || !sameStrings(rows.map(row => row && row.route), expected.expected_routes)) {
+    throw new Error('paired adapter did not return one block table per suite route');
+  }
+  let pairIds = null;
+  for (const row of rows) {
+    for (const armName of ['candidate', 'control']) {
+      const arm = row && row[armName];
+      if (!arm || arm.session_id !== expected.session_id || !Array.isArray(arm.pair_ids)
+          || !Array.isArray(arm.samples_ms) || arm.pair_ids.length !== arm.samples_ms.length
+          || arm.pair_ids.length < ROUTE_GATE_MIN_PAIRS
+          || arm.pair_ids.some((id, index) => id !== `${expected.session_id}:block-${String(index).padStart(4, '0')}`)) {
+        throw new Error(`paired adapter returned invalid ${armName} block identity`);
+      }
+      if (pairIds === null) pairIds = arm.pair_ids;
+      else if (!sameCanonical(pairIds, arm.pair_ids)) {
+        throw new Error('paired adapter routes/arms do not share one outer block inventory');
+      }
+    }
+  }
+  return spec;
+};
 const routeGateInvocationFailure = (reason) => ({
   schema: ROUTE_GATE_INVOCATION_ERROR_SCHEMA,
   decision: 'invocation_error', accepted: false, reason: String(reason),
@@ -291,21 +506,47 @@ const validateRouteGateReceipt = (receipt, spec) => {
   if (!sameStrings(receipt.target_routes, spec.target_routes)) {
     throw new Error('receipt target_routes do not match the submitted targets');
   }
-  if (typeof receipt.input_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(receipt.input_sha256)) {
-    throw new Error('receipt has no canonical input SHA-256');
+  const expectedDigest = canonicalSha256(spec);
+  if (receipt.input_sha256 !== expectedDigest) {
+    throw new Error(`receipt input digest is stale: expected ${expectedDigest}, got ${receipt.input_sha256}`);
+  }
+  if (!sameCanonical(receipt.measurement, spec.measurement)) {
+    throw new Error('receipt measurement protocol/lock/lifecycle binding differs from gate input');
+  }
+  const measurement = receipt.measurement;
+  if (!measurement || measurement.schema !== PAIRED_VERIFY_BINDING_SCHEMA
+      || measurement.producer_schema !== PAIRED_VERIFY_TASK_SCHEMA
+      || measurement.metric_id !== 'single_call_latency'
+      || measurement.promotion_control !== 'incumbent'
+      || measurement.oracle_role !== 'absolute_report_only'
+      || measurement.incumbent_unchanged !== true
+      || !measurement.gpu_lock || measurement.gpu_lock.mode !== 'external'
+      || typeof measurement.gpu_lock.path !== 'string' || !measurement.gpu_lock.path
+      || !measurement.priming || measurement.priming.required !== true
+      || measurement.priming.all_samples_primed !== true
+      || measurement.priming.timer !== 'cuda_event'
+      || !measurement.output_lifecycle
+      || measurement.output_lifecycle.policy !== 'bounded-live-ring'
+      || measurement.output_lifecycle.all_arms_rotated !== true
+      || typeof measurement.canonical_input_sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(measurement.canonical_input_sha256)) {
+    throw new Error('receipt has no complete protocol/GPU-lock/priming/output binding');
+  }
+  const protocol = measurement.protocol;
+  if (!protocol || protocol.schema !== 'geak.measurement-protocol/v2') {
+    throw new Error('receipt has no measurement protocol/v2 contents');
+  }
+  const protocolPayload = { ...protocol }; delete protocolPayload.hash;
+  if (protocol.hash !== canonicalSha256(protocolPayload)
+      || measurement.protocol_hash !== protocol.hash) {
+    throw new Error('receipt measurement protocol hash is not canonical');
+  }
+  if (!sameCanonical(receipt.algorithm, ROUTE_GATE_ALGORITHM_EFFECTIVE)) {
+    throw new Error('receipt algorithm/effective seed does not match the pinned v2 protocol');
   }
   if (receipt.decision !== 'invalid_evidence') {
     if (!Number.isInteger(receipt.expected_route_count) || receipt.expected_route_count <= 0) {
       throw new Error('receipt has no positive complete-suite route count');
-    }
-    const algorithm = receipt.algorithm;
-    if (!algorithm || algorithm.name !== ROUTE_GATE_ALGORITHM
-        || algorithm.effect !== 'log(control_ms/candidate_ms)'
-        || algorithm.confidence !== 0.95
-        || algorithm.seed !== ROUTE_GATE_BOOTSTRAP_SEED
-        || algorithm.resamples !== ROUTE_GATE_BOOTSTRAP_RESAMPLES
-        || algorithm.min_pairs !== ROUTE_GATE_MIN_PAIRS) {
-      throw new Error('receipt algorithm identity/seed does not match the pinned v2 protocol');
     }
     const first = Array.isArray(spec.paired_routes) && spec.paired_routes[0];
     const submittedPairIds = first && first.candidate && first.candidate.pair_ids;
@@ -313,11 +554,14 @@ const validateRouteGateReceipt = (receipt, spec) => {
         || receipt.pair_ids.length < ROUTE_GATE_MIN_PAIRS) {
       throw new Error('receipt pair_ids do not match the submitted paired blocks');
     }
-    if (!receipt.effective_margins || typeof receipt.effective_margins !== 'object') {
-      throw new Error('receipt has no effective margins');
+    const effective = expectedGateEffective(spec);
+    if (!sameCanonical(receipt.effective_margins, effective.margins)) {
+      throw new Error('receipt effective margins differ from submitted/default parameters');
     }
-    const weightEntries = receipt.route_weights && typeof receipt.route_weights === 'object'
-      ? Object.entries(receipt.route_weights) : [];
+    if (!sameCanonical(receipt.route_weights, effective.weights)) {
+      throw new Error('receipt effective route weights differ from submitted/default parameters');
+    }
+    const weightEntries = Object.entries(receipt.route_weights || {});
     if (!sameStrings(weightEntries.map(([route]) => route), spec.expected_routes)
         || weightEntries.some(([, weight]) => !finiteNumber(weight) || !(weight > 0))
         || Math.abs(weightEntries.reduce((sum, [, weight]) => sum + weight, 0) - 1.0) > 1e-12) {
@@ -353,6 +597,7 @@ const validateRouteGateReceipt = (receipt, spec) => {
   }
   return receipt;
 };
+
 const routeGateCommand = (spec) => `Run EXACTLY the following command and nothing else. It sends the
 submitted evidence verbatim to the canonical Python gate. Exit 0 (accept) and exit 3 (refuse or invalid
 evidence) are both normal protocol outcomes. Return the single JSON object printed on stdout verbatim
@@ -385,6 +630,31 @@ const routeGateFromPython = async (spec, runImpl, runOpts) => {
     return routeGateInvocationFailure(
       `Python route gate failed closed: ${e && e.message ? e.message : e}`);
   }
+};
+
+const pairedVerifyAdapterCommand = (request) => {
+  const expectedArgs = request.expected_routes
+    .map(route => ` --expected-route ${JSON.stringify(String(route))}`).join('');
+  const targetArgs = request.target_routes
+    .map(route => ` --target-route ${JSON.stringify(String(route))}`).join('');
+  return `Run EXACTLY the command below and return its one JSON stdout object verbatim. The lane, not
+this relay, supplied session_id and target_routes. Do not synthesize a task receipt or retry with a
+smaller suite. Exit 2 means invalid/infra evidence and is a normal fail-closed outcome.
+\`\`\`bash
+python3 ${JSON.stringify(PAIRED_VERIFY_SCRIPT)} adapt ` +
+    `--receipt ${JSON.stringify(request.task_receipt)} ` +
+    `--session-id ${JSON.stringify(request.session_id)}` + expectedArgs + targetArgs +
+    ` --gate-config-json ${JSON.stringify(JSON.stringify(request.gate_config || {}))}
+\`\`\``;
+};
+const routeGateInputFromTask = async (request, runImpl, runOpts) => {
+  const opts = runOpts || {};
+  const runner = runImpl || ((submitted) => agentT(pairedVerifyAdapterCommand(submitted), {
+    phase: opts.phase || 'Verify', label: opts.label || 'paired verify adapter', effort: 'low',
+    schema: ROUTE_GATE_INPUT_OUTPUT_SCHEMA,
+  }));
+  const spec = await runner(request);
+  return validateRouteGateInput(spec, request);
 };
 
 // `route_bands` survives as an accepted launch argument for old lane files, but it is deliberately
@@ -773,7 +1043,7 @@ const deepExhaustion = (attempts, activeCycle, minimum) => {
   const identities = new Set();
   for (const a of (Array.isArray(attempts) ? attempts : [])) {
     if (!a || a.cycle !== activeCycle || a.outcome !== 'valid_new_structure'
-        || !a.valid || !a.novel || a.beneficial) continue;
+        || a.statistical_refusal !== true || !a.valid || !a.novel || a.beneficial) continue;
     const identity = `${a.structure_key || ''}|${a.artifact_sha256 || ''}`;
     if (a.structure_key && a.artifact_sha256) identities.add(identity);
   }
@@ -1009,6 +1279,7 @@ const SETUP_SCHEMA = obj({
   // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
   // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
   // does not re-explore dead directions. Absent (undefined) on a fresh run -> no behavior change.
+  continuation_state: { type: 'string', enum: ['first', 'resume', 'invalid'] },
   resumed: { type: 'boolean' },
   prior_state: obj({
     // (127). `cumulative` here is the LANE TOTAL VS THE ORIGINAL SEED, read back out of STATE.json.
@@ -1035,7 +1306,8 @@ const SETUP_SCHEMA = obj({
   // the denominator and correctness reference carried none, so a write through the golden's
   // absolute symlink would silently rescore every measurement AND every archived elite.
   oracle_digest: { type: 'string' },
-}, ['eval_dir', 'workspace', 'kernel_name']);
+}, ['eval_dir', 'workspace', 'kernel_name', 'continuation_state', 'resumed',
+  'resume_invalidated']);
 
 const AUTHOR_SCHEMA = obj({
   authored: { type: 'boolean' }, target_language: { type: 'string' }, correctness: { type: 'string' },
@@ -1058,6 +1330,9 @@ const ANALYZE_SCHEMA = obj({
 const BENCH_SCHEMA = obj({
   commandment_path: { type: 'string' }, correctness_cmd: { type: 'string' },
   benchmark_cmd: { type: 'string' }, profile_cmd: { type: 'string' }, parse_hint: { type: 'string' },
+  // Checked-in task command that emits geak.paired-measurement-suite/v2 when invoked by
+  // paired_verify.py. It receives candidate/incumbent roots and output path through GEAK_PAIRED_*.
+  paired_verify_argv: { type: 'array', minItems: 1, items: { type: 'string' } },
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
   baseline_geomean_ms: { type: 'number' }, num_test_cases: { type: 'number' },
   // Workload-aligned outputs: present when a WORKLOAD_SPEC drove case selection + weights.
@@ -1067,7 +1342,8 @@ const BENCH_SCHEMA = obj({
   baseline_weighted_total_ms: { type: 'number' },
   weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
-}, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms', 'num_test_cases']);
+}, ['commandment_path', 'paired_verify_argv', 'baseline_per_case', 'baseline_geomean_ms',
+  'num_test_cases']);
 
 const PROFILE_SCHEMA = obj({
   bottleneck: { type: 'string' }, profiler_used: { type: 'string' }, dispatch_count: { type: 'number' },
@@ -1248,7 +1524,7 @@ const PLAN_SCHEMA = obj({
       mechanism: { type: 'string' }, config: { type: 'object', additionalProperties: true },
       // Frozen before any engineer or verifier measures the candidate. An empty target set cannot
       // satisfy the statistical gate; suite-wide work explicitly names the full suite.
-      target_routes: { type: 'array', items: { type: 'string' } },
+      target_routes: { type: 'array', minItems: 1, items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
       // Learned cards that SEEDED this direction, by filename. Structural attribution: the planner
@@ -1442,13 +1718,11 @@ const VERIFY_SCHEMA = obj({
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
-  // Summary-only compatibility fields. The commit gate consumes paired_per_case below and refuses
-  // missing raw evidence; it never falls back to these medians or to another session's table.
+  // Summary-only compatibility field. Promotion evidence is produced after this return by the
+  // deterministic paired_verify.py capability; no verifier-authored session/pair ids enter schema.
   control_per_case: controlPerCase,
-  measurement_session_id: { type: 'string' },
-  paired_per_case: pairedPerCase,
-  // Echoed for audit only. routeGateSpec uses the planner-owned direction target, not a verifier's
-  // post-measurement relabelling.
+  // Echoed for audit only. The paired adapter uses the planner-owned direction target, not a
+  // verifier's post-measurement relabelling.
   target_routes: { type: 'array', items: { type: 'string' } },
   // Finding (67): the setup digest, recomputed independently at verify time. Two agents at two
   // different points in the run reporting the same oracle is materially stronger evidence than
@@ -1623,9 +1897,10 @@ const JOURNAL_ACTION_SCHEMA = obj({
 }, ['ok']);
 const STATE_PERSIST_SCHEMA = obj({
   ok: { type: 'boolean' }, schema: { type: 'string' }, state_file: { type: 'string' },
-  best_refreshed: { type: 'boolean' },
+  canonical: { type: 'string' }, generation: { type: 'string' }, current: { type: 'string' },
+  best_refreshed: { type: 'boolean' }, refresh_best_requested: { type: 'boolean' },
   canonical_hashes: { type: 'object', additionalProperties: true },
-}, ['ok']);
+}, ['ok', 'generation', 'best_refreshed']);
 const CONFIG_SELECT_SCHEMA = obj({
   ok: { type: 'boolean' }, schema: { type: 'string' }, phase_independent: { type: 'boolean' },
   selection_contract: { type: 'string' }, reason: { type: 'string' }, config_id: { type: 'string' },
@@ -1883,6 +2158,11 @@ const setup = await agentT(
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
+if (!['first', 'resume', 'invalid'].includes(setup.continuation_state)
+    || (setup.continuation_state === 'resume') !== (setup.resumed === true)
+    || (setup.continuation_state === 'invalid') !== (setup.resume_invalidated === true)) {
+  throw new Error('Setup returned an inconsistent first/resume/invalid continuation state');
+}
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
 const KERNEL_NAME = setup.kernel_name;
@@ -2104,28 +2384,113 @@ log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, 
 // complete non-regression result. Blank/duplicate baseline names are passed through and rejected by
 // route_gate.py instead of being silently filtered here.
 const GATE_EXPECTED_ROUTES = (BASELINE_PER_CASE || [])
-  .map(r => (r && (r.name || r.test_case_id)) || '');
+  .map(r => String((r && (r.name || r.test_case_id)) || ''));
 const GATE_EXPECTED_ROUTE_COUNT = bench.num_test_cases;
+if (!Number.isInteger(GATE_EXPECTED_ROUTE_COUNT) || GATE_EXPECTED_ROUTE_COUNT <= 0
+    || GATE_EXPECTED_ROUTE_COUNT !== GATE_EXPECTED_ROUTES.length
+    || sortedStrings(GATE_EXPECTED_ROUTES).some(route => !route.trim())
+    || new Set(GATE_EXPECTED_ROUTES).size !== GATE_EXPECTED_ROUTES.length) {
+  throw new Error('Benchmark suite manifest must have one positive count and exact unique route names');
+}
 const GATE_ROUTE_WEIGHTS = HAS_WORKLOAD
   ? Object.fromEntries((BASELINE_PER_CASE || []).map(r => [
-      (r && (r.name || r.test_case_id)) || '', r && r.weight,
+      String((r && (r.name || r.test_case_id)) || ''), r && r.weight,
     ]))
   : null;
-const routeGateSpec = (cand) => ({
-  schema: ROUTE_GATE_INPUT_SCHEMA,
-  session_id: cand && cand.measurement_session_id,
-  expected_routes: GATE_EXPECTED_ROUTES,
-  expected_route_count: GATE_EXPECTED_ROUTE_COUNT,
-  target_routes: cand && cand.target_routes,
-  paired_routes: cand && cand.paired_per_case,
-  ...(GATE_ROUTE_WEIGHTS ? { route_weights: GATE_ROUTE_WEIGHTS } : {}),
-  ...ROUTE_GATE_CONFIG,
-});
+const PAIRED_VERIFY_ARGV = Array.isArray(bench.paired_verify_argv)
+  ? bench.paired_verify_argv.map(String) : [];
+let pairedSessionOrdinal = 0;
+const lanePairedSessionId = (cand) => {
+  pairedSessionOrdinal++;
+  const identity = {
+    eval_dir: EVAL_DIR,
+    round: Number(cand && cand.round) || 0,
+    candidate_id: String((cand && cand.id) || 'candidate'),
+    ordinal: pairedSessionOrdinal,
+  };
+  return `geak-paired-${canonicalSha256(identity).slice(0, 32)}-${pairedSessionOrdinal}`;
+};
+const pairedTaskProducerCommand = (request) => {
+  const expectedArgs = request.expected_routes
+    .map(route => ` --expected-route ${JSON.stringify(String(route))}`).join('');
+  const taskArgv = request.task_argv.map(value => JSON.stringify(String(value))).join(' ');
+  const lockPrefix = GPU_LOCK_ENV ? `${GPU_LOCK_ENV} ` : '';
+  return `Run EXACTLY this command and return its one JSON stdout object verbatim. This is one outer
+GPU-lock scope around candidate+unmodified-incumbent, every route and every protocol-v2 block. The
+task may retain oracle arms for absolute reporting, but paired_verify.py selects no oracle as control.
+Do not run a partial --case command and do not hand-write either receipt.
+\`\`\`bash
+${lockPrefix}bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSON.stringify(request.gpu_id)} ` +
+    `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_fence_run.sh`)} ` +
+    `python3 ${JSON.stringify(PAIRED_VERIFY_SCRIPT)} produce ` +
+    `--candidate-root ${JSON.stringify(request.candidate_root)} ` +
+    `--incumbent-root ${JSON.stringify(request.incumbent_root)} ` +
+    `--task-root ${JSON.stringify(request.task_root)}` + expectedArgs +
+    ` --output ${JSON.stringify(request.task_receipt)} -- ${taskArgv}
+\`\`\``;
+};
+const producePairedTaskReceipt = async (request, runOpts) => {
+  if (!request.task_argv.length) throw new Error('benchmark supplied no paired_verify_argv');
+  const opts = runOpts || {};
+  const receipt = await agentT(pairedTaskProducerCommand(request), {
+    phase: opts.phase || 'Verify', label: opts.label || 'paired verify producer', effort: 'low',
+    schema: PAIRED_TASK_OUTPUT_SCHEMA,
+  });
+  if (!receipt || receipt.schema !== PAIRED_VERIFY_TASK_SCHEMA
+      || receipt.incumbent_unchanged !== true
+      || receipt.canonical_input_sha256 !== canonicalSha256((() => {
+        const copy = { ...receipt }; delete copy.canonical_input_sha256; return copy;
+      })())
+      || !sameStrings(receipt.expected_routes, request.expected_routes)) {
+    throw new Error('paired producer returned a stale, partial, or non-canonical task receipt');
+  }
+  return receipt;
+};
+const routeGateForCandidate = async (cand, runOpts) => {
+  const opts = runOpts || {};
+  try {
+    const sessionId = lanePairedSessionId(cand);
+    const expectedRoutes = sortedStrings(GATE_EXPECTED_ROUTES);
+    const targetRoutes = sortedStrings(cand && cand.target_routes);
+    if (!targetRoutes.length) throw new Error('planner-owned target_routes is empty');
+    const verifyDir = String(cand && cand.verify_dir || '');
+    if (!verifyDir) throw new Error('candidate has no deterministic verify directory');
+    const taskReceipt = `${verifyDir}/paired_task_receipt.json`;
+    const request = {
+      task_receipt: taskReceipt,
+      candidate_root: `${verifyDir}/candidate`,
+      incumbent_root: `${verifyDir}/incumbent`,
+      task_argv: PAIRED_VERIFY_ARGV,
+      task_root: KERNEL_PATH_ORIG,
+      gpu_id: String((cand && cand.gpu_id) || GPU_POOL),
+      session_id: sessionId,
+      expected_routes: expectedRoutes,
+      target_routes: targetRoutes,
+      gate_config: {
+        ...ROUTE_GATE_CONFIG,
+        ...(GATE_ROUTE_WEIGHTS ? { route_weights: GATE_ROUTE_WEIGHTS } : {}),
+      },
+    };
+    await producePairedTaskReceipt(request, {
+      phase: opts.phase, label: opts.producerLabel || `paired producer ${cand && cand.id}`,
+    });
+    const spec = await routeGateInputFromTask(request, null, {
+      phase: opts.phase, label: opts.adapterLabel || `paired adapter ${cand && cand.id}`,
+    });
+    return await routeGateFromPython(spec, null, {
+      phase: opts.phase, label: opts.label || `python route gate ${cand && cand.id}`,
+    });
+  } catch (e) {
+    return routeGateInvocationFailure(
+      `Paired verify failed closed: ${e && e.message ? e.message : e}`);
+  }
+};
 log(`Commit gate: ${ROUTE_GATE_SCRIPT} owns the paired one-sided 95% decision ` +
     `(algorithm=${ROUTE_GATE_ALGORITHM}, seed=${ROUTE_GATE_BOOTSTRAP_SEED}, ` +
     `resamples=${ROUTE_GATE_BOOTSTRAP_RESAMPLES}); ${GATE_EXPECTED_ROUTE_COUNT} route(s) declared ` +
-    `by the benchmark manifest. Missing session/raw ` +
-    'pairs/control/targets or incomplete suite coverage REFUSES; there is no cross-session fallback.');
+    `by the benchmark manifest. The lane creates sessions and paired_verify.py derives pair ids ` +
+    'from protocol-v2 outer blocks. Missing producer/lock/priming/lifecycle/targets or incomplete ' +
+    'suite coverage REFUSES; oracle and cross-session summaries never control promotion.');
 if (A.route_bands != null) {
   log('Commit gate: args.route_bands is accepted for launch-file compatibility but IGNORED. ' +
       'Legacy min-max/median spreads are not statistical tests or non-regression margins.');
@@ -3162,11 +3527,15 @@ ${resolveScript}
           }),
           { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
         const sp = primSpeedup(ver);
-        const warmGateReceipt = ver ? await routeGateFromPython(routeGateSpec({
-          measurement_session_id: ver.measurement_session_id,
-          paired_per_case: ver.paired_per_case,
+        const warmGateReceipt = ver ? await routeGateForCandidate({
+          id: `warm-start-c${c.rank}`, round: 0,
+          verify_dir: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
+          gpu_id: GPU_LIST[0],
           target_routes: Array.isArray(c.target_routes) ? c.target_routes : undefined,
-        }), null, { phase: 'WarmStart', label: `python route gate warm-start c${c.rank}` })
+        }, { phase: 'WarmStart',
+          producerLabel: `paired producer warm-start c${c.rank}`,
+          adapterLabel: `paired adapter warm-start c${c.rank}`,
+          label: `python route gate warm-start c${c.rank}` })
           : routeGateInvocationFailure('warm-start verifier returned no result');
         if (rec) {
           rec.gate_decision = warmGateReceipt.decision;
@@ -3771,6 +4140,10 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
   // produce one rewrite before the cycle restarts.
   if (roundPhase === PHASE_DEEP && !planned.some(d => d.specialty === 'deep_explore')) {
     const seed = planned[0] || {};
+    // A planner stop/no-return has no direction to carry targets from. Deep is explicitly a
+    // suite-wide fallback, so the lane freezes the full manifest before any measurement.
+    const fallbackTargets = sortedStrings(seed.target_routes).length
+      ? sortedStrings(seed.target_routes) : sortedStrings(GATE_EXPECTED_ROUTES);
     log(`Round ${round}: deep round -- ${plannerStopped
       ? 'the planner returned no plan, so the round proceeds on its own mandate'
       : `the planner returned no deep_explore direction, so ${planned.length} specialist `
@@ -3780,6 +4153,7 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
       id: seed.id || `r${round}_d0`,
       title: seed.title ? `deep: ${seed.title}` : 'deep: open-ended rewrite',
       specialty: 'deep_explore',
+      target_routes: fallbackTargets,
       prompt: (seed.prompt ? `${seed.prompt}\n\n` : '')
         + 'Source-level directions and assembly edits are both exhausted on the CURRENT tree. Your '
         + 'job is a DIFFERENT ROUTE, not a further step down this one: a ground-up rewrite that the '
@@ -3795,6 +4169,9 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
     out_dir: d.recovered_entry
       ? String(((d.recovered_entry.worker_receipt || {}).path || '')).replace(/\/[^/]+$/, '')
       : `${EVAL_DIR}/round_${round}/engineer_${i}`,
+    // Always current-wave and unique, including journal recovery; a fixed child of the old worker
+    // dir could contain a verifier workspace interrupted in the previous wave.
+    verify_dir: `${EVAL_DIR}/round_${round}/verify_${i}`,
     seed_dir: CANONICAL,
     cost: d.recovered_entry ? 0 : (d.specialty === 'deep_explore' ? DEEP_COST : 1),
   }));
@@ -3836,7 +4213,8 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
   // Planned-vs-dispatched on one line. `directions.length` alone is the count
   // that survived the dedicated-round shed and the affordability check, and
   // reading it as "what the planner decided to do" hides both.
-  log(`Round ${round}: planned ${plan.directions.length} -> dispatched ${directions.length} `
+  const plannedDirectionCount = plan && Array.isArray(plan.directions) ? plan.directions.length : 0;
+  log(`Round ${round}: planned ${plannedDirectionCount} -> dispatched ${directions.length} `
     + `direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, `
     + `budget ${dispatched}/${BUDGET}`);
 
@@ -4109,8 +4487,8 @@ worker_result.json structure as StructuredOutput.` +
       return agentT(
         roleAgent('verify_engineer', 'verify',
           'Independently re-measure this candidate patch. Before returning, atomically write the exact '
-          + `structured result to ${d.out_dir}/verify/verification_result.json (temp + fsync + rename).`, {
-          CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
+          + `structured result to ${d.verify_dir}/verification_result.json (temp + fsync + rename).`, {
+          CANONICAL, PATCH: patch, VERIFY_DIR: d.verify_dir,
           CONFIG_SELECTION: configSelection && configSelection.required
             ? configSelection.config || { id: configSelection.config_id || '', invalid: true } : {},
           TASK_DIR: KERNEL_PATH_ORIG,
@@ -4128,7 +4506,7 @@ worker_result.json structure as StructuredOutput.` +
             ISA_MODE,
             ISA_CAPTURE_HELPER: `${WORKFLOW_DIR}/scripts/isa_capture.py`,
             ISA_SIGNALS_HELPER: `${WORKFLOW_DIR}/scripts/isa_signals.py`,
-            ISA_ARCHIVE_DIR: `${d.out_dir}/verify/isa`,
+            ISA_ARCHIVE_DIR: `${d.verify_dir}/isa`,
             // The engineer's own declaration, forwarded unchanged. Verify must not
             // re-derive it from the candidate's source: the claim is what is being
             // tested, and a verifier that rewrites the claim to fit the evidence is
@@ -4175,7 +4553,7 @@ worker_result.json structure as StructuredOutput.` +
             `--status ${verifiedOK ? 'verified' : 'rejected'} ` +
             `--reason ${JSON.stringify(verifiedOK ? 'independent verification completed' :
               'compile, correctness, policy, or verification gate failed')} ` +
-            `--verification-receipt ${JSON.stringify(`${d.out_dir}/verify/verification_result.json`)}
+            `--verification-receipt ${JSON.stringify(`${d.verify_dir}/verification_result.json`)}
 \`\`\``,
             { phase: 'Verify', label: `round_journal:verify ${d.id}`,
               schema: JOURNAL_ACTION_SCHEMA });
@@ -4360,9 +4738,6 @@ worker_result.json structure as StructuredOutput.` +
     // statistical gate. Missing evidence is carried as null so Python can issue an auditable
     // invalid_evidence receipt; JavaScript never substitutes bestPerCase from another session.
     control_per_case: Array.isArray(r.ver.control_per_case) ? r.ver.control_per_case : null,
-    measurement_session_id: typeof r.ver.measurement_session_id === 'string'
-      ? r.ver.measurement_session_id : null,
-    paired_per_case: Array.isArray(r.ver.paired_per_case) ? r.ver.paired_per_case : null,
     // Targets are predeclared by the direction. The verifier may repeat them but cannot widen them
     // after seeing the measurements; Python requires a non-empty subset of the suite manifest.
     target_routes: Array.isArray(r.d.target_routes) ? r.d.target_routes : undefined,
@@ -4379,6 +4754,9 @@ worker_result.json structure as StructuredOutput.` +
     isa_source_hash: r.ver.isa_evidence && typeof r.ver.isa_evidence.source_hash === 'string'
       ? r.ver.isa_evidence.source_hash : null,
     journal: r.journal || null,
+    // Fixed verifier roots are prepared from candidate and untouched canonical bytes. The lane
+    // invokes paired_verify.py over them; verifier-authored session/pair fields are ignored.
+    verify_dir: r.d.verify_dir, gpu_id: r.d.gpu_id, round,
   }));
 
   let integrate = null;
@@ -4494,11 +4872,8 @@ worker_result.json structure as StructuredOutput.` +
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
         journal: integrateJournal,
-        measurement_session_id: typeof integrate.best.measurement_session_id === 'string'
-          ? integrate.best.measurement_session_id : null,
-        paired_per_case: Array.isArray(integrate.best.paired_per_case)
-          ? integrate.best.paired_per_case : null,
         target_routes: integratedTargetsValid ? integratedTargetRoutes : undefined,
+        verify_dir: `${EVAL_DIR}/round_${round}/integrate`, gpu_id: GPU_POOL, round,
       });
     } else if (integrationEligible && !integratedDurablyVerified) {
       log(`  integrate r${round} result discarded: durable verification receipt was not journaled; `
@@ -4514,9 +4889,11 @@ worker_result.json structure as StructuredOutput.` +
   // validated receipt is cached before selection: ranking and logging only read that same object.
   const prepareCandidateDecision = async (cand) => {
     const legacyImproved = cand.geomean > cumulative * (1 + MIN_IMPROVE);
-    const gateSpec = routeGateSpec(cand);
-    const routeReceipt = await routeGateFromPython(gateSpec, null, {
-      phase: 'Verify', label: `python route gate r${round} ${cand.id}`,
+    const routeReceipt = await routeGateForCandidate(cand, {
+      phase: 'Verify',
+      producerLabel: `paired producer r${round} ${cand.id}`,
+      adapterLabel: `paired adapter r${round} ${cand.id}`,
+      label: `python route gate r${round} ${cand.id}`,
     });
     cand._gateDecision = {
       legacyImproved,
@@ -4824,6 +5201,13 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
       && ((structureKey && a.structure_key === structureKey)
         || (artifactHash && a.artifact_sha256 === artifactHash)));
     const novel = valid && !!structureKey && !!artifactHash && !alreadyTried;
+    // Exhaustion is a statistical conclusion, not "anything did not bank". Only a validated
+    // Python route-gate receipt whose ordinary decision is refuse can supply one miss. Adapter
+    // failure, invalid evidence, invocation error, or an accepted candidate whose commit failed
+    // are infrastructure/control-plane outcomes and never close search.
+    const statisticalRefusal = !!(routeReceipt
+      && routeReceipt.schema === ROUTE_GATE_RECEIPT_SCHEMA
+      && routeReceipt.decision === 'refuse');
     const configInvalid = !!(result && result.configSelection
       && result.configSelection.required && !result.configSelection.ok);
     let outcome;
@@ -4843,7 +5227,9 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
     }
     deepAttemptThisRound = {
       round, cycle, direction: result && result.d ? result.d.id : '', outcome,
-      valid, novel, beneficial: improved, committed: committedThisRound,
+      valid, novel, statistical_refusal: statisticalRefusal,
+      gate_decision: routeReceipt ? String(routeReceipt.decision || '') : '',
+      beneficial: improved, committed: committedThisRound,
       structure_key: structureKey, artifact_sha256: artifactHash,
       verification_status: ver ? String(ver.status || '') : '',
       correctness: ver ? String(ver.correctness || '') : '',
@@ -4851,7 +5237,8 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
     deepAttempts.push(deepAttemptThisRound);
     processLog.push({ event: 'deep_attempt', ...deepAttemptThisRound });
     log(`  [deep] r${round} outcome=${outcome} valid=${valid} novel=${novel} `
-      + `beneficial=${improved} committed=${committedThisRound}`
+      + `statistical_refusal=${statisticalRefusal} beneficial=${improved} `
+      + `committed=${committedThisRound}`
       + `${structureKey ? ` structure=${structureKey}` : ''}.`);
   }
 
@@ -4867,8 +5254,8 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
         processLog.push({ event: 'deep_exhausted', round, cycle,
           valid_novel_misses: deepVerdict.valid_novel_misses });
         log(`STOP: ${deepVerdict.valid_novel_misses} independently valid and structurally novel deep `
-          + `implementations failed to improve the canonical. This is plural search evidence; API `
-          + `faults, missing patches, and broken builds were not counted. Budget ${dispatched}/${BUDGET}.`);
+          + `implementations received ordinary statistical refusals. This is plural search evidence; `
+          + `invalid evidence, adapter/API faults, missing patches, and broken builds were not counted. Budget ${dispatched}/${BUDGET}.`);
       } else {
         log(`Deep search remains live: ${deepVerdict.valid_novel_misses}/${MIN_VALID_NOVEL_DEEP_ATTEMPTS} `
           + 'valid novel misses. A single no-gain attempt and every infrastructure failure are '

@@ -33,32 +33,31 @@ Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped 
 is a versioned trust boundary, not a bag of optional hints. `WORKFLOW_STATE_HELPER` is the only
 implementation of its schema and canonical hashes.
 
-1. Decide/create the fresh `EVAL_DIR` first, as below. If both `$STATE_DIR/best/` and
-   `$STATE_DIR/STATE.json` exist, run exactly:
+1. Decide/create the fresh `EVAL_DIR` first, then classify the continuation with the helper —
+   never infer state from two independent existence checks:
    ```bash
-   python3 "$WORKFLOW_STATE_HELPER" validate      --state-file "$STATE_DIR/STATE.json"      --canonical "$STATE_DIR/best"      --receipt "$EVAL_DIR/resume_state_validation.json"
+   python3 "$WORKFLOW_STATE_HELPER" inspect --state-dir "$STATE_DIR" \
+     --receipt "$EVAL_DIR/resume_state_validation.json"
    ```
-   The helper checks `geak.workflow-state/v2`, all required control fields, and the independently
-   persisted canonical source / assembly / durable-binary hashes. Invalid state exits 2 by design;
-   still parse its JSON stdout/receipt and take the invalidation branch rather than treating that exit
-   code as a setup crash.
-2. **Only `status:"valid"` may resume.** Seed `baseline/` and `workspace/` from
-   `$STATE_DIR/best/` with the same symlink-preserving tar exclusions as the normal copy, re-apply
-   oracle read-only permissions, then `git init` + commit. Return `resumed:true` and `prior_state`
-   as the FULL parsed STATE object, including (do not drop any): `search_phase`, `phase_stall`,
-   `cycle`, `phase_log`, `deep_attempts`, `last_round`, `canonical_hashes`, `insights`, `ledger`,
-   `asm_ledger`, `keypoint_citations`, `rounds`, `process_log`, `bottleneck_now`, `best_per_case`,
-   and cumulative/frame fields. These are all schema-declared by the orchestrator; omitting one
-   silently restarts that part of the search.
-3. **Any schema or hash mismatch explicitly INVALIDATES the continuation.** Do not partially import
-   a source-valid/asm-stale state and do not guess which hash is right. Seed from
+   The receipt has exactly one `continuation_state`: `first`, `resume`, or `invalid`. Generation
+   checkpoints store `best` and `STATE.json` together and switch one atomic `current` pointer, so
+   the state can never describe a different canonical tree.
+2. **Only `continuation_state:"resume"` may resume.** Read `state_file` and `canonical` from the
+   receipt. Seed `baseline/` and `workspace/` from that canonical path with the normal
+   symlink-preserving exclusions, re-apply oracle read-only permissions, then `git init` + commit.
+   Return `continuation_state:"resume"`, `resumed:true`, and `prior_state` as the FULL parsed state,
+   including (do not drop any): `search_phase`, `phase_stall`, `cycle`, `phase_log`, `deep_attempts`,
+   `last_round`, `canonical_hashes`, `insights`, `ledger`, `asm_ledger`, `keypoint_citations`,
+   `rounds`, `process_log`, `bottleneck_now`, `best_per_case`, and cumulative/frame fields.
+3. **`continuation_state:"invalid"` explicitly invalidates the continuation.** Do not partially
+   import a source-valid/asm-stale state and do not guess which hash is right. Seed from
    `KERNEL_PATH_ORIG`, return `resumed:false`, `resume_invalidated:true`,
-   `resume_invalidation_reason` from the helper, and `state_validation` verbatim. Keep
-   `resume_state_validation.json` in `EVAL_DIR` as the durable receipt. Never overwrite or delete the
-   rejected state: preserving it makes the mismatch auditable.
-4. If `STATE_DIR` is set but either `best/` or `STATE.json` is absent, this is the first wave. Use
-   `KERNEL_PATH_ORIG`, return `resumed:false`, and do not create `best/`; the orchestrator's
-   versioned state capability publishes it only after a canonical commit.
+   `continuation_state:"invalid"`, and `resume_invalidation_reason` from the helper. Keep the
+   receipt and never overwrite/delete the rejected generations.
+4. **`continuation_state:"first"` is a real first wave, not invalid.** Use `KERNEL_PATH_ORIG`, return
+   `continuation_state:"first"`, `resumed:false`, and `resume_invalidated:false`. Do not create
+   `best` during setup. The very first orchestrator checkpoint — even when no candidate banked —
+   publishes a recoverable canonical best+state generation.
 5. Independently verify the oracle as before (`reference_io.pt` vs `meta.json` when present). Oracle
    mismatch also invalidates resume and takes the original-seed path.
 
@@ -203,6 +202,7 @@ Return JSON:
   "source_files": ["<relative paths under workspace>"],
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
+  "continuation_state": "first",
   "resumed": false,
   "prior_state": {},
   "resume_invalidated": false,
@@ -291,8 +291,9 @@ scored against a denominator that no longer
 exists. Omitting the digest does not abort, but it marks the run `oracle:unpinned`: results are still
 reported and are permanently ineligible to win a bake-off, because nothing can show they share a
 denominator. Return the same digest again in `director_validation.json` at validate time.
-(DEEP-MODE resume only: also include `"resumed": true` and `"prior_state": {cumulative, insights, ledger,
-bottleneck_now, best_per_case}` when you seeded from `$STATE_DIR/best/`; omit both on a normal/first run.)
+(DEEP-MODE resume only: return `continuation_state:"resume"`, `resumed:true`, and the full
+`prior_state` when the inspect receipt selected its generation canonical. A first/no-state run returns
+`continuation_state:"first"`; an invalid receipt returns `continuation_state:"invalid"`.)
 
 ---
 

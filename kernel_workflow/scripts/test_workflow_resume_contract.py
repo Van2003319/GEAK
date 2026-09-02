@@ -130,5 +130,19 @@ def test_recovery_preserves_planner_targets_but_remeasures_raw_pairs() -> None:
     assert 'target_routes: Array.isArray(entry.target_routes) ? entry.target_routes : []' in LANE
     assert ".map(route => `--target-route ${JSON.stringify(String(route))} `).join('')" in LANE
     assert 'TARGET_ROUTES: Array.isArray(d.target_routes) ? d.target_routes : []' in LANE
-    assert 'paired_per_case: Array.isArray(r.ver.paired_per_case) ? r.ver.paired_per_case : null' in LANE
-    assert 'JavaScript never substitutes bestPerCase from another session' in LANE
+    assert "const lanePairedSessionId = (cand) =>" in LANE
+    assert "python3 ${JSON.stringify(PAIRED_VERIFY_SCRIPT)} produce" in LANE
+    assert "routeGateInputFromTask(request" in LANE
+    assert "measurement_session_id: { type: 'string' }" not in LANE
+    assert "paired_per_case: pairedPerCase" not in LANE
+
+
+def test_first_barrier_and_resume_use_atomic_generations() -> None:
+    helper = (ROOT / "scripts" / "workflow_state.py").read_text(encoding="utf-8")
+    assert "Every barrier snapshots the canonical tree" in helper
+    assert "_atomic_symlink(state_root / \"current\"" in helper
+    assert "continuation_state\": \"first\"" in helper
+    assert "continuation_state\": \"resume\"" in helper
+    assert "continuation_state\": \"invalid\"" in helper
+    assert "continuation_state: { type: 'string', enum: ['first', 'resume', 'invalid'] }" in LANE
+    assert "inspect --state-dir" in DIRECTOR

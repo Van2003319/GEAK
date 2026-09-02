@@ -86,3 +86,15 @@ the checked-in FP8 manifest identifies the historical unversioned write-flush se
 change intentionally did not run a suite-wide benchmark. Therefore a fresh 48-hour lane must run
 one locked v2 oracle bake-off first; formal performance refuses to reuse either historical route as
 if it had been selected under v2.
+
+## Kernel-lane paired promotion adapter
+
+The bundled BF16 and FP8 task runners expose `paired-verify`. It is invoked only by
+`kernel_workflow/scripts/paired_verify.py produce` with an immutable absolute task-runner path. The
+producer supplies candidate/incumbent roots through `GEAK_PAIRED_*`, holds one repository GPU lock
+around the complete suite, and seals `geak.paired-verify-task-receipt/v2`. Every route uses a common
+slot count, so its candidate and untouched incumbent observations have one shared outer-block
+inventory across the suite. The adapter derives session pair IDs; no role/model reports them.
+
+Oracle arms are optional and marked `absolute_report_only`. A stale or unavailable oracle manifest
+removes that absolute report but does not change or veto candidate-versus-incumbent promotion.

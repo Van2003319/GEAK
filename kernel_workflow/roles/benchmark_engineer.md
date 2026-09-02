@@ -193,6 +193,7 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "commandment_path": "<EVAL_DIR>/COMMANDMENT.md",
   "correctness_cmd": "<exact>",
   "benchmark_cmd": "<exact full-benchmark cmd, WITHOUT the gpu_lock wrapper>",
+  "paired_verify_argv": ["python3", "<absolute TASK_DIR>/scripts/task_runner.py", "paired-verify"],
   "profile_cmd": "<exact profile inner cmd>",
   "parse_hint": "how to extract per-case latency + case ids (and count, when workload-aligned)",
   "baseline_per_case": [{"name": "...", "latency_ms": 0.0, "samples_ms": [0.0, 0.0, 0.0],
@@ -207,6 +208,16 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "notes": "anything downstream agents must know (incl. any naive-baseline / regime_prior caveats)"
 }
 ```
+
+`paired_verify_argv` is mandatory and is an argv array, not shell text. It names checked-in task code
+that reads `GEAK_PAIRED_CANDIDATE_ROOT`, `GEAK_PAIRED_INCUMBENT_ROOT`,
+`GEAK_PAIRED_EXPECTED_ROUTES`, and `GEAK_PAIRED_RAW_RECEIPT`, then writes
+`geak.paired-measurement-suite/v2`. The lane runs it through `paired_verify.py` under one outer GPU
+lock. It must measure candidate and incumbent in every protocol-v2 block of every route; oracle arms
+are optional report-only arms. The adapter path must be absolute and live under immutable `TASK_DIR`, never under the candidate
+workspace; for the bundled BF16/FP8 GEMM tasks replace the placeholder with that absolute path.
+A legacy benchmark command is not a paired producer and must not be listed here.
+
 `num_test_cases` is required and must equal the number of unique rows in `baseline_per_case`. Together
 those exact route names are the commit gate's suite manifest: a verifier returning one measured route
 from an eleven-route suite must not turn that fragment into a complete non-regression claim.

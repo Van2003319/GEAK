@@ -112,13 +112,14 @@ ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({
 console.log('\n# candidate admission cannot bypass the Python commit receipt');
 ok(/const legacyImproved = cand\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\);/.test(src),
    'the old suite comparison remains only as a migration audit number');
-ok(/const routeReceipt = await routeGateFromPython\(gateSpec, null, \{/.test(src)
+ok(/const routeReceipt = await routeGateForCandidate\(cand, \{/.test(src)
    && /improved: !!\(routeReceipt && routeReceipt\.accepted === true\)/.test(src),
-   'the Python receipt alone decides commit acceptance');
+   'the paired adapter plus Python receipt alone decide commit acceptance');
 ok(!/improved:\s*legacyImproved/.test(src),
    'missing raw evidence or a failed Python command bridge cannot fall back to a summary bank');
-ok(!/const routeGate =/.test(src) && !/CATASTROPHIC_REGRESSION/.test(src),
-   'route statistics and the catastrophic fence are not reimplemented in JavaScript');
+const receiptBoundary = (src.match(/const validateRouteGateReceipt = [\s\S]*?\n\};\n/) || [''])[0];
+ok(!/const routeGate =/.test(src) && receiptBoundary && !/Math\.log|Math\.exp|_trimmed_mean|randbelow/.test(receiptBoundary),
+   'route statistics and the catastrophic calculation are not reimplemented in JavaScript');
 ok(/const passIdx = candidates\.findIndex\(c => judgeCandidate\(c\)\.improved\);/.test(src),
    'selection uses the SAME receipt predicate as acceptance');
 ok(/const suiteProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),

@@ -2,6 +2,7 @@
 """Build, validate, benchmark, and profile the BF16 GEMM task."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -64,9 +65,10 @@ def _make_inputs(case, seed_offset=0):
     return a, b
 
 
-def _make_measurement_slots(case, protocol):
+def _make_measurement_slots(case, protocol, count_override=None):
     weight_bytes = int(case["N"]) * int(case["K"]) * 2
-    count = harness.weight_rotation_slot_count(weight_bytes, protocol)
+    count = (harness.weight_rotation_slot_count(weight_bytes, protocol)
+             if count_override is None else int(count_override))
     specs = harness.semantic_weight_slot_specs(case["seed"], count, protocol)
     a_gen = torch.Generator(device="cuda").manual_seed(specs[0]["semantic"]["a_seed"])
     a = (torch.randn(case["M"], case["K"], generator=a_gen, device="cuda") * 0.1).to(torch.bfloat16)
@@ -381,6 +383,80 @@ def run_performance(selected_case=None, protocol_name=None):
     return True, report
 
 
+def _load_paired_candidate(root, label):
+    """Load candidate-owned code from one immutable arm under a unique module name."""
+    from torch.utils.cpp_extension import ROCM_HOME, load
+
+    root = Path(root).resolve()
+    sources = [root / "src/gemm_bindings.cpp", root / "src/dense_bf16_gemm.hip",
+               root / "src/custom_gemm.hip"]
+    if any(not path.is_file() for path in sources):
+        raise RuntimeError(f"{label} root lacks BF16 candidate sources: {root}")
+    digest = hashlib.sha256()
+    for path in sources:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    name = f"geak_paired_bf16_{label}_{digest.hexdigest()[:16]}"
+    build = root / "build" / name
+    build.mkdir(parents=True, exist_ok=True)
+    ext = load(
+        name=name, sources=[str(path) for path in sources], build_directory=str(build),
+        extra_include_paths=[str(Path(ROCM_HOME or os.environ.get("ROCM_HOME", "/opt/rocm")) / "include")],
+        extra_cflags=["-O3"], extra_cuda_cflags=["-O3"], verbose=True)
+    return ext.dense_bf16_gemm
+
+
+def run_paired_verify(protocol_name=None):
+    """Task-v2 producer: full suite, same slots/blocks, candidate+incumbent+oracle."""
+    from oracle_wrapper import oracle_backends, oracle_route, validate_oracle_routes
+
+    candidate_root = Path(os.environ["GEAK_PAIRED_CANDIDATE_ROOT"])
+    incumbent_root = Path(os.environ["GEAK_PAIRED_INCUMBENT_ROOT"])
+    output = Path(os.environ["GEAK_PAIRED_RAW_RECEIPT"])
+    expected = json.loads(os.environ["GEAK_PAIRED_EXPECTED_ROUTES"])
+    suite = [case["id"] for case in CASES]
+    if sorted(expected) != sorted(suite):
+        raise RuntimeError(f"paired verify requires the complete BF16 suite: {suite}")
+    protocol = harness.measurement_protocol(protocol_name)
+    trusted, errors = validate_oracle_routes(protocol["hash"], CASES)
+    candidate = _load_paired_candidate(candidate_root, "candidate")
+    incumbent = _load_paired_candidate(incumbent_root, "incumbent")
+    backends = oracle_backends(frozen_algorithms=True) if trusted else {}
+    # Every route must expose the same outer block inventory. Use the largest slot count any
+    # suite route needs to exceed the cache; routes are measured sequentially, so this does not
+    # retain all suites' weights at once.
+    bytes_per_weight = 2
+    common_slot_count = max(harness.weight_rotation_slot_count(
+        int(case["N"]) * int(case["K"]) * bytes_per_weight, protocol) for case in CASES)
+    routes = []
+    for case in CASES:
+        arms = {
+            "candidate": lambda slot, fn=candidate: fn(*slot["args"]),
+            "incumbent": lambda slot, fn=incumbent: fn(*slot["args"]),
+        }
+        absolute = {"status": "unavailable", "reason": "; ".join(errors)}
+        if trusted:
+            route = oracle_route(case["M"], case["N"], case["K"])
+            oracle_arm = f"oracle:{route}"
+            arms[oracle_arm] = lambda slot, fn=backends[route]: fn(*slot["args"])
+        receipt = harness.measure_paired_arms(
+            arms, _make_measurement_slots(case, protocol, common_slot_count),
+            protocol=protocol, metric="single_call_latency")
+        _validate_measurement_receipt(receipt)
+        if trusted:
+            absolute = {"status": "ok", "oracle_arm": oracle_arm,
+                        "candidate_ms": receipt["medians_ms"]["candidate"],
+                        "oracle_ms": receipt["medians_ms"][oracle_arm]}
+        routes.append({"route": case["id"], "measurement_receipt": receipt,
+                       "absolute_report": absolute})
+    raw = {"schema": "geak.paired-measurement-suite/v2",
+           "expected_routes": sorted(suite), "protocol_hash": protocol["hash"],
+           "promotion_control": "incumbent", "oracle_role": "absolute_report_only",
+           "routes": routes}
+    harness.atomic_write_json(output, raw)
+    return True, raw
+
+
 def run_oracle_bakeoff(selected_case=None, protocol_name=None):
     """Re-select and atomically freeze the BF16 denominator; never called by performance."""
     from oracle_wrapper import oracle_backend_metadata, oracle_backends
@@ -475,7 +551,7 @@ def run_profile(case_id, implementation, iterations):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["preflight", "compile", "correctness", "performance",
-                                         "oracle-bakeoff", "profile"])
+                                         "oracle-bakeoff", "paired-verify", "profile"])
     parser.add_argument("--case")
     parser.add_argument("--protocol", choices=["legacy_write_flush", "read_evict", "warm",
                                                 "semantic_weight_rotating"])
@@ -497,6 +573,10 @@ def main():
             if not args.confirm_oracle_bakeoff:
                 parser.error("oracle-bakeoff requires --confirm-oracle-bakeoff")
             ok, report = run_oracle_bakeoff(args.case, args.protocol)
+        elif args.mode == "paired-verify":
+            if args.case:
+                parser.error("paired-verify is full-suite only; --case is forbidden")
+            ok, report = run_paired_verify(args.protocol)
         else:
             if not args.case:
                 parser.error("profile requires --case")

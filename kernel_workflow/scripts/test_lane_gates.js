@@ -31,13 +31,29 @@ const makeReceiptConsumer = () => new Function(`
   ${grab(/^const ROUTE_GATE_BOOTSTRAP_SEED = .*?;$/m, 'gate seed')}
   ${grab(/^const ROUTE_GATE_BOOTSTRAP_RESAMPLES = .*?;$/m, 'gate resamples')}
   ${grab(/^const ROUTE_GATE_MIN_PAIRS = .*?;$/m, 'gate minimum pairs')}
+  ${grab(/^const ROUTE_GATE_DEFAULT_PRACTICAL_MDE = .*?;$/m, 'default MDE')}
+  ${grab(/^const ROUTE_GATE_DEFAULT_NON_REGRESSION_MARGIN = .*?;$/m, 'default non-regression')}
+  ${grab(/^const ROUTE_GATE_DEFAULT_SUITE_MARGIN = .*?;$/m, 'default suite margin')}
+  ${grab(/^const ROUTE_GATE_CATASTROPHIC_REGRESSION = .*?;$/m, 'catastrophic fence')}
+  ${grab(/^const PAIRED_VERIFY_TASK_SCHEMA = .*?;$/m, 'paired task schema')}
+  ${grab(/^const PAIRED_VERIFY_BINDING_SCHEMA = .*?;$/m, 'paired binding schema')}
+  ${grab(/^const ROUTE_GATE_ALGORITHM_EFFECTIVE = [\s\S]*?^};/m, 'effective algorithm')}
   ${grab(/^const sortedStrings = .*?;$/m, 'sortedStrings')}
   ${grab(/^const sameStrings = .*?;$/m, 'sameStrings')}
   ${grab(/^const finiteNumber = .*?;$/m, 'finiteNumber')}
+  ${grab(/^const canonicalJSONString = [\s\S]*?^};/m, 'canonical JSON')}
+  ${grab(/^const sha256Ascii = [\s\S]*?^};/m, 'SHA-256')}
+  ${grab(/^const canonicalSha256 = .*?;$/m, 'canonical digest')}
+  ${grab(/^const sameCanonical = .*?;$/m, 'canonical equality')}
+  ${grab(/^const applicableRouteValues = [\s\S]*?^};/m, 'route values')}
+  ${grab(/^const expectedGateEffective = [\s\S]*?^};/m, 'effective parameters')}
   ${grab(/^const routeGateInvocationFailure = [\s\S]*?\n\}\);/m, 'routeGateInvocationFailure')}
   ${grab(/^const validateRouteGateReceipt = [\s\S]*?\n\};/m, 'validateRouteGateReceipt')}
   return (spec, receipt) => {
-    try { return validateRouteGateReceipt(receipt, spec); }
+    try {
+      if (receipt.input_sha256 === '__AUTO__') receipt.input_sha256 = canonicalSha256(spec);
+      return validateRouteGateReceipt(receipt, spec);
+    }
     catch (e) { return routeGateInvocationFailure('Python route gate failed closed: ' + e.message); }
   };`)();
 
@@ -903,10 +919,28 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
 {
   const consume = makeReceiptConsumer();
   const ids = Array.from({ length: 8 }, (_, i) => `pair-${String(i).padStart(2, '0')}`);
+  const protocolHash = '70380c6a6641040cd7b01f0832ab5b5674abfd5c1bed02c9b355ff3230aae6ab';
+  const lifecycle = { ring_size: 3, observed_addresses: 8,
+    unique_addresses: 3, addresses_rotated: true };
+  const measurement = {
+    schema: 'geak.paired-verify-binding/v2',
+    producer_schema: 'geak.paired-verify-task-receipt/v2',
+    promotion_control: 'incumbent', oracle_role: 'absolute_report_only',
+    canonical_input_sha256: 'c'.repeat(64),
+    protocol: { schema: 'geak.measurement-protocol/v2', version: 2,
+      name: 'semantic_weight_rotating', warmup_cycles: 1, hash: protocolHash },
+    protocol_hash: protocolHash, metric_id: 'single_call_latency',
+    gpu_lock: { mode: 'external', path: '/tmp/gpu.lock' },
+    priming: { required: true, all_samples_primed: true, warmup_cycles: 1, timer: 'cuda_event' },
+    output_lifecycle: { policy: 'bounded-live-ring', all_arms_rotated: true,
+      per_route: { a: { candidate: lifecycle, incumbent: lifecycle },
+        b: { candidate: lifecycle, incumbent: lifecycle } } },
+    incumbent_unchanged: true,
+  };
   const spec = {
     schema: 'geak.route-gate-input/v2', session_id: 'session-1',
     expected_routes: ['a', 'b'], expected_route_count: 2,
-    target_routes: ['a'],
+    target_routes: ['a'], measurement,
     paired_routes: [{ route: 'a', candidate: { pair_ids: ids } }],
   };
   const routeRow = (route, role, passed) => ({
@@ -919,11 +953,20 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
     decision, accepted: decision === 'accept', reason: decision,
     session_id: 'session-1', expected_routes: ['a', 'b'], expected_route_count: 2,
     target_routes: ['a'], pair_ids: decision === 'invalid_evidence' ? [] : ids,
-    input_sha256: 'a'.repeat(64),
+    input_sha256: '__AUTO__', measurement,
     algorithm: { name: 'paired-log-trimmed-bootstrap/v1',
-      effect: 'log(control_ms/candidate_ms)', confidence: 0.95,
-      seed: 20260902, resamples: 4096, min_pairs: 8 },
-    effective_margins: decision === 'invalid_evidence' ? null : {},
+      effect: 'log(control_ms/candidate_ms)', estimator: '20% trimmed mean',
+      trim_rule: 'drop floor(n*0.20) observations from each tail', confidence: 0.95,
+      interval: 'one-sided paired percentile bootstrap lower bound',
+      quantile: 'linear interpolation at p=0.05 (R type 7)',
+      seed: 20260902, resamples: 4096,
+      rng: 'SplitMix64; stream seed is first 64 bits of SHA256(seed:label), big-endian',
+      index_sampler: 'next_u64 modulo n', min_pairs: 8,
+      multiple_endpoints: 'intersection-union: every declared endpoint must pass',
+      catastrophic_statistic: 'trimmed-mean point estimate of candidate/control latency change' },
+    effective_margins: decision === 'invalid_evidence' ? null : {
+      practical_mde: { a: 0.02 }, non_regression_margin: { b: 0.02 },
+      suite_non_inferiority_margin: 0.01, catastrophic_regression: 0.10 },
     route_weights: decision === 'invalid_evidence' ? null : { a: 0.5, b: 0.5 },
     suite: decision === 'invalid_evidence' ? null : {
       n_pairs: 8, passed: decision === 'accept',
@@ -957,6 +1000,15 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
   const wrongSeedOut = consume(spec, wrongSeed);
   ok(!wrongSeedOut.accepted && /seed/.test(wrongSeedOut.reason),
     'a receipt from an unpinned bootstrap protocol is rejected');
+  const fakeHash = receipt('accept'); fakeHash.input_sha256 = 'a'.repeat(64);
+  const fakeHashOut = consume(spec, fakeHash);
+  ok(!fakeHashOut.accepted && /digest/.test(fakeHashOut.reason),
+    'a plausible-looking but fake input SHA is independently recomputed and rejected');
+  const fakeMargins = receipt('accept'); fakeMargins.effective_margins.practical_mde.a = 0.99;
+  const fakeMarginsOut = consume(spec, fakeMargins);
+  ok(!fakeMarginsOut.accepted && /effective margins/.test(fakeMarginsOut.reason),
+    'effective parameters are deeply compared, not trusted by hash or shape');
+
   const stalePairs = receipt('accept'); stalePairs.pair_ids = ids.slice(1);
   const stalePairsOut = consume(spec, stalePairs);
   ok(!stalePairsOut.accepted && /pair_ids/.test(stalePairsOut.reason),
@@ -970,12 +1022,13 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
     'Python receipt boundary');
   ok(!/require\(|child_process|spawnSync|Math\.log|suiteRatio|delta_frac/.test(gateBoundary),
     'JavaScript validates and transports receipts without a process API or statistical twin');
-  ok(/schema: ROUTE_GATE_INPUT_SCHEMA[\s\S]*session_id: cand && cand\.measurement_session_id[\s\S]*expected_routes: GATE_EXPECTED_ROUTES[\s\S]*expected_route_count: GATE_EXPECTED_ROUTE_COUNT[\s\S]*paired_routes: cand && cand\.paired_per_case/.test(src),
-    'the submitted spec carries explicit session, complete suite manifest and raw paired blocks');
-  ok(/measurement_session_id: \{ type: 'string' \}/.test(src)
-     && /paired_per_case: pairedPerCase/.test(src)
-     && /required: \['route', 'candidate', 'control'\]/.test(src),
-    'the verifier schema preserves session-labelled candidate/control raw blocks');
+  ok(/const lanePairedSessionId = \(cand\) =>/.test(src)
+     && /python3 \${JSON\.stringify\(PAIRED_VERIFY_SCRIPT\)} produce/.test(src)
+     && /routeGateInputFromTask\(request/.test(src),
+    'the lane creates sessions and invokes the deterministic full-suite paired producer/adapter');
+  ok(!/measurement_session_id: \{ type: 'string' \}/.test(src)
+     && !/paired_per_case: pairedPerCase/.test(src),
+    'verifier-authored session and pair ids are absent from the accepted schema');
   ok(/const PLAN_SCHEMA = obj\(\{[\s\S]*?target_routes: \{ type: 'array'[\s\S]*?\['id', 'title', 'specialty', 'prompt', 'target_routes'\]/.test(src)
      && /TARGET_ROUTES: Array\.isArray\(d\.target_routes\) \? d\.target_routes : \[\]/.test(src)
      && /target_routes: Array\.isArray\(r\.d\.target_routes\) \? r\.d\.target_routes : undefined/.test(src),
@@ -1102,6 +1155,14 @@ console.log('\n# phase2 dispatches an ASSEMBLY engineer against a located keypoi
 
 console.log('\n# deep attempts restart on a win and stop only on plural valid novelty');
 {
+  ok(/target_routes: \{ type: 'array', minItems: 1, items: \{ type: 'string' \} \}/.test(src),
+    'planner target routes are schema-nonempty, not merely described as nonempty');
+  ok(/const fallbackTargets = sortedStrings\(seed\.target_routes\)\.length[\s\S]{0,180}GATE_EXPECTED_ROUTES/.test(src)
+     && /target_routes: fallbackTargets/.test(src),
+    'a deep no-plan fallback freezes the full lane suite before measurement');
+  ok(/const plannedDirectionCount = plan && Array\.isArray\(plan\.directions\)/.test(src)
+     && !/planned \${plan\.directions\.length}/.test(src),
+    'deep no-plan logging does not dereference a null plan');
   ok(/roundPhase === PHASE_DEEP && !planned\.some\(d => d\.specialty === 'deep_explore'\)/.test(src),
     'the deep round IS the deep engineer, promoted when the planner did not ask for one. Leaving ' +
     'it discretionary would make the round that closes a cycle indistinguishable from a phase-1 ' +
@@ -1126,7 +1187,8 @@ console.log('\n# deep attempts restart on a win and stop only on plural valid no
     'deep exhaustion verdict');
   const deepExhaustion = new Function(`${deepBlock}; return deepExhaustion;`)();
   const miss = (key, hash) => ({ cycle: 3, outcome: 'valid_new_structure', valid: true,
-    novel: true, beneficial: false, structure_key: key, artifact_sha256: hash });
+    novel: true, statistical_refusal: true, beneficial: false,
+    structure_key: key, artifact_sha256: hash });
   ok(deepExhaustion([miss('a', '1')], 3, 2).stop === false,
     'one valid novel no-gain attempt cannot terminate deep search');
   ok(deepExhaustion([miss('a', '1'), miss('a', '1')], 3, 2).stop === false,
@@ -1134,8 +1196,12 @@ console.log('\n# deep attempts restart on a win and stop only on plural valid no
   ok(deepExhaustion([miss('a', '1'), miss('b', '2')], 3, 2).stop === true,
     'two distinct valid novel misses may close deep search');
   ok(deepExhaustion([miss('a', '1'), { cycle: 3, outcome: 'api_failure', valid: false,
-      novel: false, beneficial: false }], 3, 2).stop === false,
+      novel: false, statistical_refusal: false, beneficial: false }], 3, 2).stop === false,
     'API failure is not exhaustion evidence');
+  ok(deepExhaustion([miss('a', '1'), { cycle: 3, outcome: 'valid_new_structure', valid: true,
+      novel: true, statistical_refusal: false, gate_decision: 'invalid_evidence',
+      structure_key: 'b', artifact_sha256: '2', beneficial: false }], 3, 2).stop === false,
+    'deep invalid evidence is not statistical exhaustion');
   ok(/the deep round banked a different implementation, so the ladder restarts on it/.test(src),
     'a committed deep round restarts the ladder: the findings and keypoints of the last cycle ' +
     'describe a tree that no longer exists');

@@ -216,7 +216,8 @@ class PythonReceiptOverridesLegacySummary(unittest.TestCase):
     """Resume arithmetic is diagnostic; the paired Python receipt owns commitment."""
 
     def test_python_receipt_is_the_commit_decision(self):
-        self.assertIn("const routeReceipt = await routeGateFromPython(gateSpec, null, {", SOURCE)
+        self.assertIn("const routeReceipt = await routeGateForCandidate(cand, {", SOURCE)
+        self.assertIn("python3 ${JSON.stringify(PAIRED_VERIFY_SCRIPT)} produce", SOURCE)
         self.assertIn("improved: !!(routeReceipt && routeReceipt.accepted === true)", SOURCE)
         self.assertNotIn("improved: legacyImproved", SOURCE)
 
