@@ -176,6 +176,8 @@ if [ -n "${POOL_FD:-}" ]; then
     # the same file from the same process would be a no-op at best, so just run -- the lane stays
     # held until we exit, which is what guarantees no two evaluations share a GPU.
     export HIP_VISIBLE_DEVICES="$GPU_ID"
+    export GEAK_GPU_LOCK_HELD=1
+    export GEAK_GPU_LOCK_FILE="$LOCK_FILE"
     "$@"
 else
     # Single-GPU mode BLOCKS TOO, and its wait must be measured for the same reason the pool's is.
@@ -202,6 +204,8 @@ else
             echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
+        export GEAK_GPU_LOCK_HELD=1
+        export GEAK_GPU_LOCK_FILE="$LOCK_FILE"
         "$@"
     ) 200>"$LOCK_FILE"
 fi

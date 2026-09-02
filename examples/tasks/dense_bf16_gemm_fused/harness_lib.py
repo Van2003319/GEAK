@@ -36,9 +36,18 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
       the ceiling is box drift / measurement error, not the kernel.
 """
+import hashlib
+import json
 import math
 import os
+import random
+import shutil
+import signal
+import subprocess
+import sys
 import time
+from collections import deque
+from contextlib import contextmanager
 
 
 # --------------------------------------------------------------------------- device sync
@@ -354,7 +363,7 @@ _CACHE_FLUSH_BUF = None
 _TIMING_PRIME_BUF = None
 
 
-def _prime_timing_stream(torch):
+def _prime_timing_stream(torch, mb=None):
     """Queue independent GPU work on the current stream before the start event.
 
     A modest native buffer write leaves a same-stream backlog while Python enqueues the
@@ -364,8 +373,9 @@ def _prime_timing_stream(torch):
     """
     global _TIMING_PRIME_BUF
     try:
-        if _TIMING_PRIME_BUF is None:
-            n = max(1, (int(os.environ.get("HARNESS_TIMING_PRIME_MB", "4")) << 20) // 4)
+        mb = int(os.environ.get("HARNESS_TIMING_PRIME_MB", "4")) if mb is None else int(mb)
+        n = max(1, (mb << 20) // 4)
+        if _TIMING_PRIME_BUF is None or _TIMING_PRIME_BUF.numel() != n:
             _TIMING_PRIME_BUF = torch.empty(n, dtype=torch.float32, device="cuda")
         _TIMING_PRIME_BUF.zero_()
         return True
@@ -490,9 +500,732 @@ def _time_graph(torch, g, warmup, repeats, flush):
     return (dev[len(dev) // 2], wall[len(wall) // 2], host[len(host) // 2], primed)
 
 
+# --------------------------------------------------------------------------- versioned measurement
+# `time_op` above is intentionally retained byte-for-contract for old tasks. New GEMM lanes use
+# the paired protocol below. Semantic-weight rotation replaces a 512 MiB write before every
+# sample with a deterministic pool of real B operands whose reuse distance exceeds the cache.
+MEASUREMENT_PROTOCOL_SCHEMA = "geak.measurement-protocol/v2"
+MEASUREMENT_RECEIPT_SCHEMA = "geak.measurement-receipt/v2"
+DEFAULT_MEASUREMENT_PROTOCOL = "semantic_weight_rotating"
+
+_PROTOCOL_ALIASES = {
+    "semantic-weight-rotating": "semantic_weight_rotating",
+    "semantic_weight_rotation": "semantic_weight_rotating",
+    "weight_rotating": "semantic_weight_rotating",
+    "legacy": "legacy_write_flush",
+    "read": "read_evict",
+}
+
+_PROTOCOL_PRESETS = {
+    "legacy_write_flush": {
+        "cache_policy": "legacy_write_flush",
+        "slot_policy": "fixed",
+        "semantic_operand": None,
+        "description": "write a synthetic eviction buffer before every arm sample",
+    },
+    "read_evict": {
+        "cache_policy": "read_evict",
+        "slot_policy": "fixed",
+        "semantic_operand": None,
+        "description": "read a synthetic eviction buffer before every arm sample",
+    },
+    "warm": {
+        "cache_policy": "warm",
+        "slot_policy": "fixed",
+        "semantic_operand": None,
+        "description": "reuse one warmed operand slot without synthetic eviction",
+    },
+    "semantic_weight_rotating": {
+        "cache_policy": "semantic_weight_rotating",
+        "slot_policy": "semantic_weight_rotation",
+        "semantic_operand": "B",
+        "description": "rotate real weight operand B with a cache-sized reuse distance",
+    },
+}
+
+
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                      allow_nan=False)
+
+
+def protocol_hash(protocol):
+    """Content hash for a protocol, excluding only its self-referential ``hash`` field."""
+    payload = dict(protocol)
+    payload.pop("hash", None)
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _protocol_int(value, env_name, default, minimum=0):
+    raw = os.environ.get(env_name, default) if value is None else value
+    out = int(raw)
+    if out < minimum:
+        raise ValueError(f"{env_name} must be >= {minimum}, got {out}")
+    return out
+
+
+def measurement_protocol(name=None, *, seed=None, latency_cycles=None,
+                         throughput_cycles=None, throughput_inner=None,
+                         warmup_cycles=None, output_ring_size=None,
+                         rotation_target_mb=None, assumed_cache_mb=None,
+                         max_slots=None, timing_prime_mb=None,
+                         synthetic_evict_mb=None):
+    """Build the complete, hashable v2 protocol used by a measurement receipt.
+
+    A protocol is data, not ambient convention: every knob that changes slot order, cache state,
+    output lifetime, or metric meaning is in this dictionary and therefore in its hash.
+    """
+    raw_name = name or os.environ.get("GEAK_MEASUREMENT_PROTOCOL",
+                                      DEFAULT_MEASUREMENT_PROTOCOL)
+    name = _PROTOCOL_ALIASES.get(str(raw_name).strip().lower(),
+                                 str(raw_name).strip().lower())
+    if name not in _PROTOCOL_PRESETS:
+        raise ValueError(f"unknown measurement protocol {raw_name!r}; expected one of "
+                         f"{sorted(_PROTOCOL_PRESETS)}")
+    preset = _PROTOCOL_PRESETS[name]
+    protocol = {
+        "schema": MEASUREMENT_PROTOCOL_SCHEMA,
+        "version": 2,
+        "name": name,
+        "seed": _protocol_int(seed, "GEAK_MEASUREMENT_SEED", 20260902, 0),
+        "cache_policy": preset["cache_policy"],
+        "slot_policy": preset["slot_policy"],
+        "semantic_operand": preset["semantic_operand"],
+        "description": preset["description"],
+        "warmup_cycles": _protocol_int(warmup_cycles, "GEAK_WARMUP_CYCLES", 1, 0),
+        "rotation_target_bytes": _protocol_int(
+            rotation_target_mb, "GEAK_ROTATION_TARGET_MB", 384, 1) << 20,
+        "assumed_cache_bytes": _protocol_int(
+            assumed_cache_mb, "GEAK_ASSUMED_CACHE_MB", 256, 1) << 20,
+        "max_slots": _protocol_int(max_slots, "GEAK_MAX_WEIGHT_SLOTS", 32, 2),
+        "output_ring_size": _protocol_int(
+            output_ring_size, "GEAK_OUTPUT_RING_SIZE", 3, 2),
+        "timing_prime_bytes": _protocol_int(
+            timing_prime_mb, "HARNESS_TIMING_PRIME_MB", 4, 1) << 20,
+        "synthetic_evict_bytes": _protocol_int(
+            synthetic_evict_mb, "GEAK_SYNTHETIC_EVICT_MB",
+            os.environ.get("HARNESS_CACHE_FLUSH_MB", 512), 1) << 20,
+        "metrics": {
+            "single_call_latency": {
+                "id": "single_call_latency",
+                "unit": "ms/call",
+                "inner": 1,
+                "cycles": _protocol_int(
+                    latency_cycles, "GEAK_LATENCY_CYCLES", 6, 1),
+                "meaning": "one device launch per event interval",
+            },
+            "sustained_throughput": {
+                "id": "sustained_throughput",
+                "unit": "ms/call",
+                "inner": _protocol_int(
+                    throughput_inner, "GEAK_THROUGHPUT_INNER", 16, 2),
+                "cycles": _protocol_int(
+                    throughput_cycles, "GEAK_THROUGHPUT_CYCLES", 3, 1),
+                "meaning": "back-to-back launches divided by inner; never a latency score",
+            },
+        },
+    }
+    if (name == "semantic_weight_rotating" and
+            protocol["rotation_target_bytes"] <= protocol["assumed_cache_bytes"]):
+        raise ValueError("semantic weight rotation target must exceed assumed cache bytes")
+    protocol["hash"] = protocol_hash(protocol)
+    return protocol
+
+
+def protocol_metric(protocol, metric):
+    aliases = {
+        "latency": "single_call_latency",
+        "single_call_latency_ms": "single_call_latency",
+        "throughput": "sustained_throughput",
+        "sustained_throughput_ms": "sustained_throughput",
+    }
+    key = aliases.get(metric, metric)
+    try:
+        out = dict(protocol["metrics"][key])
+    except KeyError as exc:
+        raise ValueError(f"unknown metric {metric!r}") from exc
+    if key == "single_call_latency" and out["inner"] != 1:
+        raise ValueError("single-call latency must use inner=1")
+    if key == "sustained_throughput" and out["inner"] <= 1:
+        raise ValueError("sustained throughput must use inner>1")
+    return key, out
+
+
+def derive_measurement_seed(seed, *parts):
+    """Stable 63-bit seed; unlike ``hash()``, independent of PYTHONHASHSEED."""
+    text = _canonical_json([int(seed)] + [str(p) for p in parts])
+    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big") & ((1 << 63) - 1)
+
+
+def semantic_weight_slot_specs(case_seed, count, protocol):
+    """Pure slot identities used by BF16 and FP8 builders; A is shared while B rotates."""
+    count = max(1, int(count))
+    a_seed = derive_measurement_seed(protocol["seed"], case_seed, "A", 0)
+    rows = []
+    for index in range(count):
+        b_seed = derive_measurement_seed(protocol["seed"], case_seed, "B", index)
+        semantic = {
+            "operand": "B",
+            "a_slot": 0,
+            "b_slot": index,
+            "a_seed": a_seed,
+            "b_seed": b_seed,
+            "a_scale_seed": a_seed,
+            "b_scale_seed": b_seed,
+        }
+        rows.append({
+            "slot_id": f"weight-{index:03d}",
+            "semantic": semantic,
+            "fingerprint": hashlib.sha256(
+                _canonical_json(semantic).encode("utf-8")).hexdigest(),
+        })
+    return rows
+
+
+def weight_rotation_slot_count(weight_bytes, protocol):
+    """Number of B operands needed to put their total bytes beyond the cache target."""
+    if protocol.get("slot_policy") != "semantic_weight_rotation":
+        return 1
+    weight_bytes = int(weight_bytes)
+    if weight_bytes <= 0:
+        raise ValueError("weight_bytes must be positive")
+    target = int(protocol["rotation_target_bytes"])
+    count = max(2, (target + weight_bytes - 1) // weight_bytes)
+    return min(int(protocol["max_slots"]), count)
+
+
+def paired_schedule(arm_names, slot_count, protocol, metric="single_call_latency"):
+    """Deterministic Latin-style blocks: one slot, every arm, rotating arm order."""
+    names = list(arm_names)
+    if not names or len(names) != len(set(names)):
+        raise ValueError("arm names must be non-empty and unique")
+    if int(slot_count) < 1:
+        raise ValueError("slot_count must be positive")
+    metric_key, spec = protocol_metric(protocol, metric)
+    rng = random.Random(derive_measurement_seed(protocol["seed"], metric_key, "schedule"))
+    base = list(names)
+    rng.shuffle(base)
+    schedule = []
+    block = 0
+    for cycle in range(int(spec["cycles"])):
+        slot_indices = (list(range(int(slot_count)))
+                        if protocol.get("slot_policy") == "semantic_weight_rotation" else [0])
+        rng.shuffle(slot_indices)
+        for slot_index in slot_indices:
+            shift = (cycle + slot_index) % len(base)
+            order = base[shift:] + base[:shift]
+            schedule.append({"block": block, "cycle": cycle,
+                             "slot_index": slot_index, "order": order})
+            block += 1
+    return schedule
+
+
+_CACHE_READ_BUF = None
+_CACHE_READ_SINK = None
+
+
+def read_evict_cache(torch=None, mb=None):
+    """Read, rather than rewrite, the synthetic eviction buffer on the current stream."""
+    global _CACHE_READ_BUF, _CACHE_READ_SINK
+    torch = torch or _torch()
+    try:
+        if not torch.cuda.is_available():
+            return
+    except Exception:
+        return
+    mb = int(os.environ.get("HARNESS_CACHE_EVICT_MB", "512")) if mb is None else int(mb)
+    if mb <= 0:
+        return
+    n = max(1, (mb << 20) // 4)
+    if _CACHE_READ_BUF is None or _CACHE_READ_BUF.numel() < n:
+        _CACHE_READ_BUF = torch.ones(n, dtype=torch.float32, device="cuda")
+    _CACHE_READ_SINK = _CACHE_READ_BUF[:n].sum()
+
+
+def prepare_measurement_cache(policy, torch=None, mb=None):
+    if policy == "legacy_write_flush":
+        flush_cache(torch, mb=mb)
+    elif policy == "read_evict":
+        read_evict_cache(torch, mb=mb)
+    elif policy in ("warm", "semantic_weight_rotating"):
+        return
+    else:
+        raise ValueError(f"unknown cache policy {policy!r}")
+
+
+@contextmanager
+def gpu_measurement_lock(path=None):
+    """Optional whole-block flock, compatible with an already-held lane GPU lock."""
+    path = path or os.environ.get("GEAK_GPU_LOCK_FILE")
+    if os.environ.get("GEAK_GPU_LOCK_HELD") == "1":
+        yield {"mode": "external", "path": path}
+        return
+    if not path:
+        yield {"mode": "none", "path": None}
+        return
+    import fcntl
+    timeout = float(os.environ.get("GEAK_GPU_LOCK_TIMEOUT_S", "600"))
+    started = time.monotonic()
+    with open(path, "a+", encoding="utf-8") as lock_file:
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() - started >= timeout:
+                    raise TimeoutError(f"timed out acquiring GPU lock {path}")
+                time.sleep(0.05)
+        try:
+            yield {"mode": "acquired", "path": path,
+                   "wait_ms": (time.monotonic() - started) * 1e3}
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _output_addresses(out):
+    if isinstance(out, dict):
+        values = [out[k] for k in sorted(out)]
+    elif isinstance(out, (tuple, list)):
+        values = list(out)
+    else:
+        values = None
+    if values is not None:
+        return [ptr for value in values for ptr in _output_addresses(value)]
+    data_ptr = getattr(out, "data_ptr", None)
+    if callable(data_ptr):
+        try:
+            return [int(data_ptr())]
+        except Exception:
+            pass
+    return []
+
+
+def _protocol_time_sample(call, inner, retain, prime_mb=None):
+    """One raw sample. Outputs enter a bounded live ring immediately, before the next call."""
+    torch = _torch()
+    inner = int(inner)
+    try:
+        have_cuda = bool(torch.cuda.is_available())
+    except Exception:
+        have_cuda = False
+    pointers = []
+    if not have_cuda:
+        t0 = time.perf_counter()
+        for _ in range(inner):
+            out = call()
+            pointers.extend(_output_addresses(out))
+            retain(out)
+        sync(torch)
+        elapsed = (time.perf_counter() - t0) * 1e3 / inner
+        return {"ms": elapsed, "wall_ms": elapsed, "host_ms": elapsed,
+                "timer": "wall", "primed": False, "output_ptrs": pointers}
+
+    sync(torch)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    primed = _prime_timing_stream(torch, mb=prime_mb)
+    t0 = time.perf_counter()
+    start.record()
+    for _ in range(inner):
+        out = call()
+        pointers.extend(_output_addresses(out))
+        retain(out)
+    end.record()
+    t1 = time.perf_counter()
+    end.synchronize()
+    t2 = time.perf_counter()
+    return {"ms": start.elapsed_time(end) / inner,
+            "wall_ms": (t2 - t0) * 1e3 / inner,
+            "host_ms": (t1 - t0) * 1e3 / inner,
+            "timer": "cuda_event", "primed": bool(primed),
+            "output_ptrs": pointers}
+
+
+def _slot_receipt(slot, index):
+    if isinstance(slot, dict):
+        slot_id = slot.get("slot_id", index)
+        semantic = slot.get("semantic") or {}
+        fingerprint = slot.get("fingerprint")
+        weight_bytes = slot.get("weight_bytes")
+    else:
+        slot_id, semantic, fingerprint, weight_bytes = index, {}, None, None
+    if fingerprint is None:
+        fingerprint = hashlib.sha256(_canonical_json(
+            {"slot_id": slot_id, "semantic": semantic}).encode("utf-8")).hexdigest()
+    row = {"slot_index": index, "slot_id": slot_id,
+           "fingerprint": fingerprint, "semantic": semantic}
+    if weight_bytes is not None:
+        row["weight_bytes"] = int(weight_bytes)
+    return row
+
+
+def _sample_median(values):
+    values = sorted(float(x) for x in values)
+    n = len(values)
+    if not n:
+        return None
+    return values[n // 2] if n % 2 else 0.5 * (values[n // 2 - 1] + values[n // 2])
+
+
+def measure_paired_arms(arms, slots, *, protocol=None, metric="single_call_latency",
+                        sample_timer=None, cache_prepare=None, warmup_slot=None,
+                        lock_path=None):
+    """Measure every arm in deterministic paired blocks and return the complete raw receipt.
+
+    ``arms`` maps a name to ``call(slot)``. A block selects exactly one semantic slot, then invokes
+    every arm on that same object in a rotating order. ``sample_timer`` is an injectable
+    ``(call, inner, retain) -> detail`` hook used by CPU unit tests; production uses CUDA events.
+    """
+    if protocol is None or isinstance(protocol, str):
+        protocol = measurement_protocol(protocol)
+    else:
+        protocol = dict(protocol)
+    expected_hash = protocol_hash(protocol)
+    if protocol.get("hash") != expected_hash:
+        raise ValueError("measurement protocol hash does not match its contents")
+    metric_key, metric_spec = protocol_metric(protocol, metric)
+    arm_items = list(arms.items()) if isinstance(arms, dict) else list(arms)
+    arm_names = [name for name, _ in arm_items]
+    if not arm_names or len(arm_names) != len(set(arm_names)):
+        raise ValueError("arms must have unique names")
+    calls = dict(arm_items)
+    slots = list(slots)
+    if not slots:
+        raise ValueError("at least one measurement slot is required")
+    timer = sample_timer or (
+        lambda call, inner, retain: _protocol_time_sample(
+            call, inner, retain, prime_mb=protocol["timing_prime_bytes"] >> 20))
+    rings = {name: deque(maxlen=int(protocol["output_ring_size"])) for name in arm_names}
+    slot_rows = [_slot_receipt(slot, i) for i, slot in enumerate(slots)]
+    blocks = []
+    raw_samples = []
+    schedule = paired_schedule(arm_names, len(slots), protocol, metric_key)
+
+    with gpu_measurement_lock(lock_path) as lock_receipt:
+        if warmup_slot is not None:
+            warm_slots = [warmup_slot]
+        elif protocol.get("slot_policy") == "semantic_weight_rotation":
+            # Match the first measured cycle order so every slot crosses the boundary only
+            # after all other B weights, never as an accidentally warm first sample.
+            warm_slots = [slots[plan["slot_index"]]
+                          for plan in schedule if plan["cycle"] == 0]
+        else:
+            warm_slots = [slots[0]]
+        for cycle in range(int(protocol["warmup_cycles"])):
+            for slot in warm_slots:
+                shift = cycle % len(arm_names)
+                order = arm_names[shift:] + arm_names[:shift]
+                for name in order:
+                    rings[name].append(calls[name](slot))
+        sync()
+
+        for plan in schedule:
+            slot_index = int(plan["slot_index"])
+            slot = slots[slot_index]
+            slot_meta = slot_rows[slot_index]
+            samples = {}
+            for position, name in enumerate(plan["order"]):
+                if cache_prepare is None:
+                    prepare_measurement_cache(
+                        protocol["cache_policy"],
+                        mb=protocol["synthetic_evict_bytes"] >> 20)
+                else:
+                    cache_prepare(protocol["cache_policy"])
+                detail = dict(timer(lambda fn=calls[name], s=slot: fn(s),
+                                    int(metric_spec["inner"]), rings[name].append))
+                if detail.get("ms") is None:
+                    raise RuntimeError(f"arm {name} produced no device timing")
+                sample = {
+                    "block": int(plan["block"]),
+                    "cycle": int(plan["cycle"]),
+                    "arm": name,
+                    "position": position,
+                    "slot_index": slot_index,
+                    "slot_id": slot_meta["slot_id"],
+                    "slot_fingerprint": slot_meta["fingerprint"],
+                    "ms": float(detail["ms"]),
+                    "wall_ms": (None if detail.get("wall_ms") is None
+                                else float(detail["wall_ms"])),
+                    "host_ms": (None if detail.get("host_ms") is None
+                                else float(detail["host_ms"])),
+                    "timer": detail.get("timer"),
+                    "primed": bool(detail.get("primed", False)),
+                    "inner": int(metric_spec["inner"]),
+                    "output_ptrs": [int(p) for p in detail.get("output_ptrs", [])],
+                }
+                samples[name] = sample
+                raw_samples.append(sample)
+            blocks.append({
+                "block": int(plan["block"]),
+                "cycle": int(plan["cycle"]),
+                "slot_index": slot_index,
+                "slot_id": slot_meta["slot_id"],
+                "slot_fingerprint": slot_meta["fingerprint"],
+                "order": list(plan["order"]),
+                "samples": samples,
+            })
+
+    medians = {name: _sample_median(
+        sample["ms"] for sample in raw_samples if sample["arm"] == name)
+        for name in arm_names}
+    output_lifecycle = {}
+    for name in arm_names:
+        pointers = [p for sample in raw_samples if sample["arm"] == name
+                    for p in sample["output_ptrs"]]
+        unique = sorted(set(pointers))
+        output_lifecycle[name] = {
+            "ring_size": int(protocol["output_ring_size"]),
+            "observed_addresses": len(pointers),
+            "unique_addresses": len(unique),
+            "addresses_rotated": len(pointers) < 2 or len(unique) > 1,
+        }
+    all_arms = set(arm_names)
+    complete = all(set(block["samples"]) == all_arms for block in blocks)
+    same_slot = all(all(sample["slot_fingerprint"] == block["slot_fingerprint"]
+                        for sample in block["samples"].values()) for block in blocks)
+    position_counts = {}
+    positions_balanced = True
+    for slot_meta in slot_rows:
+        per_arm = {}
+        for name in arm_names:
+            counts = [sum(1 for sample in raw_samples
+                          if sample["slot_index"] == slot_meta["slot_index"]
+                          and sample["arm"] == name and sample["position"] == position)
+                      for position in range(len(arm_names))]
+            per_arm[name] = counts
+            positions_balanced = positions_balanced and max(counts) - min(counts) <= 1
+        position_counts[str(slot_meta["slot_id"])] = per_arm
+    semantic_working_set = sum(row.get("weight_bytes", 0) for row in slot_rows)
+    semantic_working_set_ok = (
+        protocol.get("slot_policy") != "semantic_weight_rotation"
+        or semantic_working_set > int(protocol["assumed_cache_bytes"])
+    )
+    return {
+        "schema": MEASUREMENT_RECEIPT_SCHEMA,
+        "protocol": protocol,
+        "protocol_hash": expected_hash,
+        "metric": dict(metric_spec),
+        "metric_id": metric_key,
+        "seed": int(protocol["seed"]),
+        "arms": arm_names,
+        "slots": slot_rows,
+        "slot_order": [block["slot_id"] for block in blocks],
+        "blocks": blocks,
+        "samples": raw_samples,
+        "medians_ms": medians,
+        "output_lifecycle": output_lifecycle,
+        "arm_position_counts_by_slot": position_counts,
+        "semantic_weight_working_set_bytes": semantic_working_set,
+        "gpu_lock": lock_receipt,
+        "invariants": {
+            "all_arms_in_every_block": complete,
+            "same_slot_within_block": same_slot,
+            "arm_positions_balanced_per_slot": positions_balanced,
+            "semantic_weight_working_set_exceeds_cache": semantic_working_set_ok,
+            "single_call_latency_inner_is_one": (
+                metric_key != "single_call_latency" or metric_spec["inner"] == 1),
+            "sustained_throughput_inner_gt_one": (
+                metric_key != "sustained_throughput" or metric_spec["inner"] > 1),
+        },
+    }
+
+
+def _legacy_timing_leg(receipt, arm):
+    """Collapse raw v2 latency samples into the historical timing-leg shape."""
+    if receipt.get("metric_id") != "single_call_latency":
+        raise ValueError("legacy timing legs may only come from single-call latency")
+    samples = [row for row in receipt["samples"] if row["arm"] == arm]
+    if not samples:
+        raise KeyError(f"no samples for legacy timing arm {arm!r}")
+    host_values = [row["host_ms"] for row in samples if row.get("host_ms") is not None]
+    wall_values = [row["wall_ms"] for row in samples if row.get("wall_ms") is not None]
+    timers = sorted({row.get("timer") for row in samples}, key=str)
+    return {
+        "ms": float(receipt["medians_ms"][arm]),
+        "wall_ms": _sample_median(wall_values),
+        "primed": all(row.get("primed") is True for row in samples),
+        "host_ms": _sample_median(host_values),
+        "timer": timers[0] if len(timers) == 1 else timers,
+        "sample_count": len(samples),
+        "metric_source": "single_call_latency",
+    }
+
+
+def legacy_timing_aliases(receipt, *, candidate_arm="candidate", baseline_arm="baseline"):
+    """Old row keys, explicitly identified as aliases of the latency metric only."""
+    if receipt.get("metric_id") != "single_call_latency":
+        raise ValueError("legacy execution_time_ms aliases may only come from single-call latency")
+    medians = receipt["medians_ms"]
+    candidate = medians[candidate_arm]
+    baseline = medians[baseline_arm]
+    return {
+        "baseline_ms": baseline,
+        "candidate_ms": candidate,
+        "execution_time_ms": candidate,
+        "speedup": baseline / candidate,
+        "baseline_timing": _legacy_timing_leg(receipt, baseline_arm),
+        "candidate_timing": _legacy_timing_leg(receipt, candidate_arm),
+        "legacy_metric_source": "single_call_latency",
+    }
+
+
+def legacy_timing_receipt(rows):
+    """Historical top-level receipt keys backed only by v2 latency timing legs."""
+    cases = {
+        row["test_case_id"]: {
+            "baseline": dict(row["baseline_timing"]),
+            "current": dict(row["candidate_timing"]),
+        }
+        for row in rows
+    }
+    legs = [leg for case in cases.values() for leg in case.values()]
+    return {
+        "all_primed": all(leg.get("primed") is True for leg in legs),
+        "timer_unprimed": any(leg.get("primed") is None for leg in legs),
+        "cases": cases,
+        "legacy_metric_source": "single_call_latency",
+    }
+
+
+def atomic_write_json(path, value):
+    """Write a receipt/manifest without exposing half-written JSON to a lane reader."""
+    path = os.fspath(path)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
 # --------------------------------------------------------------------------- (b) correctness
+def flatten_outputs(out):
+    """Deterministic tensor list from an op's return value: tensor, tuple/list, dict, or nesting.
+
+    Attention entries return `(out, lse)`; a bare-tensor assumption does not merely raise here, it
+    makes `correct()` fall into its except and report the candidate INCORRECT — a correct kernel
+    rejected for the shape of its return value. Dict order is by sorted key so the two legs pair up."""
+    if isinstance(out, dict):
+        return [t for k in sorted(out) for t in flatten_outputs(out[k])]
+    if isinstance(out, (tuple, list)):
+        return [t for o in out for t in flatten_outputs(o)]
+    if hasattr(out, "shape"):
+        return [out]
+    return []      # scalars/None carry no tolerance semantics and are not compared
+
+
+def to_device_like(ref, dev):
+    """Move a recorded oracle entry (tensor or container of tensors) onto `dev`."""
+    if isinstance(ref, dict):
+        return {k: to_device_like(v, dev) for k, v in ref.items()}
+    if isinstance(ref, tuple) and hasattr(ref, "_fields"):
+        return type(ref)(*(to_device_like(o, dev) for o in ref))
+    if isinstance(ref, (tuple, list)):
+        return type(ref)(to_device_like(o, dev) for o in ref)
+    return ref.to(dev) if hasattr(ref, "to") else ref
+
+
+def reconstruct_captured(obj, device="cpu"):
+    """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
+    if isinstance(obj, dict) and obj.get("__tensor__"):
+        t = obj["data"]
+        return t.to(device) if hasattr(t, "to") else t
+    if isinstance(obj, dict) and set(obj.keys()) == {"__repr__"}:
+        return obj["__repr__"]
+    if isinstance(obj, dict):
+        return {k: reconstruct_captured(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(reconstruct_captured(v, device) for v in obj)
+    return obj
+
+
+def load_reference_io(path, map_location="cpu"):
+    """Load a capture_shapes oracle blob (supports optional ``shared`` weight pool)."""
+    torch = _torch()
+    try:
+        blob = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        blob = torch.load(path, map_location=map_location)
+    if not isinstance(blob, dict):
+        raise TypeError(f"reference_io.pt must be a dict, got {type(blob)}")
+    return blob
+
+
+def resolve_oracle_shared(obj, shared):
+    """Expand ``{"__shared__": key}`` refs written by capture_shapes share_large/moe_slim."""
+    if isinstance(obj, dict) and set(obj.keys()) == {"__shared__"}:
+        key = obj["__shared__"]
+        if key not in shared:
+            raise KeyError(f"oracle shared ref missing: {key!r}")
+        return shared[key]
+    if isinstance(obj, dict):
+        return {k: resolve_oracle_shared(v, shared) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(resolve_oracle_shared(v, shared) for v in obj)
+    return obj
+
+
+def iter_eager_cases_from_oracle(path, device="cpu"):
+    """Yield ``{args, ref, sig, regime}`` one record at a time (memory-friendly for multi-GiB MoE)."""
+    blob = load_reference_io(path, map_location="cpu")
+    shared = blob.get("shared") or {}
+    for record in blob.get("records") or []:
+        kwargs = resolve_oracle_shared(record.get("kwargs") or {}, shared)
+        args_pos = resolve_oracle_shared(record.get("args") or (), shared)
+        kwargs = reconstruct_captured(kwargs, device=device)
+        args_pos = reconstruct_captured(args_pos, device=device)
+        ref = reconstruct_captured(
+            resolve_oracle_shared(record.get("output"), shared), device=device)
+        args = kwargs if isinstance(kwargs, dict) and kwargs else args_pos
+        if isinstance(args, dict) and isinstance(args_pos, (list, tuple)) and args_pos:
+            names = ["hidden_states", "w1", "w2", "topk_weight", "topk_ids"]
+            for name, value in zip(names, args_pos):
+                args.setdefault(name, value)
+        yield {
+            "args": args,
+            "ref": ref,
+            "sig": record.get("sig", ""),
+            "regime": record.get("regime", ""),
+        }
+
+
+def eager_cases_from_oracle(path, device="cpu"):
+    """Materialize all eager cases; prefer ``iter_eager_cases_from_oracle`` for large oracles."""
+    return list(iter_eager_cases_from_oracle(path, device=device))
+
+
+def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
+    """Like ``check_correct_multi`` but only keeps ``max_keep_live`` outputs resident."""
+    per_case = []
+    all_ok = True
+    live = []
+    first_two_args = []
+    for case in case_iter:
+        out = call(case["args"])
+        ok, err = correct(out, case["ref"], tol)
+        all_ok = all_ok and ok
+        per_case.append({"case": case.get("sig", ""), "correct": ok,
+                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
+        if len(first_two_args) < 2:
+            first_two_args.append(case["args"])
+        live.append(out)
+        if len(live) > max(1, int(max_keep_live)):
+            live.pop(0)
+    if len(first_two_args) >= 2:
+        ok, reason = assert_independent_outputs(call, first_two_args[0], first_two_args[1])
+        all_ok = all_ok and ok
+        per_case.append({"case": "output_independence", "correct": ok,
+                         "max_rel_err": None, "note": reason})
+    return all_ok, per_case
+
+
 def correct(out, ref, tol):
     """Per-element mixed-tolerance check `|out-ref| <= atol + tol*|ref|`, returns (ok, max_rel_err).
+
+    A multi-tensor return (e.g. attention's `(out, lse)`) is compared component-wise: ALL components
+    must pass, and the reported error is the worst of them. A count mismatch between the two sides is
+    a failure, never a silent comparison of the first component only.
 
     The absolute floor `atol` exists ONLY to keep near-zero reference elements from blowing up the pure
     relative term — it is set to the computation's NOISE level `tol * RMS(ref)`, NOT `tol * max(|ref|)`.
@@ -501,6 +1234,20 @@ def correct(out, ref, tol):
     on the small elements the value-parity gate is meant to catch. RMS tracks the bulk magnitude, so for
     a uniform-magnitude tensor RMS≈max (behavior unchanged) but for a spiky tensor RMS≪max (the floor
     tightens and the small-element error is no longer masked)."""
+    po, pr = flatten_outputs(out), flatten_outputs(ref)
+    if len(po) != 1 or len(pr) != 1:
+        if not po or len(po) != len(pr):
+            return False, float("inf")
+        ok_all, worst = True, 0.0
+        for o, r in zip(po, pr):
+            ok, err = _correct_one(o, r, tol)
+            ok_all = ok_all and ok
+            worst = max(worst, err)
+        return ok_all, worst
+    return _correct_one(po[0], pr[0], tol)
+
+
+def _correct_one(out, ref, tol):
     torch = _torch()
     try:
         if tuple(out.shape) != tuple(ref.shape):
@@ -804,7 +1551,8 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
 
 # --------------------------------------------------------------------------- (b) random-value parity vs live baseline
 def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
-                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0):
+                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0,
+                             baseline_outputs=None):
     """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
     SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
     frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
@@ -820,8 +1568,13 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
     with the L2/Infinity cache flushed cold before each iteration; `inner=1` (one launch per event window)
     since events time the GPU timeline directly — no host-side amortization loop is needed.
 
-    `baseline_call(args) -> out`  invokes the frozen real online kernel (meta.baseline_callable /
-        baseline_src/). `current_call(args) -> out` invokes the candidate in kernel_src/.
+    `baseline_outputs` (PREFERRED) = the dict `baseline_random_outputs(...)` recorded by the BASELINE
+        leg in its OWN subprocess (`leg_runner.py --mode oracle` under `baseline_overlay/`), keyed
+        `"<sig>|<draw>"`. Same seed => same inputs, so the two legs never have to be co-resident. When
+        it is given, `baseline_call` is ignored and `speedup` is None here (timing comes from
+        `measure_legs`).
+    `baseline_call(args) -> out` is the LEGACY in-process form, kept for op_bench / single-process tasks.
+        `current_call(args) -> out` invokes the candidate in kernel_src/.
     `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
         FRESH random in-regime input set for that shape's fixed dims (the unittest closes over
         regime_spec/synth_kv_cache); `rng` is a seeded torch.Generator for reproducibility.
@@ -838,9 +1591,20 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
             rng = torch.Generator(device=device).manual_seed(int(seed) + i)
             try:
                 args = make_inputs(rng)
-                base_out = baseline_call(args)
-                base_snap = base_out.detach().clone()      # snapshot BEFORE current runs (anti-alias)
-                cand_out = current_call(args)
+                if baseline_outputs is not None:
+                    ref = baseline_outputs.get(f"{sig}|{i}")
+                    if ref is None:
+                        raise KeyError(f"no recorded baseline output for {sig}|{i}")
+                    cand_out = current_call(args)
+                    parts = flatten_outputs(cand_out)
+                    if not parts:
+                        raise TypeError(f"candidate returned no tensor for {sig}|{i}")
+                    base_snap = to_device_like(ref, parts[0].device)
+                else:
+                    base_out = baseline_call(args)
+                    # snapshot BEFORE current runs (anti-alias)
+                    base_snap = [t.detach().clone() for t in flatten_outputs(base_out)]
+                    cand_out = current_call(args)
             except Exception as e:
                 all_ok = False
                 per_case.append({"case": f"random[{i}]:{sig}", "correct": False, "max_rel_err": None,
@@ -848,9 +1612,12 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                 continue
             ok, err = correct(cand_out, base_snap, tol)
             all_ok = all_ok and ok
-            ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
-            ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
-            speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
+            if baseline_outputs is not None:
+                speedup = None                             # timing belongs to measure_legs, not here
+            else:
+                ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
+                ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
+                speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
             per_case.append({"case": f"random[{i}]:{sig}", "correct": ok,
                              "max_rel_err": round(err, 5) if math.isfinite(err) else None,
                              "speedup": round(speedup, 3) if speedup else None,
@@ -874,6 +1641,8 @@ def amdahl_ceiling(pct_gpu, isolated_speedup):
     if p > 1.0:
         p /= 100.0
     p = min(max(p, 0.0), 1.0)
+    if isolated_speedup is None:
+        return 0.0        # no measurement -> no attributable ceiling; same answer as a non-win
     s = float(isolated_speedup)
     if s <= 0:
         return 0.0
@@ -928,6 +1697,56 @@ def served_regimes(meta):
     if not sr:
         return set()
     return {str(r).strip().lower() for r in sr if str(r).strip()}
+
+
+def served_buckets(meta):
+    """The M buckets this kernel actually SERVES, with their analytic per-wave pass counts.
+
+    `op_bench` benched at `max(m_buckets)`, on the premise that the largest bucket carries the
+    GPU-time mass. It does not. Mass = per-launch time x LAUNCHES, and the analytic call model
+    (`serving_weight_model.analytic_calls`) counts prefill = CONC*ceil(ISL/chunk) passes against
+    decode = OSL passes. Neither bucket dominates universally -- prefill runs few large passes,
+    decode runs many small ones -- so a single bucket cannot represent the served mix, and the
+    LARGEST one is routinely the least-served shape.
+
+    Decode's M is the concurrency (snapped to a graph capture size); prefill's is the chunk, or
+    ISL when the server does not chunk. Each is matched to the nearest profiled `m_buckets` entry
+    when one exists, so the bench runs on a shape the profile actually saw.
+
+    Returns [(phase, M, calls), ...] ordered by descending calls, de-duplicated by M. Returns []
+    when meta carries no serving model (offline / unit-test metas), which leaves callers on their
+    previous single-bucket behaviour."""
+    swm = ((meta or {}).get("workload") or {}).get("serving_weight_model") or {}
+    calls = swm.get("analytic_calls") or {}
+    if not calls:
+        return []
+    buckets = [int(b) for b in (meta.get("m_buckets") or [])
+               if str(b).strip().lstrip("-").isdigit()]
+    served = served_regimes(meta)
+    want = {"decode": swm.get("conc"),
+            "prefill": swm.get("prefill_chunk") or swm.get("isl")}
+    out = {}
+    for phase, n in calls.items():
+        ph = str(phase).strip().lower()
+        if served and ph not in served:
+            continue                      # a phase this kernel does not run in carries no weight
+        m, n = want.get(ph), _int_or_none(n)
+        m = _int_or_none(m)
+        if not m or not n or n <= 0:
+            continue
+        if buckets:
+            m = min(buckets, key=lambda b: abs(b - m))
+        prev = out.get(m)
+        if prev is None or n > prev[2]:
+            out[m] = (ph, m, n)
+    return sorted(out.values(), key=lambda t: -t[2])
+
+
+def _int_or_none(x):
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
 
 
 def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True):
@@ -1042,8 +1861,8 @@ UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 # the h2 paged_attention failure. `run_correctness` closes both holes: the trigger is the AUTHORITATIVE
 # deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
 # graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
-def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_shapes, tol,
-                    replay=None, draws=3):
+def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
+                    baseline_call=None, baseline_outputs=None, replay=None, draws=3):
     """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
       1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
       2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
@@ -1067,8 +1886,12 @@ def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_
     report["eager"] = per
     ok = ok and c_ok
 
+    if baseline_call is None and baseline_outputs is None:
+        raise ValueError("run_correctness needs baseline_outputs (preferred: recorded by the baseline "
+                         "leg via baseline_random_outputs) or a legacy in-process baseline_call")
     r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
-                                          draws=draws, graph=deployment_graph_mode(regime))
+                                          draws=draws, graph=deployment_graph_mode(regime),
+                                          baseline_outputs=baseline_outputs)
     report["random"] = perr
     ok = ok and r_ok
 
@@ -1166,3 +1989,187 @@ def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=
     g = torch.Generator(device=device).manual_seed(int(seed))
     perm = torch.randperm(pool, generator=g, device=device)[:need].to(torch.int32)
     return perm.reshape(int(num_seqs), int(blocks_per_seq))
+
+
+# --------------------------------------------------------------------------- (d) two-leg measurement
+# The baseline is the LIVE SERVING STACK (install + every accepted kernel), reached by running the
+# SAME leg_runner.py + cases.py under `baseline_overlay/` on PYTHONPATH; the candidate is that stack
+# plus ONE entry generated from kernel_src/. Leg direction is therefore a property of the environment,
+# not of a name string the harness binds by hand.
+def _kill_process_group(proc, grace=5.0):
+    """SIGTERM then SIGKILL the leg's whole process group, so nothing it spawned keeps the GPU.
+
+    Reaping is what proves death: `os.kill(pid, 0)` still succeeds on a zombie, so wait() on the
+    child is what confirms the signal took."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+    if pgid == os.getpgid(0):      # start_new_session did not take — never signal our own group
+        proc.kill()
+        return
+    for sig, wait_for in ((signal.SIGTERM, grace), (signal.SIGKILL, 1.0)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            proc.wait(timeout=wait_for)   # wait(), not kill(pid, 0): a zombie still answers signal 0
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
+           "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
+    if bucket:
+        cmd += ["--bucket", bucket]
+    if out:
+        cmd += ["--out", out]
+    if draws:
+        cmd += ["--draws", str(int(draws))]
+    # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
+    # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
+    # then times against a busy device and reads as a slowdown attributable to nothing.
+    p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
+    try:
+        stdout, stderr = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(p)
+        stdout, stderr = p.communicate()
+        raise
+    if p.returncode != 0:
+        raise RuntimeError(f"leg({mode}) under {overlay} exited {p.returncode}: {stderr[-800:]}")
+    lines = [ln for ln in stdout.strip().splitlines() if ln.startswith("{")]
+    if not lines:
+        raise RuntimeError(f"leg({mode}) under {overlay} produced no JSON: {stdout[-800:]}")
+    return json.loads(lines[-1])
+
+
+def build_candidate_overlay(task_dir, meta):
+    """Rebuild `<task>/_cand_overlay` = baseline_overlay + ONE entry from kernel_src/ (meta.candidate_bind).
+
+    Rebuilt on EVERY measurement because kernel_src/ is the optimizer's live workspace. `candidate_bind`
+    is the same {kind, module|target, file} the e2e Integrator uses to wire the accepted kernel."""
+    task = os.path.abspath(task_dir)
+    base = os.path.join(task, "baseline_overlay")
+    cand = os.path.join(task, "_cand_overlay")
+    shutil.rmtree(cand, ignore_errors=True)
+    b = meta.get("candidate_bind") or {}
+    src = os.path.join(task, b.get("file", "") or "")
+    if not b.get("file") or not os.path.exists(src):
+        raise RuntimeError("meta.candidate_bind missing or its file is absent — cannot build the candidate leg")
+    tool = [sys.executable, os.path.join(task, "overlay_setup.py")]
+    if b.get("kind") == "rebind":
+        args = ["add-rebind", "--target", b["target"], "--impl-module", b["impl_module"],
+                "--impl-attr", b["impl_attr"], "--impl-file", src]
+    else:
+        args = ["add-module", "--module", b["module"], "--patched-file", src]
+    r = subprocess.run(tool + args + ["--overlay", cand, "--from", base], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"candidate overlay build failed: {r.stderr[-800:]}")
+    return base, cand
+
+
+def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
+    """Refuse to measure unless the two legs provably import DIFFERENT code AND the baseline leg
+    resolves OUTSIDE the task dir."""
+    task = os.path.abspath(task_dir)
+    target = meta["target_callable"]
+    bi = _run_leg(task, base, "resolve", timeout=timeout)
+    ci = _run_leg(task, cand, "resolve", timeout=timeout)
+    for who, ident in (("baseline", bi), ("candidate", ci)):
+        if ident.get("error"):
+            raise RuntimeError(f"{who} leg cannot import {target}: {ident['error']}")
+    if bi == ci:
+        raise RuntimeError(
+            f"both legs resolve {target} to the SAME code ({bi}) — the candidate overlay is not "
+            "shadowing it, so any measured 'speedup' is noise. Check meta.candidate_bind.")
+    if bi.get("file", "").startswith(task + os.sep):
+        raise RuntimeError(
+            f"baseline leg resolved INSIDE the task dir ({bi['file']}) — the baseline must be the live "
+            "serving stack, never a copy the optimizer can edit.")
+    return bi, ci
+
+
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10)):
+    """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
+
+    Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
+    reports a pseudo-1.0x that is an artifact, not a measurement.
+
+    But fresh-per-bucket is also what makes ONE pair per bucket too coarse: fresh-process variance is
+    exactly the variance `time_op`'s in-process repeats cannot average away. Measured on gfx950 it is
+    ~0.1-0.5% on a prefill bucket and up to ~14% on a small-M decode bucket — so a real 1.05x candidate
+    sits inside the noise of a single unpaired pair, which is the resolution the direction fix needs and
+    did not have.
+
+    Two things fix that, and only one of them costs anything:
+
+    - INTERLEAVE. Each rep is a B,C PAIR, never all Bs then all Cs. Any drift over the sweep (clocks,
+      thermals, a neighbour on the box) then lands on both legs and cancels, instead of accruing to
+      whichever leg ran later. This is free — same subprocess count.
+    - REPEAT, BUT ONLY WHEN IT MATTERS. `max_reps` pairs is the CEILING, not the plan. After each pair
+      the running median ratio is checked: once it is outside `undecided`, the verdict cannot plausibly
+      flip and the bucket stops. A 2.3x bucket costs one pair, exactly as before; a 1.05x bucket — the
+      one whose answer is in doubt — spends the full budget. Flat `reps=3` would have tripled the cost
+      of every bucket to buy resolution on the few that need it, and this path already pays a cold
+      torch import per subprocess.
+
+    `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
+    cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
+    task = os.path.abspath(task_dir)
+    base, cand = build_candidate_overlay(task, meta)
+    assert_legs_differ(task, base, cand, meta)
+    lo, hi = undecided
+    per_case = []
+    for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
+        row, bms, oms = None, [], []
+        for _ in range(max(1, int(max_reps))):
+            b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
+            o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
+            if not b or not o:
+                break
+            if row is None:
+                row = b[0]
+            bms.append(b[0].get("ms"))
+            oms.append(o[0].get("ms"))
+            good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+            if not good_b or not good_o:
+                break                      # nothing timable here; more pairs cannot change that
+            if not (lo <= _median(good_b) / _median(good_o) <= hi):
+                break                      # decisive already — do not buy resolution we do not need
+        if row is None:
+            continue
+        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+        bm = _median(good_b) if good_b else None
+        om = _median(good_o) if good_o else None
+        pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
+        per_case.append({"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
+                         "baseline_ms": bm, "optimized_ms": om,
+                         "speedup": (bm / om) if (bm and om) else None,
+                         "reps": len(bms),
+                         "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
+                                            if len(pair_sp) > 1 else 0.0)})
+    return per_case
+
+
+def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
+    """Random-draw outputs recorded by the BASELINE leg in its own process, for
+    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
+    task = os.path.abspath(task_dir)
+    out = os.path.join(task, "_baseline_random.pt")
+    _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
+             out=out, seed=seed, draws=draws, timeout=timeout)
+    return _torch().load(out, map_location="cpu")

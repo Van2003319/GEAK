@@ -34,7 +34,7 @@ routes to hipBLASLt's rowwise-scaled solutions. Suite geomean: oracle 43 us, see
 
 Taking either library alone would have softened the baseline by 5% (hipBLASLt-only) or 30%
 (aiter-only). The full selection evidence, including the paths measured and rejected, is in
-`PROVENANCE.json` under `oracle_selection` and argued in `oracle_wrapper.py`'s module docstring.
+`PROVENANCE.json` under `oracle_selection` and explained in `oracle_wrapper.py`.
 
 ### Why the fastest path on the box is NOT the oracle
 
@@ -42,12 +42,11 @@ Taking either library alone would have softened the baseline by 5% (hipBLASLt-on
 weight shuffled into a proprietary layout, which in serving happens once at model load. This
 task hands both arms a plain contiguous `B` on every call and lets neither cache anything across
 calls, so scoring the oracle on a pre-shuffled weight would compare two different contracts.
-With the shuffle inside the timed region the same kernel is the SLOWEST path measured (88.0 us,
-2.1x worse than its cached form), which is what settles the question.
+With the shuffle inside the timed region the same kernel is the slowest path measured (88.0 us,
+2.1x worse than its cached form).
 
-**When reporting this task's results against production serving, quote 42.1 us as the harder
-reference and say why.** A win over this task's oracle is not automatically a win over aiter's
-pre-shuffled path.
+When reporting this task against production serving, quote 42.1 us as the harder reference and
+state why. A win over this task's oracle is not automatically a win over aiter's pre-shuffled path.
 
 ## Candidate policy
 
@@ -55,9 +54,9 @@ AMD high-performance libraries are forbidden in candidate implementations: candi
 wrappers, build flags, imported snapshots and final patches may not call or link rocBLAS,
 hipBLAS, hipBLASLt, Tensile, Composable Kernel, MIOpen, or aiter.
 
-`oracle_wrapper.py` is the immutable baseline/oracle exception. It is used only for correctness
-and performance comparison, is never a candidate implementation, and its SHA256 is pinned in
-`PROVENANCE.json`. Pass it to the policy scan with `--immutable`:
+`oracle_wrapper.py` and the route manifest are immutable oracle exceptions during a scoring
+process. The wrapper is never a candidate implementation, and `oracle_routes.v2.json` freezes the
+backend choice, protocol hash and shape inventory. Pass the wrapper to the policy scan explicitly:
 
 ```bash
 python3 kernel_workflow/scripts/candidate_policy_scan.py <candidate paths> \
@@ -94,24 +93,24 @@ candidate rebuild from nine device compiles to one.
 
 ## Measurement
 
-`harness_lib.py` is a frozen copy of the dispatch-primed timer, SHA256 recorded in
-`PROVENANCE.json`. Performance runs the palindrome `B C C B` after one discarded timed slot, for
-the reason documented in `scripts/task_runner.py`. GPU commands must run through:
+The task uses `geak.measurement-protocol/v2`; the formal default rotates real B weights and their rowwise scales. Candidate, aiter CK and hipBLASLt rowwise run in the same deterministic paired block on the same slot. Reports retain raw samples, slot/order, output addresses and protocol hash. Single-call latency (`inner=1`) is the only score metric; sustained throughput (`inner>1`) is reported separately.
 
-```bash
-bash /home/yxh/GEAK_asmopt/kernel_workflow/scripts/gpu_lock.sh 2 <command>
-```
-
-No result is publishable when the timing receipt is absent or unprimed.
+The checked-in manifest preserves the historical table above but identifies it as an unversioned write-flush selection. Formal performance therefore requires a locked `oracle-bakeoff` first and fails closed on a stale protocol hash. See `e2e_workflow/MEASUREMENT_PROTOCOL_V2.md`.
 
 ## Gates
 
 ```bash
-cd examples/tasks/dense_fp8_gemm_rowwise
-python3 scripts/task_runner.py compile        # + preflight, validates BOTH oracle routes
-python3 scripts/task_runner.py correctness
-python3 scripts/task_runner.py performance
+cd /home/yxh/GEAK_measure
+bash kernel_workflow/scripts/gpu_lock.sh 2 \
+  python3 examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py compile
+bash kernel_workflow/scripts/gpu_lock.sh 2 \
+  python3 examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py correctness
+bash kernel_workflow/scripts/gpu_lock.sh 2 \
+  python3 examples/tasks/dense_fp8_gemm_rowwise/scripts/task_runner.py \
+  oracle-bakeoff --confirm-oracle-bakeoff
 ```
+
+Run `performance` through the same lock after the v2 manifest has been baked.
 
 Correctness checks, in order: both oracle routes against library-free fp32 dequant truth; the
 candidate against that same truth on `layout_sanity` (M=32, N=48, K=64 -- N is a multiple of the

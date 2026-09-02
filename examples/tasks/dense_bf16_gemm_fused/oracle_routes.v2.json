@@ -1,0 +1,26 @@
+{
+  "schema": "geak.oracle-route-manifest/v2",
+  "task": "dense_bf16_gemm_fused",
+  "frozen": false,
+  "selection_state": "requires_v2_bakeoff",
+  "selection_metric": "single_call_latency",
+  "protocol_hash": "legacy-direct-rocblas-only",
+  "seed": 20260902,
+  "limitations": [
+    "Migrated placeholder: the historical denominator measured only direct rocBLAS.",
+    "Formal performance refuses this manifest until oracle-bakeoff compares direct rocBLAS and direct hipBLASLt under one v2 protocol."
+  ],
+  "routes": {
+    "decode_m2_square": {"M": 2, "N": 4096, "K": 4096, "backend": "direct_rocblas"},
+    "decode_m8_up": {"M": 8, "N": 11008, "K": 4096, "backend": "direct_rocblas"},
+    "decode_m16_square": {"M": 16, "N": 4096, "K": 4096, "backend": "direct_rocblas"},
+    "decode_m32_down": {"M": 32, "N": 4096, "K": 11008, "backend": "direct_rocblas"},
+    "decode_m64_square": {"M": 64, "N": 8192, "K": 8192, "backend": "direct_rocblas"},
+    "decode_m96_up": {"M": 96, "N": 11008, "K": 4096, "backend": "direct_rocblas"},
+    "prefill_m128_square": {"M": 128, "N": 4096, "K": 4096, "backend": "direct_rocblas"},
+    "prefill_m256_down": {"M": 256, "N": 4096, "K": 11008, "backend": "direct_rocblas"},
+    "prefill_m512_up": {"M": 512, "N": 11008, "K": 4096, "backend": "direct_rocblas"},
+    "prefill_m1024_down": {"M": 1024, "N": 4096, "K": 11008, "backend": "direct_rocblas"},
+    "prefill_m2048_square": {"M": 2048, "N": 4096, "K": 4096, "backend": "direct_rocblas"}
+  }
+}

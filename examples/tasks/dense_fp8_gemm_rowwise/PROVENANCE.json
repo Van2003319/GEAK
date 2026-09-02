@@ -39,15 +39,22 @@
   },
   "frozen_harness": {
     "path": "harness_lib.py",
-    "sha256": "51404cf55a03d961b3e18a0e5376a6eaa412710ee94229c90718e604c7fd8725",
-    "copied_from": "examples/tasks/dense_bf16_gemm_fused/harness_lib.py",
-    "timer_contract": "dispatch-primed-v1",
+    "sha256": "60fddb6ae5aebd61fb98cd918b0d6a53a5e0a2c0b5d483c9d414854fa69e95f7",
+    "copied_from": "e2e_workflow/scripts/harness_lib.py",
+    "timer_contract": "measurement-protocol-v2",
     "contains_write_probe": true,
-    "write_probe": "two_sentinel"
+    "write_probe": "two_sentinel",
+    "protocol_schema": "geak.measurement-protocol/v2",
+    "default_protocol": "semantic_weight_rotating",
+    "repin_note_v2": "Re-pinned after synchronizing the common/task harnesses and adding hashed paired semantic-weight rotation, raw receipts, separate latency/throughput metrics, output rings, and GPU-lock handoff."
   },
   "immutable_oracle": {
     "path": "oracle_wrapper.py",
-    "sha256": "1059f13d2dfb7183b576cb9e655d0a47b0078896a1a1c037bbbc753cc96036d0",
+    "sha256": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
+    "source_sha256": {
+      "oracle_wrapper.py": "cb215c16c4bc7431766cdbc253c6a203f818915b36bc4379e7081ea2d4b26606",
+      "route_manifest.py": "97ffe7345d60ff6dcf725b0a79dd32fc0367ab192e20c0b28766599ce7d4daa2"
+    },
     "kind": "per-shape best-of over two vendor libraries, choice frozen from measurement",
     "routes": {
       "aiter_ck": "aiter.gemm_a8w8_CK(XQ, WQ, x_scale, w_scale) -- Composable Kernel, used for M <= 16",
@@ -105,7 +112,10 @@
     "arch_guard": "__gfx942__ || __gfx950__",
     "arch_guard_note": "Guarding on the wrong macro compiles the body to nothing -- a no-op that returns an allocator-recycled buffer and scores an unbounded fake speedup. That happened on the bf16 task. The poison write probe is the gate that catches it; it reports 'ok' conclusively on all eleven shapes for this seed.",
     "seed_control_geomean_speedup": 0.437,
-    "seed_control_measurements": [0.4384, 0.4360],
+    "seed_control_measurements": [
+      0.4384,
+      0.436
+    ],
     "seed_control_min_shape": 0.238,
     "seed_control_note": "Two full performance runs, 0.55% apart. Comparable to the bf16 task's seed control at 0.3353 against its own rocBLAS oracle, so the two tasks start from a similar distance.",
     "headroom": "209 TFLOP/s on prefill_m2048_square against the oracle's 622; MI300X fp8 dense peak is near 2600."
@@ -115,5 +125,15 @@
     "correctness": "PASS -- both oracle routes vs fp32 dequant truth (err 0.0), candidate vs fp32 truth on layout_sanity (9.25e-06), 55 draws vs live oracle (worst 0.0078 against tol 0.02), poison write probe conclusive 'ok' on 11/11 shapes with untouched_fraction 0.0, output independence PASS, 8/8 negative tests raise",
     "performance": "PASS -- timing receipt all_primed=true, timer_unprimed=false"
   },
-  "historical_experiments": []
+  "historical_experiments": [],
+  "oracle_selection_v2": {
+    "status": "legacy_routes_require_v2_rebake",
+    "manifest": "oracle_routes.v2.json",
+    "backends": [
+      "aiter_ck",
+      "hipblaslt_rowwise"
+    ],
+    "selection_metric": "single_call_latency",
+    "checked_in_route_note": "Historical winners are retained but their protocol hash is intentionally stale; formal performance fails until a locked full-suite bakeoff."
+  }
 }

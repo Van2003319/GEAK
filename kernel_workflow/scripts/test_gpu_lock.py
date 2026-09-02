@@ -77,7 +77,8 @@ class GpuLockHarness(unittest.TestCase):
                  cwd: Path | None = None, timeout: int = 60):
         environ = dict(os.environ)
         for var in ("GEAK_GPU_ALLOWED", "GEAK_GPU_USE_LOG", "PYTORCH_ROCM_ARCH",
-                    "TORCH_EXTENSIONS_DIR"):
+                    "TORCH_EXTENSIONS_DIR", "GEAK_GPU_LOCK_HELD",
+                    "GEAK_GPU_LOCK_FILE"):
             environ.pop(var, None)
         environ["KERNEL_ENV_SKIP_ENUM_REAP"] = "1"
         environ.update(env or {})
@@ -167,6 +168,13 @@ class EnvironmentHandoffTest(GpuLockHarness):
         got = self.payload_env(f"{FREE_A},{FREE_B}", "HIP_VISIBLE_DEVICES")
         self.assertEqual(FREE_B, got,
                          "pool mode handed the payload a lane it does not hold")
+
+    def test_the_payload_knows_the_gpu_lock_is_already_held(self):
+        self.assertEqual("1", self.payload_env(FREE_A, "GEAK_GPU_LOCK_HELD"))
+
+    def test_the_payload_receives_the_exact_outer_lock_path(self):
+        expected = self.lock_dir / f"gpu_{FREE_A}.lock"
+        self.assertEqual(str(expected), self.payload_env(FREE_A, "GEAK_GPU_LOCK_FILE"))
 
     def test_the_build_cache_is_isolated_per_workspace(self):
         """Deriving it from `$PWD` is what stops one engineer benchmarking

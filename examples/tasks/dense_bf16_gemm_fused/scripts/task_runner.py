@@ -7,6 +7,7 @@ import math
 import os
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -45,15 +46,15 @@ TOL = 2e-2
 
 def _write_report(name, report):
     path = BUILD_DIR / f"{name}_report.json"
-    path.write_text(json.dumps(report, indent=2) + "\n")
+    harness.atomic_write_json(path, report)
     return path
 
 
 def _load_ops():
     from gemm_wrapper import dense_bf16_gemm
-    from oracle_wrapper import rocblas_bf16_gemm
+    from oracle_wrapper import best_bf16_gemm
 
-    return dense_bf16_gemm, rocblas_bf16_gemm
+    return dense_bf16_gemm, best_bf16_gemm
 
 
 def _make_inputs(case, seed_offset=0):
@@ -63,12 +64,28 @@ def _make_inputs(case, seed_offset=0):
     return a, b
 
 
+def _make_measurement_slots(case, protocol):
+    weight_bytes = int(case["N"]) * int(case["K"]) * 2
+    count = harness.weight_rotation_slot_count(weight_bytes, protocol)
+    specs = harness.semantic_weight_slot_specs(case["seed"], count, protocol)
+    a_gen = torch.Generator(device="cuda").manual_seed(specs[0]["semantic"]["a_seed"])
+    a = (torch.randn(case["M"], case["K"], generator=a_gen, device="cuda") * 0.1).to(torch.bfloat16)
+    slots = []
+    for spec in specs:
+        b_gen = torch.Generator(device="cuda").manual_seed(spec["semantic"]["b_seed"])
+        b = (torch.randn(case["N"], case["K"], generator=b_gen, device="cuda") * 0.1).to(torch.bfloat16)
+        slots.append({**spec, "weight_bytes": weight_bytes, "args": (a, b)})
+    return slots
+
+
 def _geomean(values):
     values = [float(v) for v in values if v is not None and v > 0]
     return math.exp(sum(math.log(v) for v in values) / len(values)) if values else None
 
 
 def run_preflight(load_extension=True):
+    from oracle_wrapper import oracle_available
+
     rocm_home = Path(os.environ.get("ROCM_HOME", "/opt/rocm"))
     report = {
         "torch_version": torch.__version__,
@@ -77,16 +94,19 @@ def run_preflight(load_extension=True):
         "pytorch_rocm_arch": os.environ.get("PYTORCH_ROCM_ARCH"),
         "hipcc": shutil.which("hipcc"),
         "rocprofv3": shutil.which("rocprofv3"),
-        "rocblas_header": str(rocm_home / "include" / "rocblas" / "rocblas.h"),
         "rocblas_library": str(rocm_home / "lib" / "librocblas.so"),
+        "hipblaslt_library": str(rocm_home / "lib" / "libhipblaslt.so"),
         "checks": {},
     }
     checks = report["checks"]
     checks["rocm_build"] = bool(torch.version.hip)
     checks["gpu_visible"] = bool(torch.cuda.is_available())
     checks["hipcc"] = bool(report["hipcc"])
-    checks["rocblas_header"] = Path(report["rocblas_header"]).is_file()
     checks["rocblas_library"] = Path(report["rocblas_library"]).is_file()
+    checks["hipblaslt_library"] = Path(report["hipblaslt_library"]).is_file()
+    available, note = oracle_available() if load_extension else (True, "not loaded")
+    checks["direct_oracle_extension"] = available
+    report["oracle_extension"] = note
     if checks["gpu_visible"]:
         try:
             torch.empty(1, device="cuda")
@@ -102,16 +122,28 @@ def run_preflight(load_extension=True):
         checks["allocation"] = False
     if load_extension and all(checks.values()):
         try:
-            _, rocblas = _load_ops()
+            from oracle_wrapper import (hipblaslt_bf16_gemm, oracle_backend_metadata,
+                                        rocblas_bf16_gemm)
             a, b = _make_inputs(SANITY_CASE)
-            out = rocblas(a, b)
             ref = (a.float() @ b.float().t()).to(torch.bfloat16)
-            ok, err = harness.correct(out, ref, TOL)
-            checks["direct_rocblas_smoke"] = bool(ok)
-            report["direct_rocblas_max_rel_err"] = err
+            backend_rows = {}
+            for name, fn in (("direct_rocblas", rocblas_bf16_gemm),
+                             ("direct_hipblaslt", lambda x, y: hipblaslt_bf16_gemm(x, y, -1))):
+                out = fn(a, b)
+                ok, err = harness.correct(out, ref, TOL)
+                checks[f"{name}_smoke"] = bool(ok)
+                metadata = oracle_backend_metadata(a, b, name, frozen_algorithm=False)
+                backend_rows[name] = {"correct": ok, "max_rel_err": err,
+                                      "metadata": metadata}
+                if name == "direct_hipblaslt" and ok:
+                    frozen_out = hipblaslt_bf16_gemm(a, b, int(metadata["algo_index"]))
+                    frozen_ok, frozen_err = harness.correct(frozen_out, ref, TOL)
+                    checks["direct_hipblaslt_explicit_algo_replay"] = bool(frozen_ok)
+                    backend_rows[name]["explicit_algo_replay_max_rel_err"] = frozen_err
+            report["oracle_backends"] = backend_rows
         except Exception as exc:
-            checks["direct_rocblas_smoke"] = False
-            report["direct_rocblas_error"] = repr(exc)
+            checks["oracle_backend_smoke"] = False
+            report["oracle_backend_error"] = repr(exc)
     ok = all(checks.values())
     report["status"] = "ok" if ok else "fail"
     _write_report("preflight", report)
@@ -159,15 +191,28 @@ def run_correctness():
                     "oracle": "fp32_layout_sanity"})
     all_ok = all_ok and ok
 
+    from oracle_wrapper import hipblaslt_bf16_gemm, oracle_route, rocblas_bf16_gemm
+
     probed = 0   # shapes the probe reached a VERDICT on -- pass AND fail both count as coverage
     for case in CASES:
+        # Correctness-screen the newly added direct hipBLASLt backend on every scored shape,
+        # independently of which route the current manifest selects.
+        oracle_args = _make_inputs(case, seed_offset=31337)
+        rocblas_ref = rocblas_bf16_gemm(*oracle_args).detach().clone()
+        hipblaslt_out = hipblaslt_bf16_gemm(*oracle_args, algo_index=-1)
+        oracle_ok, oracle_err = harness.correct(hipblaslt_out, rocblas_ref, TOL)
+        results.append({"case": case["id"], "draw": "oracle_backend_parity",
+                        "correct": oracle_ok, "max_rel_err": oracle_err,
+                        "oracle": "direct_hipblaslt_vs_direct_rocblas"})
+        all_ok = all_ok and oracle_ok
         for draw in range(5):
             a, b = _make_inputs(case, seed_offset=draw * 1009)
             ref = baseline(a, b).detach().clone()
             out = candidate(a, b)
             ok, err = harness.correct(out, ref, TOL)
             results.append({"case": case["id"], "draw": draw, "correct": ok,
-                            "max_rel_err": err, "oracle": "live_rocblas_gemm_ex"})
+                            "max_rel_err": err, "oracle": "live_" +
+                            oracle_route(case["M"], case["N"], case["K"])})
             all_ok = all_ok and ok
         # The poison probe, once per SHAPE. Running it only on the smallest case (as the
         # output_independence check below does) cannot see a kernel that writes some shapes and
@@ -219,100 +264,194 @@ def run_correctness():
     return all_ok, report
 
 
-def _time(call):
-    detail = harness.time_op(call, warmup=10, repeats=50, inner=1, flush_cache=True, detail=True)
-    if detail is None or detail.get("timer") != "cuda_event":
-        raise RuntimeError(f"device-event timing unavailable: {detail}")
-    return detail
+def _measurement_arms(candidate, backends):
+    arms = {"candidate": lambda slot: candidate(*slot["args"])}
+    for name, fn in backends.items():
+        arms[name] = lambda slot, fn=fn: fn(*slot["args"])
+    return arms
 
 
-def _timing_leg(detail):
-    return {"primed": detail.get("primed"), "host_ms": detail.get("host_ms")}
+def _validate_measurement_receipt(receipt):
+    if not all(receipt["invariants"].values()):
+        raise RuntimeError(f"measurement invariant failed: {receipt['invariants']}")
+    bad_timers = sorted({sample["timer"] for sample in receipt["samples"]
+                         if sample["timer"] != "cuda_event"})
+    if bad_timers:
+        raise RuntimeError(f"device-event timing unavailable: {bad_timers}")
+    if not all(sample["primed"] for sample in receipt["samples"]):
+        raise RuntimeError("one or more paired samples were not dispatch-primed")
+    stale = [name for name, row in receipt["output_lifecycle"].items()
+             if row["observed_addresses"] >= 2 and not row["addresses_rotated"]]
+    if stale:
+        raise RuntimeError(f"outputs reused one address despite the live ring: {stale}")
 
 
-def _timing_receipt(rows):
-    cases = {
-        row["test_case_id"]: {
-            "baseline": _timing_leg(row["baseline_timing"]),
-            "current": _timing_leg(row["candidate_timing"]),
-        }
-        for row in rows
-    }
-    legs = [leg for case in cases.values() for leg in case.values()]
+def _metric_summary(receipt, route, flops):
+    candidate_ms = receipt["medians_ms"]["candidate"]
+    oracle_ms = receipt["medians_ms"][route]
     return {
-        "all_primed": all(leg["primed"] is True for leg in legs),
-        "timer_unprimed": any(leg["primed"] is None for leg in legs),
-        "cases": cases,
+        "metric_id": receipt["metric_id"],
+        "unit": receipt["metric"]["unit"],
+        "inner": receipt["metric"]["inner"],
+        "candidate_ms_per_call": candidate_ms,
+        "oracle_ms_per_call": oracle_ms,
+        "speedup": oracle_ms / candidate_ms,
+        "candidate_tflops": flops / (candidate_ms * 1e9),
+        "oracle_tflops": flops / (oracle_ms * 1e9),
+        "all_backend_medians_ms": receipt["medians_ms"],
     }
 
 
-def run_performance(selected_case=None):
-    candidate, baseline = _load_ops()
+def run_performance(selected_case=None, protocol_name=None):
+    from oracle_wrapper import oracle_backends, oracle_route, validate_oracle_routes
+
+    protocol = harness.measurement_protocol(protocol_name)
+    trusted, route_errors = validate_oracle_routes(protocol["hash"], CASES)
+    if not trusted:
+        raise RuntimeError("oracle route manifest is not trusted for this protocol: "
+                           + "; ".join(route_errors)
+                           + ". Run oracle-bakeoff under the GPU lock first.")
+    candidate, _ = _load_ops()
+    backends = oracle_backends(frozen_algorithms=True)
     cases = [c for c in CASES if selected_case in (None, c["id"])]
     if not cases:
         raise ValueError(f"unknown case: {selected_case}")
     rows = []
     for case in cases:
-        a, b = _make_inputs(case)
-        baseline(a, b)
-        candidate(a, b)
-        torch.cuda.synchronize()
-        # (105) Timing baseline-then-candidate in a fixed order hands the second arm the
-        # first arm's warmth. An identity control -- the non-fused task, where both arms
-        # are byte-identical rocBLAS and the ratio must be 1.0000 -- measured that bias at
-        # +0.21% over the suite but +2.6% on decode_m2_square, the shortest route. So run
-        # the palindrome B C C B: each arm now occupies slots {1,4} or {2,3}, mean position
-        # 2.5 for both, and a monotone drift across the four slots cancels to first order.
-        #
-        # The palindrome alone left +0.8% on that route, and the per-slot dump said why: the
-        # slots read 0.02872 / 0.02752 / 0.02752 / 0.02752 -- not a drift but a ONE-TIME
-        # first-slot penalty, because the two untimed warmup calls above do not fully prime
-        # the shortest route. A palindrome cannot cancel a cost that lands once; whichever
-        # arm holds slot 1 simply eats it. So burn one full timed slot and throw it away,
-        # then run the palindrome on slots that are all equally warm.
-        _time(lambda: baseline(a, b))   # discarded: absorbs the one-time priming penalty
-        base_first = _time(lambda: baseline(a, b))
-        cand_first = _time(lambda: candidate(a, b))
-        cand_last = _time(lambda: candidate(a, b))
-        base_last = _time(lambda: baseline(a, b))
-        # Keep the early slot as the representative detail dict so the primed/host_ms
-        # receipt keeps the same shape; the reported ms is the two-slot mean.
-        base_timing, candidate_timing = base_first, cand_first
-        base_ms = 0.5 * (base_first["ms"] + base_last["ms"])
-        candidate_ms = 0.5 * (cand_first["ms"] + cand_last["ms"])
+        slots = _make_measurement_slots(case, protocol)
+        arms = _measurement_arms(candidate, backends)
+        latency = harness.measure_paired_arms(
+            arms, slots, protocol=protocol, metric="single_call_latency")
+        throughput = harness.measure_paired_arms(
+            arms, slots, protocol=protocol, metric="sustained_throughput")
+        _validate_measurement_receipt(latency)
+        _validate_measurement_receipt(throughput)
+        route = oracle_route(case["M"], case["N"], case["K"])
         flops = 2.0 * case["M"] * case["N"] * case["K"]
+        latency_summary = _metric_summary(latency, route, flops)
+        throughput_summary = _metric_summary(throughput, route, flops)
+        legacy = harness.legacy_timing_aliases(
+            latency, candidate_arm="candidate", baseline_arm=route)
         row = {
             "test_case_id": case["id"],
             "regime": case["regime"],
             "M": case["M"], "N": case["N"], "K": case["K"],
-            "baseline_ms": base_ms,
-            "candidate_ms": candidate_ms,
-            "execution_time_ms": candidate_ms,
-            "speedup": base_ms / candidate_ms,
-            "baseline_tflops": flops / (base_ms * 1e9),
-            "candidate_tflops": flops / (candidate_ms * 1e9),
-            # Raw per-slot ms, so the reader can see the drift the palindrome cancelled
-            # rather than take the mean on trust.
-            "arm_order": "BCCB",
-            "slot_ms": {"base_first": base_first["ms"], "cand_first": cand_first["ms"],
-                        "cand_last": cand_last["ms"], "base_last": base_last["ms"]},
-            "baseline_timing": base_timing,
-            "candidate_timing": candidate_timing,
+            "baseline_route": route,
+            "baseline_tflops": flops / (legacy["baseline_ms"] * 1e9),
+            "candidate_tflops": flops / (legacy["candidate_ms"] * 1e9),
+            "score_metric": "single_call_latency",
+            "single_call_latency": latency_summary,
+            "sustained_throughput": throughput_summary,
+            "measurement_receipts": {
+                "single_call_latency": latency,
+                "sustained_throughput": throughput,
+            },
+            # Compatibility for existing lane parsers. These aliases are sourced only from the
+            # latency receipt; throughput never feeds execution_time_ms or speedup.
+            **legacy,
         }
         rows.append(row)
-        print(f"Perf: {candidate_ms:.6f} ms ({case['id']})")
-    timing_receipt = _timing_receipt(rows)
+        print(f"Perf: {legacy['candidate_ms']:.6f} ms ({case['id']})")
+    timing_receipt = {
+        **harness.legacy_timing_receipt(rows),
+        "schema": harness.MEASUREMENT_RECEIPT_SCHEMA,
+        "protocol_hash": protocol["hash"],
+        "raw_receipts_embedded_per_case": True,
+    }
     report = {
         "status": "ok",
-        "baseline": "direct rocblas_gemm_ex",
+        "protocol": protocol,
+        "protocol_hash": protocol["hash"],
+        "score_metric": "single_call_latency",
+        "non_score_metric": "sustained_throughput",
+        "metric_separation": "latency inner=1; throughput inner>1; no mixed aggregate",
+        "baseline": "frozen per-shape best-of direct rocBLAS/direct hipBLASLt",
         "test_cases": rows,
-        "geomean_speedup": _geomean([r["speedup"] for r in rows]),
-        "decode_geomean_speedup": _geomean([r["speedup"] for r in rows if r["regime"] == "decode"]),
-        "prefill_geomean_speedup": _geomean([r["speedup"] for r in rows if r["regime"] == "prefill"]),
+        "geomean_speedup": _geomean([r["single_call_latency"]["speedup"] for r in rows]),
+        "decode_geomean_speedup": _geomean([
+            r["single_call_latency"]["speedup"] for r in rows if r["regime"] == "decode"]),
+        "prefill_geomean_speedup": _geomean([
+            r["single_call_latency"]["speedup"] for r in rows if r["regime"] == "prefill"]),
+        "sustained_geomean_speedup": _geomean([
+            r["sustained_throughput"]["speedup"] for r in rows]),
         "timing_receipt": timing_receipt,
     }
     print(f"GEAK_TIMING_RECEIPT: {json.dumps(timing_receipt)}")
     _write_report("performance", report)
+    return True, report
+
+
+def run_oracle_bakeoff(selected_case=None, protocol_name=None):
+    """Re-select and atomically freeze the BF16 denominator; never called by performance."""
+    from oracle_wrapper import oracle_backend_metadata, oracle_backends
+    from route_manifest import SCHEMA, write_route_manifest
+
+    protocol = harness.measurement_protocol(protocol_name)
+    cases = [c for c in CASES if selected_case in (None, c["id"])]
+    if selected_case is not None and not cases:
+        raise ValueError(f"unknown case: {selected_case}")
+    if selected_case is not None:
+        raise ValueError("a frozen oracle manifest requires all suite cases; omit --case")
+    backends = oracle_backends(frozen_algorithms=False)
+    routes = {}
+    receipts = {}
+    for case in cases:
+        slots = _make_measurement_slots(case, protocol)
+        first_args = slots[0]["args"]
+        ref = (first_args[0].float() @ first_args[1].float().t()).to(torch.bfloat16)
+        correctness = {}
+        metadata = {}
+        for name, fn in backends.items():
+            out = fn(*first_args)
+            ok, err = harness.correct(out, ref, TOL)
+            if not ok:
+                raise RuntimeError(f"{name} failed correctness for {case['id']}: {err}")
+            correctness[name] = {"correct": True, "max_rel_err": err}
+            metadata[name] = oracle_backend_metadata(
+                *first_args, name, frozen_algorithm=False)
+        arms = {name: (lambda slot, fn=fn: fn(*slot["args"]))
+                for name, fn in backends.items()}
+        receipt = harness.measure_paired_arms(
+            arms, slots, protocol=protocol, metric="single_call_latency")
+        _validate_measurement_receipt(receipt)
+        winner = min(backends, key=lambda name: receipt["medians_ms"][name])
+        routes[case["id"]] = {
+            "M": case["M"], "N": case["N"], "K": case["K"],
+            "backend": winner,
+            "correctness": correctness,
+            "backend_measurements": {
+                name: {
+                    "median_ms": receipt["medians_ms"][name],
+                    "samples_ms": [sample["ms"] for sample in receipt["samples"]
+                                   if sample["arm"] == name],
+                    "metadata": metadata[name],
+                }
+                for name in backends
+            },
+        }
+        receipts[case["id"]] = receipt
+    manifest = {
+        "schema": SCHEMA,
+        "task": "dense_bf16_gemm_fused",
+        "frozen": True,
+        "selection_state": "baked",
+        "selection_metric": "single_call_latency",
+        "protocol_hash": protocol["hash"],
+        "protocol": protocol,
+        "seed": protocol["seed"],
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "environment": {
+            "torch": torch.__version__,
+            "hip": torch.version.hip,
+            "device": torch.cuda.get_device_name(0),
+        },
+        "routes": routes,
+    }
+    path = TASK_DIR / "oracle_routes.v2.json"
+    write_route_manifest(path, manifest)
+    report = {"status": "ok", "manifest": str(path), "routes": routes,
+              "protocol_hash": protocol["hash"], "raw_receipts": receipts}
+    _write_report("oracle_bakeoff", report)
     return True, report
 
 
@@ -335,8 +474,12 @@ def run_profile(case_id, implementation, iterations):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["preflight", "compile", "correctness", "performance", "profile"])
+    parser.add_argument("mode", choices=["preflight", "compile", "correctness", "performance",
+                                         "oracle-bakeoff", "profile"])
     parser.add_argument("--case")
+    parser.add_argument("--protocol", choices=["legacy_write_flush", "read_evict", "warm",
+                                                "semantic_weight_rotating"])
+    parser.add_argument("--confirm-oracle-bakeoff", action="store_true")
     parser.add_argument("--impl", choices=["baseline", "candidate"], default="candidate")
     parser.add_argument("--iterations", type=int, default=20)
     args = parser.parse_args()
@@ -349,18 +492,23 @@ def main():
         elif args.mode == "correctness":
             ok, report = run_correctness()
         elif args.mode == "performance":
-            ok, report = run_performance(args.case)
+            ok, report = run_performance(args.case, args.protocol)
+        elif args.mode == "oracle-bakeoff":
+            if not args.confirm_oracle_bakeoff:
+                parser.error("oracle-bakeoff requires --confirm-oracle-bakeoff")
+            ok, report = run_oracle_bakeoff(args.case, args.protocol)
         else:
             if not args.case:
                 parser.error("profile requires --case")
             ok, report = run_profile(args.case, args.impl, args.iterations)
         print(f"{args.mode.capitalize()}: {'PASS' if ok else 'FAIL'}")
-        if args.mode == "profile":
-            print(json.dumps(report))
+        if args.mode in ("profile", "oracle-bakeoff"):
+            print(json.dumps({"status": report.get("status"),
+                              "manifest": report.get("manifest")}))
         raise SystemExit(0 if ok else 1)
     except Exception as exc:
         report = {"status": "fail", "error": repr(exc)}
-        _write_report(args.mode, report)
+        _write_report(args.mode.replace("-", "_"), report)
         print(f"{args.mode.capitalize()}: FAIL\nError: {exc}")
         raise SystemExit(1)
 
