@@ -1,0 +1,1370 @@
+{
+  "fallback": {
+    "kind": "canonical",
+    "reason": "shape absent from canonical CASES"
+  },
+  "history": [
+    {
+      "previous_table_digest": null,
+      "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+      "revision": 1,
+      "route_ids": [
+        "decode_m16_square",
+        "decode_m2_square",
+        "decode_m32_down",
+        "decode_m64_square",
+        "decode_m8_up",
+        "decode_m96_up",
+        "prefill_m1024_down",
+        "prefill_m128_square",
+        "prefill_m2048_square",
+        "prefill_m256_down",
+        "prefill_m512_up"
+      ],
+      "run_id": "materialize-3ad75f0437e53d3b",
+      "updated_at": "2026-09-02T20:34:11.222968+00:00"
+    }
+  ],
+  "oracle": {
+    "compatible": true,
+    "manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "score_metric": {
+      "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+      "id": "sustained_throughput",
+      "inner": 16,
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "schema": "geak.score-metric/v1",
+      "unit": "ms/call",
+      "version": 1
+    },
+    "selection_metric": "sustained_throughput"
+  },
+  "protocol": {
+    "hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "name": "semantic_weight_rotating",
+    "schema": "geak.measurement-protocol/v2",
+    "version": 2
+  },
+  "receipts_root": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+  "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+  "revision": 1,
+  "routes": {
+    "decode_m16_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m16_square",
+      "shape": {
+        "k": 4096,
+        "m": 16,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "decode_m2_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m2_square",
+      "shape": {
+        "k": 4096,
+        "m": 2,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "decode_m32_down": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m32_down",
+      "shape": {
+        "k": 11008,
+        "m": 32,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "decode_m64_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m64_square",
+      "shape": {
+        "k": 8192,
+        "m": 64,
+        "n": 8192
+      },
+      "weight": 1.0
+    },
+    "decode_m8_up": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m8_up",
+      "shape": {
+        "k": 4096,
+        "m": 8,
+        "n": 11008
+      },
+      "weight": 1.0
+    },
+    "decode_m96_up": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m96_up",
+      "shape": {
+        "k": 4096,
+        "m": 96,
+        "n": 11008
+      },
+      "weight": 1.0
+    },
+    "prefill_m1024_down": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 16
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 16
+            },
+            "bk": 96,
+            "bm": 192,
+            "bn": 96,
+            "derived": {
+              "lds": {
+                "a_bytes": 21504,
+                "b_bytes": 10752,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 8192,
+                "total_bytes": 40448
+              },
+              "miwt": {
+                "m": 3,
+                "n": 3
+              },
+              "nw": 8,
+              "register_estimate": {
+                "accumulator_vgpr": 36,
+                "pgr_register_vgpr": 20,
+                "regular_vgpr": 52,
+                "unified_vgpr": 88
+              },
+              "wave_tile": {
+                "m": 48,
+                "n": 48
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 8192,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 2,
+            "plr": 0,
+            "provenance": {
+              "generator": "geak.dependent-domain-sweeps/v1",
+              "kind": "dependent_domain_generator",
+              "sweep": "pipeline_memory",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 4,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "c4cd2f649a70d9f04d6b",
+          "isa_hash": "5f5437aa01ed105edc5bd1b8577f6c46a2ddafbab10942fa6b519b855c3d1369",
+          "kernel": "geak_fp8_rowwise_c4cd2f649a70d9f04d6b",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_c4cd2f649a70d9f04d6b",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        },
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 16
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 16
+            },
+            "bk": 128,
+            "bm": 160,
+            "bn": 96,
+            "derived": {
+              "lds": {
+                "a_bytes": 23040,
+                "b_bytes": 13824,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 40960
+              },
+              "miwt": {
+                "m": 5,
+                "n": 3
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 60,
+                "pgr_register_vgpr": 32,
+                "regular_vgpr": 64,
+                "unified_vgpr": 124
+              },
+              "wave_tile": {
+                "m": 80,
+                "n": 48
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 2,
+            "plr": 0,
+            "provenance": {
+              "generator": "geak.dependent-domain-sweeps/v1",
+              "kind": "dependent_domain_generator",
+              "sweep": "pipeline_memory",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "db88343ca2e25eb8f46e",
+          "isa_hash": "5c168dda2d704b843bb27c7ac1ae1de2dfadf3a5bebfae07c22a43b8afbf5647",
+          "kernel": "geak_fp8_rowwise_db88343ca2e25eb8f46e",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 1,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_db88343ca2e25eb8f46e",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m1024_down",
+      "shape": {
+        "k": 11008,
+        "m": 1024,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m128_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m128_square",
+      "shape": {
+        "k": 4096,
+        "m": 128,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m2048_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m2048_square",
+      "shape": {
+        "k": 4096,
+        "m": 2048,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m256_down": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m256_down",
+      "shape": {
+        "k": 11008,
+        "m": 256,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m512_up": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "artifact_sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2",
+          "compile_manifest": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "compile_manifest_sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 64,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "fp8_e4m3_fnuz",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 32,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 16,
+              "b": 16,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "85c8914408c3ef3917eb",
+          "isa_hash": "9d407fa70eeb6468408ce3ce519ffadb43653b62c4056a5128bc1ef3a817be5c",
+          "kernel": "geak_fp8_rowwise_85c8914408c3ef3917eb",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m1024_down",
+          "source": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "source_sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f",
+          "symbol": "geak_launch_fp8_rowwise_85c8914408c3ef3917eb",
+          "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m512_up",
+      "shape": {
+        "k": 4096,
+        "m": 512,
+        "n": 11008
+      },
+      "weight": 1.0
+    }
+  },
+  "run_id": "materialize-3ad75f0437e53d3b",
+  "schema": "geak.runtime_table/v2",
+  "score_metric": {
+    "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+    "id": "sustained_throughput",
+    "inner": 16,
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "schema": "geak.score-metric/v1",
+    "unit": "ms/call",
+    "version": 1
+  },
+  "search": {
+    "arm_evaluations": 12,
+    "compile_shards": [
+      9
+    ],
+    "compiled_candidates": 9,
+    "policy": {
+      "cu_count": 304,
+      "eta": 2,
+      "first_round_top_n": 8,
+      "max_compiled_candidates": 16,
+      "max_route_arm_evaluations": 12,
+      "rounds": 2,
+      "shard_size": 12,
+      "top_k": 2
+    },
+    "search_id": "a1e34c361619793655d64e0252bf5663ba90fe1a10a57e4c474eff8ab389f203"
+  },
+  "suite": {
+    "atomic": true,
+    "complete": true,
+    "route_ids": [
+      "decode_m16_square",
+      "decode_m2_square",
+      "decode_m32_down",
+      "decode_m64_square",
+      "decode_m8_up",
+      "decode_m96_up",
+      "prefill_m1024_down",
+      "prefill_m128_square",
+      "prefill_m2048_square",
+      "prefill_m256_down",
+      "prefill_m512_up"
+    ]
+  },
+  "table_digest": "0204f30f3b2331575fe5ecf2e251498f835a8a94870b291d5981a2d72cb448e7",
+  "task": {
+    "adapter": "fp8_rowwise",
+    "binding_hashes": {
+      "cases": "3eb0c95a63eb1d143ba6ec55014f8528960d0db6e926dc7782d1e7b65bba7ecb",
+      "correctness": "eae90869d4c8b85eaa356986acad7ca515f946aa58dc5dc95fb6bc0e08c23ce1",
+      "input_builder": "0f5bcf267d2febaa5100f578023ee6bc0434da23b94cb20c2fc6fa4c2aa0acbf"
+    },
+    "digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa",
+    "name": "dense_fp8_gemm_rowwise",
+    "semantic_hashes": {
+      "config.yaml": "70d77b92d12cd4902de487b8941b0ec9b90641af7f8548607545540c2093d64f",
+      "geak_tuner_runtime.py": "a8dea961de35c18886c13c89017614d0e03311ff34832e561255f33307bcf50d",
+      "harness_lib.py": "9438cf7ede040aecd2cbffd497a6c91c39d49d312f7c17bef36c597965f6678b",
+      "oracle_wrapper.py": "41f80fffa70817415667780364a55a3f1af77c8a0fa279d513e23748ce162d8c",
+      "route_manifest.py": "0ecf122d93054bfea40fab7f6f8a5f8b84d423fa274c0d9a468afb7d59612d5d",
+      "scripts/task_runner.py": "7c97c9ef60243687d55d3f6ff4d99ecc151f9c39b460e75581d8a2dbf8d79c49"
+    },
+    "source_digest": "7877983c73190264417a68aa5e7bff405ec75eef30437ef1530e66ef87de756e"
+  },
+  "updated_at": "2026-09-02T20:34:11.222968+00:00"
+}

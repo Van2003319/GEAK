@@ -1,0 +1,142 @@
+{
+  "configs": [
+    {
+      "artifact": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/release.json",
+      "artifact_set": [
+        {
+          "kind": "artifact",
+          "path": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/artifacts/cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2.so",
+          "sha256": "cced1b4557511e46eced046b4c4c48cdf2b11c901d4f49a646011c895bf5e8d2"
+        },
+        {
+          "kind": "compile_manifest",
+          "path": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/manifests/8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7.json",
+          "sha256": "8b823f761840285ffdc5687ed92ab7f6005ff3ee5abbaeb75aa32af0c626fbe7"
+        },
+        {
+          "kind": "source",
+          "path": ".geak_tuner/releases/3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855/sources/21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f.hip",
+          "sha256": "21e419421c82df2dbc319e4184bd456f99bbce13abbde31f202aa29b8d0ce40f"
+        }
+      ],
+      "artifact_sha256": "1031ca8e6ef2cfb46b1b98c8b95898d4a59aebfe548d08a71ca40be5dff7ca7d",
+      "build_receipt": {
+        "artifact_set_sha256": "2360840be388b49c55bdd72094183db76db29830c5d587056f20b5d231db50d4",
+        "oracle_manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
+        "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+        "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+        "schema": "geak.asm-materialized-release/v1",
+        "score_metric": {
+          "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "id": "sustained_throughput",
+          "inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "schema": "geak.score-metric/v1",
+          "unit": "ms/call",
+          "version": 1
+        },
+        "search_id": "a1e34c361619793655d64e0252bf5663ba90fe1a10a57e4c474eff8ab389f203",
+        "source_digest": "7877983c73190264417a68aa5e7bff405ec75eef30437ef1530e66ef87de756e",
+        "table_digest": "0204f30f3b2331575fe5ecf2e251498f835a8a94870b291d5981a2d72cb448e7",
+        "task": "dense_fp8_gemm_rowwise",
+        "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+      },
+      "config": {
+        "adapter": "fp8_rowwise",
+        "config_ids": [
+          "85c8914408c3ef3917eb",
+          "c4cd2f649a70d9f04d6b",
+          "db88343ca2e25eb8f46e"
+        ],
+        "kind": "asm_tuner_release",
+        "oracle_manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
+        "priority": 0,
+        "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+        "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+        "score_metric": {
+          "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "id": "sustained_throughput",
+          "inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "schema": "geak.score-metric/v1",
+          "unit": "ms/call",
+          "version": 1
+        },
+        "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+        "score_metric_id": "sustained_throughput",
+        "score_metric_inner": 16,
+        "task": "dense_fp8_gemm_rowwise",
+        "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa",
+        "variant": "generated-successive-halving"
+      },
+      "created_unix_ns": 1788381248747460955,
+      "id": "cfg-e995603ca5db06f0dd40",
+      "mechanism": "canonical protocol-v2 paired search",
+      "precompiled": true,
+      "published_unix_ns": 1788381251544864506,
+      "status": "ready"
+    }
+  ],
+  "launch_contract": {
+    "artifact_set": {
+      "count": 3,
+      "kinds": {
+        "artifact": 1,
+        "compile_manifest": 1,
+        "source": 1
+      },
+      "schema": "geak.asm-artifact-set/v1",
+      "sha256": "2360840be388b49c55bdd72094183db76db29830c5d587056f20b5d231db50d4"
+    },
+    "oracle_manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
+    "protocol": {
+      "hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "schema": "geak.measurement-protocol/v2",
+      "version": 2
+    },
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "registry": "asm_tuner_registry.json",
+    "registry_id": "cfg-e995603ca5db06f0dd40",
+    "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+    "runtime_table": "asm_tuner_runtime_table.json",
+    "runtime_table_path_base": "task_root",
+    "runtime_table_sha256": "dfc816b0f175d053b355a4d743a69e0ed90e38e0f50d1ed22c695c3750ba6cfa",
+    "schema": "geak.asm-launch-contract/v1",
+    "score_metric": {
+      "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+      "id": "sustained_throughput",
+      "inner": 16,
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "schema": "geak.score-metric/v1",
+      "unit": "ms/call",
+      "version": 1
+    },
+    "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+    "score_metric_id": "sustained_throughput",
+    "score_metric_inner": 16,
+    "selection": {
+      "path": "asm_tuner_selection.json",
+      "path_base": "task_root",
+      "sha256": "ea467db1cbeb2c3ee792ab78ca65ca7651e4798123c8a5279c41900ad63224f4"
+    },
+    "source_digest": "7877983c73190264417a68aa5e7bff405ec75eef30437ef1530e66ef87de756e",
+    "task": "dense_fp8_gemm_rowwise",
+    "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa",
+    "task_manifest": {
+      "path": "asm_tuner/manifests/tasks/dense_fp8_gemm_rowwise.json",
+      "sha256": "5192fc51bae4da1c72b9cf8663f97e531541a0fb7c3af696ef524d589add653b"
+    },
+    "task_runtime_loader": {
+      "path": "examples/tasks/dense_fp8_gemm_rowwise/geak_tuner_runtime.py",
+      "runtime_table": "asm_tuner_runtime_table.json",
+      "sha256": "a8dea961de35c18886c13c89017614d0e03311ff34832e561255f33307bcf50d"
+    },
+    "workflow_consumer": {
+      "path": "kernel_workflow/kernel_lane.js",
+      "sha256": "ea714d944861b9e34863978e140264dd14e6e872bb3d90f08ff66a6ea9215ad1"
+    }
+  },
+  "schema": "geak.config-search/v2",
+  "schema_version": 2,
+  "updated_unix_ns": 1788381251545615497
+}

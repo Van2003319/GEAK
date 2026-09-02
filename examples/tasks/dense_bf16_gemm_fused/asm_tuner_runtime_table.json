@@ -1,0 +1,1370 @@
+{
+  "fallback": {
+    "kind": "canonical",
+    "reason": "shape absent from canonical CASES"
+  },
+  "history": [
+    {
+      "previous_table_digest": null,
+      "release_id": "389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1",
+      "revision": 1,
+      "route_ids": [
+        "decode_m16_square",
+        "decode_m2_square",
+        "decode_m32_down",
+        "decode_m64_square",
+        "decode_m8_up",
+        "decode_m96_up",
+        "prefill_m1024_down",
+        "prefill_m128_square",
+        "prefill_m2048_square",
+        "prefill_m256_down",
+        "prefill_m512_up"
+      ],
+      "run_id": "materialize-389df4c64539abca",
+      "updated_at": "2026-09-02T20:34:13.686231+00:00"
+    }
+  ],
+  "oracle": {
+    "compatible": true,
+    "manifest_sha256": "d7c75823dd2484c5442b63423d26d1025e4ada993f18904f8af30f41102c6b91",
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "score_metric": {
+      "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+      "id": "sustained_throughput",
+      "inner": 16,
+      "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+      "schema": "geak.score-metric/v1",
+      "unit": "ms/call",
+      "version": 1
+    },
+    "selection_metric": "sustained_throughput"
+  },
+  "protocol": {
+    "hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "name": "semantic_weight_rotating",
+    "schema": "geak.measurement-protocol/v2",
+    "version": 2
+  },
+  "receipts_root": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1",
+  "release_id": "389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1",
+  "revision": 1,
+  "routes": {
+    "decode_m16_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m16_square",
+      "shape": {
+        "k": 4096,
+        "m": 16,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "decode_m2_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m2_square",
+      "shape": {
+        "k": 4096,
+        "m": 2,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "decode_m32_down": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m32_down",
+      "shape": {
+        "k": 11008,
+        "m": 32,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "decode_m64_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m64_square",
+      "shape": {
+        "k": 8192,
+        "m": 64,
+        "n": 8192
+      },
+      "weight": 1.0
+    },
+    "decode_m8_up": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m8_up",
+      "shape": {
+        "k": 4096,
+        "m": 8,
+        "n": 11008
+      },
+      "weight": 1.0
+    },
+    "decode_m96_up": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "decode_m96_up",
+      "shape": {
+        "k": 4096,
+        "m": 96,
+        "n": 11008
+      },
+      "weight": 1.0
+    },
+    "prefill_m1024_down": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m1024_down",
+      "shape": {
+        "k": 11008,
+        "m": 1024,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m128_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m128_square",
+      "shape": {
+        "k": 4096,
+        "m": 128,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m2048_square": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 8
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 8
+            },
+            "bk": 64,
+            "bm": 112,
+            "bn": 128,
+            "derived": {
+              "lds": {
+                "a_bytes": 16128,
+                "b_bytes": 18432,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 2048,
+                "total_bytes": 36608
+              },
+              "miwt": {
+                "m": 7,
+                "n": 4
+              },
+              "nw": 2,
+              "register_estimate": {
+                "accumulator_vgpr": 112,
+                "pgr_register_vgpr": 60,
+                "regular_vgpr": 92,
+                "unified_vgpr": 204
+              },
+              "wave_tile": {
+                "m": 112,
+                "n": 64
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 2048,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 2,
+            "plr": 0,
+            "provenance": {
+              "generator": "geak.dependent-domain-sweeps/v1",
+              "kind": "dependent_domain_generator",
+              "sweep": "pipeline_memory",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 1,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "c7f2c38f1343003c32d9",
+          "isa_hash": "603d80a867267b48c6f53a9931cc42d27e890f7357141d98247109671d9ad0ba",
+          "kernel": "geak_bf16_c7f2c38f1343003c32d9",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_c7f2c38f1343003c32d9",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        },
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 8
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 8
+            },
+            "bk": 64,
+            "bm": 128,
+            "bn": 128,
+            "derived": {
+              "lds": {
+                "a_bytes": 18432,
+                "b_bytes": 18432,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 2048,
+                "total_bytes": 38912
+              },
+              "miwt": {
+                "m": 4,
+                "n": 8
+              },
+              "nw": 2,
+              "register_estimate": {
+                "accumulator_vgpr": 128,
+                "pgr_register_vgpr": 64,
+                "regular_vgpr": 96,
+                "unified_vgpr": 224
+              },
+              "wave_tile": {
+                "m": 64,
+                "n": 128
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 2048,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 2,
+            "plr": 0,
+            "provenance": {
+              "generator": "geak.dependent-domain-sweeps/v1",
+              "kind": "dependent_domain_generator",
+              "sweep": "pipeline_memory",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 1
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "9539a5460e4eb2decfb6",
+          "isa_hash": "dc67ffd98b6fa12de0e519e581adfeac3bd4c2c2345f288ba25faa99755cccf0",
+          "kernel": "geak_bf16_9539a5460e4eb2decfb6",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 1,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_9539a5460e4eb2decfb6",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m2048_square",
+      "shape": {
+        "k": 4096,
+        "m": 2048,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m256_down": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m256_down",
+      "shape": {
+        "k": 11008,
+        "m": 256,
+        "n": 4096
+      },
+      "weight": 1.0
+    },
+    "prefill_m512_up": {
+      "entries": [
+        {
+          "artifact": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/artifacts/7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1.so",
+          "artifact_sha256": "7a8523546b57a97df43fb8bbc4c5ba162fae470204914815d115d2bded86f5f1",
+          "compile_manifest": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/manifests/37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630.json",
+          "compile_manifest_sha256": "37e55dad236267bc08b2d7c3e1af2ead5eaddc1e8080ca8ee8a97b4aa0167630",
+          "config": {
+            "a_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "arch": "gfx942",
+            "b_lds": {
+              "buffers": 1,
+              "pad_elements": 0
+            },
+            "bk": 32,
+            "bm": 64,
+            "bn": 64,
+            "derived": {
+              "lds": {
+                "a_bytes": 4096,
+                "b_bytes": 4096,
+                "pgr_counted_as_buffer": false,
+                "scratch_bytes": 4096,
+                "total_bytes": 12288
+              },
+              "miwt": {
+                "m": 2,
+                "n": 2
+              },
+              "nw": 4,
+              "register_estimate": {
+                "accumulator_vgpr": 16,
+                "pgr_register_vgpr": 4,
+                "regular_vgpr": 36,
+                "unified_vgpr": 52
+              },
+              "wave_tile": {
+                "m": 32,
+                "n": 32
+              }
+            },
+            "dtype": "bf16",
+            "gsu": 1,
+            "layout": "a_mk_b_nk",
+            "lds_scratch_bytes": 4096,
+            "mfma": {
+              "blocks": 1,
+              "k": 16,
+              "m": 16,
+              "n": 16
+            },
+            "pgr": 1,
+            "plr": 0,
+            "provenance": {
+              "kind": "mvp_correctness_seed",
+              "vendor_default": false
+            },
+            "schema": "geak.asm_config/v1",
+            "stagger": 0,
+            "store": {
+              "mode": "vector"
+            },
+            "stream_k": 0,
+            "vector_widths": {
+              "a": 8,
+              "b": 8,
+              "store": 4
+            },
+            "wave_grid": {
+              "m": 2,
+              "n": 2
+            },
+            "wgm": 1,
+            "xcc": 1
+          },
+          "config_id": "530289ad76eb74d4579f",
+          "isa_hash": "16ccc027dfb461dded00c71c91944d31ac3b70fffac48c9017afd3d440e31478",
+          "kernel": "geak_bf16_530289ad76eb74d4579f",
+          "metric_id": "sustained_throughput",
+          "metric_inner": 16,
+          "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+          "rank": 0,
+          "score_metric_hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+          "selection_reason": "protocol-v2 per-route successive halving; measured_routes=prefill_m2048_square",
+          "source": ".geak_tuner/releases/389df4c64539abca5cbf150a5353a7b5892b0c87d873759ad7646b190c54eba1/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
+          "source_sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1",
+          "symbol": "geak_launch_bf16_530289ad76eb74d4579f",
+          "task_digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c"
+        }
+      ],
+      "fallback": {
+        "kind": "canonical",
+        "reason": "shape absent from canonical CASES"
+      },
+      "route": "prefill_m512_up",
+      "shape": {
+        "k": 4096,
+        "m": 512,
+        "n": 11008
+      },
+      "weight": 1.0
+    }
+  },
+  "run_id": "materialize-389df4c64539abca",
+  "schema": "geak.runtime_table/v2",
+  "score_metric": {
+    "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+    "id": "sustained_throughput",
+    "inner": 16,
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "schema": "geak.score-metric/v1",
+    "unit": "ms/call",
+    "version": 1
+  },
+  "search": {
+    "arm_evaluations": 12,
+    "compile_shards": [
+      9
+    ],
+    "compiled_candidates": 9,
+    "policy": {
+      "cu_count": 304,
+      "eta": 2,
+      "first_round_top_n": 8,
+      "max_compiled_candidates": 16,
+      "max_route_arm_evaluations": 12,
+      "rounds": 2,
+      "shard_size": 12,
+      "top_k": 2
+    },
+    "search_id": "9e54fefd886ea8ad0b8ca8b05f91520ca07d6a1b6d317ac92e2f63b2d38a7b06"
+  },
+  "suite": {
+    "atomic": true,
+    "complete": true,
+    "route_ids": [
+      "decode_m16_square",
+      "decode_m2_square",
+      "decode_m32_down",
+      "decode_m64_square",
+      "decode_m8_up",
+      "decode_m96_up",
+      "prefill_m1024_down",
+      "prefill_m128_square",
+      "prefill_m2048_square",
+      "prefill_m256_down",
+      "prefill_m512_up"
+    ]
+  },
+  "table_digest": "12d3d5c4daeeccfc3ae173a6d06968ce0731f1fa5d9bcdd7e3555481d2d2d421",
+  "task": {
+    "adapter": "bf16",
+    "binding_hashes": {
+      "cases": "3eb0c95a63eb1d143ba6ec55014f8528960d0db6e926dc7782d1e7b65bba7ecb",
+      "correctness": "eae90869d4c8b85eaa356986acad7ca515f946aa58dc5dc95fb6bc0e08c23ce1",
+      "input_builder": "37d99402be886304c5f23f212b88e06696672954443db1e19d45c15dc9a1a0e9"
+    },
+    "digest": "a031e3e0165de9784a481e8ada7728fa23b94fc25ed6a2f93abd17142498f56c",
+    "name": "dense_bf16_gemm_fused",
+    "semantic_hashes": {
+      "config.yaml": "e794d1cc341f81b84272c995756d0a168c40012afa5518a625b168099d9999e2",
+      "geak_tuner_runtime.py": "a8dea961de35c18886c13c89017614d0e03311ff34832e561255f33307bcf50d",
+      "harness_lib.py": "9438cf7ede040aecd2cbffd497a6c91c39d49d312f7c17bef36c597965f6678b",
+      "oracle_wrapper.py": "7d341eb1ab58c93ef1e15dd1477499590dc38a5c88bcc4334fbe6bf2dc83f234",
+      "route_manifest.py": "0ecf122d93054bfea40fab7f6f8a5f8b84d423fa274c0d9a468afb7d59612d5d",
+      "scripts/task_runner.py": "6a9fc9e69f9c6568422bdf055f90a99e448455fe1301e4de83834ec4b13317c1"
+    },
+    "source_digest": "88013c326bcc1a3c35c8f3b6fe879255f77dbf29357b45552074e07af5bb861d"
+  },
+  "updated_at": "2026-09-02T20:34:13.686231+00:00"
+}

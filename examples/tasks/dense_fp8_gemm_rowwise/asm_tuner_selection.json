@@ -1,0 +1,29 @@
+{
+  "config_ids": [
+    "85c8914408c3ef3917eb",
+    "c4cd2f649a70d9f04d6b",
+    "db88343ca2e25eb8f46e"
+  ],
+  "oracle_manifest_sha256": "8dab611a77a38df6c8bedbb2353262c7533aaf18a293763009e51e7b7997b3a2",
+  "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+  "registry_id": "cfg-e995603ca5db06f0dd40",
+  "release_id": "3ad75f0437e53d3b9d6dc89a8c66217d131ccf0ea86f5f21660bb71121fe5855",
+  "runtime_table": "asm_tuner_runtime_table.json",
+  "runtime_table_sha256": "dfc816b0f175d053b355a4d743a69e0ed90e38e0f50d1ed22c695c3750ba6cfa",
+  "schema": "geak.asm-selection/v1",
+  "score_metric": {
+    "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
+    "id": "sustained_throughput",
+    "inner": 16,
+    "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
+    "schema": "geak.score-metric/v1",
+    "unit": "ms/call",
+    "version": 1
+  },
+  "score_metric_id": "sustained_throughput",
+  "score_metric_inner": 16,
+  "source_digest": "7877983c73190264417a68aa5e7bff405ec75eef30437ef1530e66ef87de756e",
+  "table_digest": "0204f30f3b2331575fe5ecf2e251498f835a8a94870b291d5981a2d72cb448e7",
+  "task": "dense_fp8_gemm_rowwise",
+  "task_digest": "e8fb7e2acefb338c5cdcf0865e8c0fbebb567eb380aa83f3843108564c0ff4aa"
+}
