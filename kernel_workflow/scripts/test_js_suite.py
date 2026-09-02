@@ -234,8 +234,8 @@ WF_MUTANTS = [
 # none of which had ever been shown to go red. That is the same exposure finding
 # (128) names -- a guard nobody has watched fail is a guard nobody knows is
 # watching. These mutants are the regressions that file exists to catch: the
-# knob's fallback, registered-only admission, the prompt and verified filter sites that must read
-# it instead of a hard-coded literal, and the commit gate it must NOT reach.
+# knob's 0.8 fallback, registered-only admission, prompt/filter sites that must read it instead of
+# a hard-coded threshold, explicit decimal rendering, and the Python receipt path it must not influence.
 FLOOR_MUTANTS = [
     ("a floor of 0 is accepted instead of falling back to 0.8",
      "  return Number.isFinite(v) && v > 0 ? v : 0.8;",
@@ -254,9 +254,9 @@ FLOOR_MUTANTS = [
      "return verVsInc === null ? true : verVsInc > CANDIDATE_FLOOR;",
      "return verVsInc === null ? true : verVsInc > 1.0;"),
     # Injection, and the one that matters most: the floor is a CANDIDATE gate,
-    # and the whole knob is only safe because the COMMIT gate never sees it. The
-    # suite pins that as an absence, so only a mutant that introduces the
-    # forbidden form can show the pin fires.
+    # and the whole knob is only safe because the Python receipt never sees it. The
+    # surviving legacy comparison is audit-only; mutating even that line proves the
+    # lexical absence check still notices CANDIDATE_FLOOR leaking toward commitment.
     ("the commit gate is loosened to the candidate floor",
      "const legacyImproved = cand.geomean > cumulative * (1 + MIN_IMPROVE);",
      "const legacyImproved = cand.geomean > cumulative * (1 + CANDIDATE_FLOOR);"),

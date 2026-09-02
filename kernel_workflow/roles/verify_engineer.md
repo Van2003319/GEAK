@@ -199,8 +199,9 @@ absolute per-case latencies. The script trusts only your numbers.
     ```
 
     **When `ISA_PARENT_ARCHIVE` is NOT supplied, capture the parent yourself.** You have already built
-    the unpatched canonical tree in this session for `control_per_case` (step 7), so its code objects
-    are sitting in your control workspace and capturing them costs one more CPU-only call:
+    the unpatched canonical tree in this session for the raw `paired_per_case` control arm
+    (step 7), so its code objects are sitting in your control workspace and capturing them costs one
+    more CPU-only call:
 
     ```
     python3 "$ISA_CAPTURE_HELPER" --out "$ISA_ARCHIVE_DIR/../isa_parent" \
@@ -422,46 +423,48 @@ absolute per-case latencies. The script trusts only your numbers.
    leading word (`"pass"` followed by `10/11`, `except`, `mismatch`, `fail`) is read as NOT passing:
    a partial pass is a failure, and it is reported as `"fail"`, never as a qualified `"pass"`.
 
-7. **Measure the INCUMBENT beside the candidate, in this same session, and return it as
-   `control_per_case`.** Build the unpatched canonical tree independently in your own workspace and
-   time it interleaved with the candidate arm — not before, not after, and never quoting a number
-   from an earlier round.
+7. **Produce the gate's raw SAME-SESSION paired blocks.** Build the unpatched canonical tree
+   independently in your own workspace. If the canonical tree carries a `.s`, restore it there too:
+   run `python3 "$ASM_ROUNDTRIP_HELPER" incumbent --source-root <control ws src dir>`, then build,
+   restore, and only then time. Once phase2 has banked, an unrestored control is an older program and
+   would count the same assembly win again.
 
-   **If the canonical tree carries a `.s`, the control arm must restore it too — step 2d's
-   sequence, in the control workspace.** Check with
-   `python3 "$ASM_ROUNDTRIP_HELPER" incumbent --source-root <control ws src dir>`; when it reports
-   `continue_from_assembly: true`, build, restore, and only then time. This is not symmetry for its
-   own sake. Once a phase2 round has banked, the incumbent IS the assembly version, and a control
-   built without the restore is the program from *before* that round — so the candidate is scored
-   against a predecessor the search already beat, and every assembly win in the tree gets counted a
-   second time on every later round. Say in `notes` which arms restored.
+   Before timing, choose one unique, non-empty `measurement_session_id` for this verification and
+   freeze the supplied `TARGET_ROUTES`. For **every route in `BASELINE_PER_CASE`**, collect at least
+   **eight complete candidate/control pairs**, interleaved under the same GPU lock and priming policy.
+   Use explicit pair ids (`pair-00`, `pair-01`, ...). A pair id identifies the two observations made
+   under the same local conditions; do not concatenate an old control run with a new candidate run.
+   Alternate AB/BA order across pairs when the harness permits it so order drift is not aliased to the
+   patch. Every route must use the same pair-id set, even if the suite executes routes sequentially.
 
-   This is the load-bearing measurement in your report, not a nicety. An unchanged tree measures
-   **1.5–3% differently between invocations**, and per-round gains on this lane are ~1%. So a
-   candidate timed in your session and an incumbent timed in some earlier round differ by more from
-   *drift* than from the patch, and the commit gate cannot tell which it is looking at. With both arms
-   in one session the drift is common to both and cancels; one verifier caught a session-level −6.8%
-   shift on a route that was present in **both** arms and would otherwise have been scored as the
-   patch's effect.
+   Return those observations verbatim in `paired_per_case`, one block per route:
 
-   Report it as `{"name": ..., "optimized_ms": ...}` per route — the time *this arm* measured, using
-   the same field name the candidate rows use. No `speedup` field: the incumbent measuring itself is
-   1.0 by construction, and a fabricated ratio there is worse than an omitted one. Include
-   `samples_ms` when you repeated it.
+   ```json
+   {
+     "route": "the exact BASELINE_PER_CASE name",
+     "candidate": {"session_id": "verify-r3-d1-...", "pair_ids": ["pair-00"],
+                   "samples_ms": [0.97]},
+     "control":   {"session_id": "verify-r3-d1-...", "pair_ids": ["pair-00"],
+                   "samples_ms": [1.0]}
+   }
+   ```
 
-   Omitting the field is not an error and the run proceeds — the gate falls back to the stored table
-   from an earlier round and records that it did. But then your verdict carries the drift, and a
-   marginal round is decided by which GPU in the pool was free. Do not synthesize this arm from the
-   candidate run or from `BASELINE_PER_CASE`: an invented control silently narrows the bar every
-   future candidate has to clear, which is the same failure mode as a fabricated `samples_ms`.
+   The abbreviated arrays above show shape only; the real arrays need at least eight finite positive
+   values and equal lengths. Keep `per_case` and `control_per_case` summaries for reports, but the
+   commit gate does **not** infer pairs from their medians and does not consume baseline `samples_ms`.
+   It sends the raw blocks to `scripts/route_gate.py`, which works on
+   `log(control_ms/candidate_ms)` and emits the authoritative versioned receipt.
 
-8. **`target_routes` is not optional when the direction claimed a route.** Return the route(s) the
-   mechanism was claimed on, taken from the direction you were handed — not the routes that happened
-   to improve. The gate uses it to refuse banking an incidental gain as the declared mechanism; with
-   the field absent it accepts any route that beat its band and logs that the win went unattributed.
-   Return `[]` only when the direction genuinely named no route (a suite-wide or host-side change).
-   Do not widen it to cover a route that moved unexpectedly — report that in `notes` instead. A win on
-   a route nobody predicted is a finding; relabelled as the target, it is a fabricated mechanism.
+   This evidence is mandatory for banking. Missing candidate raw samples, control raw samples,
+   session ids, pair ids, enough pairs, or any route from the full suite fails closed. The verifier's
+   correctness/measurement report may still be recorded, but the candidate cannot commit and there
+   is **no fallback** to a control table from another session or to the summary geomean.
+
+8. **Predeclare `target_routes`; an empty target set cannot bank.** Copy `TARGET_ROUTES` verbatim before looking at timings — never the routes that happened to improve. Every declared
+   target must have a one-sided 95% lower confidence bound beyond the practical MDE (2% by default,
+   configurable by the caller); every non-target must prove non-regression, and the complete suite
+   must prove non-inferiority. For a genuinely suite-wide mechanism, explicitly list every suite
+   route as a target. Do not return `[]`, and do not widen the list after measurement.
 
 ## Return JSON
 ```json
@@ -483,9 +486,19 @@ absolute per-case latencies. The script trusts only your numbers.
   "verified_arithmetic": 0.0,
   "verified_weighted": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "weight": 0.0}],
-  "control_per_case": [{"name": "...", "optimized_ms": 0.0, "samples_ms": [0.0, 0.0, 0.0]}],
-  "variance_note": "e.g. run-to-run within 3%",
-  "target_routes": ["the route(s) this direction claimed a mechanism on"],
+  "control_per_case": [{"name": "...", "optimized_ms": 0.0}],
+  "measurement_session_id": "verify-r3-d1-unique",
+  "paired_per_case": [{
+    "route": "...",
+    "candidate": {"session_id": "verify-r3-d1-unique",
+      "pair_ids": ["pair-00", "pair-01", "pair-02", "pair-03", "pair-04", "pair-05", "pair-06", "pair-07"],
+      "samples_ms": [0.97, 0.97, 0.97, 0.97, 0.97, 0.97, 0.97, 0.97]},
+    "control": {"session_id": "verify-r3-d1-unique",
+      "pair_ids": ["pair-00", "pair-01", "pair-02", "pair-03", "pair-04", "pair-05", "pair-06", "pair-07"],
+      "samples_ms": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]}
+  }],
+  "variance_note": "paired blocks, interleaving/order and observed spread",
+  "target_routes": ["predeclared route(s); never empty"],
   "graph_safe": "pass|fail|n/a (only when REQUIRE_GRAPH_CAPTURE was set; omit otherwise)",
   "notes": "anything suspicious (overfit special-casing, narrow correctness, graph-capture host-sync, etc.)"
 }

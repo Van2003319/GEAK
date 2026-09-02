@@ -124,3 +124,11 @@ def test_commit_and_integrated_candidates_have_durable_receipt_barriers() -> Non
     journal = (ROOT / "scripts" / "round_journal.py").read_text(encoding="utf-8")
     assert 'entry.get("status") != "verified"' in journal
     assert "integration_receipt_does_not_prove_head_moved" in journal
+
+
+def test_recovery_preserves_planner_targets_but_remeasures_raw_pairs() -> None:
+    assert 'target_routes: Array.isArray(entry.target_routes) ? entry.target_routes : []' in LANE
+    assert ".map(route => `--target-route ${JSON.stringify(String(route))} `).join('')" in LANE
+    assert 'TARGET_ROUTES: Array.isArray(d.target_routes) ? d.target_routes : []' in LANE
+    assert 'paired_per_case: Array.isArray(r.ver.paired_per_case) ? r.ver.paired_per_case : null' in LANE
+    assert 'JavaScript never substitutes bestPerCase from another session' in LANE

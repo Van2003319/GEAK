@@ -469,6 +469,11 @@ Rules:
 5. Each direction's `prompt` must be concrete: the exact technique, which files/region, why (cite a
    profile metric or per-case number), a quantitative target, and what NOT to touch (to stay
    orthogonal to the other directions this round).
+5b. **Every direction must freeze a non-empty `target_routes` list now, before measurement.** Use
+   exact route names from `BASELINE_PER_CASE`. Usually this is one route; multiple targets mean every
+   one must clear its practical MDE. For a genuinely suite-wide/host-side mechanism, explicitly list
+   every suite route rather than returning `[]`. The verifier receives this planner-owned list
+   directly, so neither engineer nor verifier may relabel an incidental win after seeing timings.
 6. Carry forward learning: fold the HISTORY insights into the prompts ("E0 last round showed K=10
    spills VGPRs — try LDS for the top-K merge").
 6b. **Check your directions against the mechanisms already measured shut.** A route being rich in
@@ -551,6 +556,7 @@ Return JSON:
       "focus_files": ["<rel paths this direction may edit>"],
       "mechanism": "stable mechanism id used for novelty/entropy",
       "config": {"only": "a precompiled config_search record, or empty"},
+      "target_routes": ["exact predeclared BASELINE_PER_CASE route; never empty"],
       "expected_speedup": 2.0,
       "prompt": "full, self-contained task description for the engineer",
       "kk_refs": ["<optional perf_knowledge card paths grounding THIS direction; omit/[] if none>"]

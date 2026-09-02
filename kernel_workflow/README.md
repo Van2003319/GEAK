@@ -51,9 +51,51 @@ pinned: [docs/compiler_grounded_evidence_ladder.md](docs/compiler_grounded_evide
 `LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → Re-profile → Update memory ] →`
 `Final Report → Director Validation`.
 
-Each round's winner is committed into the canonical workspace, so the next round builds on the
-cumulative best. Speedup is always measured in **absolute latency vs the true baseline**:
-`geomean( baseline_ms / optimized_ms )`.
+Each round's highest-ranked candidate that passes the commit gate is committed into the canonical
+workspace, so the next round builds on it. Ranking/reporting still carries absolute speedup vs the
+true baseline, but commitment is decided only by `scripts/route_gate.py` from complete same-session
+candidate/control raw pairs: one-sided 95% target MDE, non-target non-regression, suite
+non-inferiority, and the catastrophic fence. Missing raw pairs/session/control/targets refuses; there
+is no fallback to an earlier session's table or to the summary geomean.
+
+## Commit gate protocol
+
+The wire contracts are `geak.route-gate-input/v2` and `geak.route-gate-receipt/v2`. The benchmark's
+`num_test_cases` plus its exact unique `baseline_per_case` route names form the suite manifest. Every
+candidate must supply one non-empty planner-owned target set, one non-empty measurement session id,
+and the same set of at least eight explicit pair ids on every route. Each pair carries one finite,
+positive raw candidate observation and one raw control observation from that session. Summary
+medians, baseline repeats and old `route_bands` are never evidence.
+
+`scripts/route_gate.py` is the only decision implementation. For every route it estimates the
+20%-trimmed mean of `log(control_ms/candidate_ms)`. It uses 4,096 paired percentile-bootstrap
+resamples with fixed seed `20260902`, SplitMix64 streams derived from
+`SHA256("20260902:<route-or-suite-label>")`, and the linearly interpolated 5th percentile (R type 7)
+as the one-sided 95% lower bound. Suite resampling keeps whole pair blocks together; routes are equal
+weighted unless the workload-aligned baseline supplies positive route weights.
+
+Acceptance is an intersection: every target lower bound must be strictly greater than
+`-log(1-MDE)`; every non-target lower bound must be strictly greater than
+`-log(1+non_regression_margin)`; the suite lower bound must be strictly greater than
+`-log(1+suite_non_inferiority_margin)`; and no route's trimmed-mean point estimate may be more than
+10% slower. Defaults are 2% target MDE, 2% non-target slowdown margin, and 1% suite slowdown margin.
+A margin map may name exactly the currently applicable routes or the complete suite; the complete
+suite form is reusable when different planned candidates target different routes.
+
+The receipt records the schemas, decision/reason, session and manifest, targets and pair ids, a
+canonical input SHA-256, the complete algorithm/seed parameters, effective margins, normalized
+suite route weights, the suite endpoint, every route endpoint, failures and lossless per-stream seed
+hex strings. Workflow JS only relays the
+exact JSON through its supported command-agent bridge and validates that receipt; it contains no
+confidence-interval or catastrophic-rule twin. A missing bridge result, stale schema/session/targets,
+partial receipt, changed pair ids or malformed endpoint is an invocation error and refuses.
+
+Migration is intentionally fail-closed: old verifier artifacts without `measurement_session_id` and
+full `paired_per_case`, old plans with empty/missing targets, and warm-start records without preserved
+target provenance cannot bank. Existing `route_bands` launch arguments remain accepted but ignored.
+Because workflow JS cannot spawn processes, each gated candidate also incurs one low-effort command-agent
+relay and requires that agent's shell to have `python3` plus the configured `workflow_dir`; relay or
+schema failure is a refusal, not a legacy fallback.
 
 ## Budget
 `budget` = the **total number of optimization directions** the TechLead may dispatch to engineers
@@ -79,8 +121,14 @@ Workflow({
     workflow_dir: "<WF_DIR>",  // REQUIRED: same folder as scriptPath (holds roles/ knowledge/ scripts/);
                                //           a JS workflow can't read its own path, so the caller passes it
     budget: 6,                 // optional, default 6
-    min_improve: 0.02,         // optional, default 0.02 (2%): min verified geomean gain over the
-                               //           cumulative best for a round winner to be committed
+    min_improve: 0.02,         // optional legacy audit / default progress-delta knob; NOT commit
+    route_mde: 0.02,           // optional, default 2% target latency reduction; scalar, exact
+                               //           applicable-target map, or complete-suite map
+    route_non_regression_margin: 0.02, // optional, default 2% allowed non-target slowdown; scalar,
+                                       // exact applicable non-target map, or complete-suite map
+    suite_non_inferiority_margin: 0.01, // optional, default 1% allowed suite slowdown
+    // route_bands is accepted only for old launch-file compatibility and is ignored by the live gate:
+    // min-max/median spreads are descriptive calibration, not confidence intervals.
     deep_cost: 2,              // optional, default 2: budget cost of one deep_explore direction
                                //           (heavyweight; always runs in its own dedicated round)
     gpu_ids: "0",              // optional, comma-separated, default "0"

@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 // Regression guard for CANDIDATE_FLOOR (no GPU, no model needed).
 //
-// The round loop once hard-coded `1.0` in candidate admission. That made a transcription (plain Triton
-// -> Gluon/TileLang/HIP) inexpressible: it lands below the comparator by construction, so no verify ran
-// and the loop stalled on a run that was working as designed. The incumbent-relative floor is now a
-// caller knob, defaulting to 0.8. Artifact execution is separately journal-gated: there is deliberately
-// no filesystem-harvest shortcut left to tune. Under test: parsing/fallback, prompt, verified admission,
-// registered-only recovery, and the untouched COMMIT gate.
+// The round loop once hard-coded `1.0` in candidate admission, making a transcription (plain Triton
+// -> Gluon/TileLang/HIP) inexpressible: it lands below the comparator by construction, so no verify ran.
+// The incumbent-relative floor now defaults to 0.8. Artifact execution remains journal-gated, and the
+// authoritative paired Python receipt -- never this admission screen -- decides COMMIT. Under test:
+// parsing/rendering, prompt and verified admission, registered-only recovery, and gate isolation.
 //
 // Run:  node kernel_workflow/scripts/test_candidate_floor.js
 'use strict';
@@ -58,7 +57,7 @@ function txt(A) {
     'return CANDIDATE_FLOOR_TXT;')(A);
 }
 
-console.log('\n# the current default admits recovery measurements');
+console.log('\n# the current default is the 0.8 admission screen');
 const o = knobs({});
 ok(o.CANDIDATE_FLOOR === 0.8, 'CANDIDATE_FLOOR defaults to 0.8', o.CANDIDATE_FLOOR);
 ok(o.BUDGET === 6, 'BUDGET default 6 is untouched', o.BUDGET);
@@ -104,59 +103,36 @@ ok(/if \(!\(r\.ver && r\.ver\.policy_pass === true &&\n\s*says\(r\.ver\.status, 
    !/primSpeedup\(r\.ver\) > [0-9]/.test(src),
    'the verified filter admits against CANDIDATE_FLOOR, behind the correctness gate');
 
-// Integer overrides still retain one decimal place; the non-integer default renders faithfully.
+// Integer overrides retain one decimal place; the non-integer default renders faithfully.
 ok(txt({}) === '0.8', 'the default renders as "0.8" in the prompt', txt({}));
-ok(txt({ candidate_floor: 1 }) === '1.0', 'an integer override retains one decimal place', txt({ candidate_floor: 1 }));
 ok(txt({ candidate_floor: 0.5 }) === '0.5', 'and a lowered floor renders faithfully', txt({ candidate_floor: 0.5 }));
+ok(txt({ candidate_floor: 1 }) === '1.0', 'an integer override keeps its explicit decimal', txt({ candidate_floor: 1 }));
 ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({ candidate_floor: 0.55 }));
 
-console.log('\n# the commit gate is NOT loosened by any of this');
+console.log('\n# candidate admission cannot bypass the Python commit receipt');
 ok(/const legacyImproved = cand\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\);/.test(src),
-   'banking still requires beating cumulative by MIN_IMPROVE');
-// The suite threshold above is the FALLBACK and also one half of a union: a per-route band table
-// (derived from the baseline repeats by default) can accept a candidate the suite test refuses, and
-// the suite test can accept one no single band clears. Pinned here because this file's subject is
-// "the commit gate is not loosened", and the thing that would loosen it is the REGRESSION VETO going
-// missing -- not either test accepting.
-ok(/let improved = legacyImproved;/.test(src) && /if \(winner\) \{/.test(src),
-   'the suite threshold is the value the commit decision STARTS at, and the gate runs on every ' +
-   'round that produced a candidate -- no longer only on rounds that happened to carry a table');
-// The union is gone; the commit decision is now the gate's own conjunction (suite improved AND one
-// route past its bar), with a catastrophic-regression fence outside it. What this file is about --
-// "the candidate floor cannot loosen the commit gate" -- is unchanged and if anything easier to
-// state: CANDIDATE_FLOOR appears in neither condition.
-ok(/improved: rv\.accepted/.test(src) && !/rv\.accepted \|\| suiteSaysYes/.test(src),
-   'the commit decision is the gate verdict alone; there is no second arm to loosen');
-ok(/if \(catastrophic\.length\) \{/.test(src) && /CATASTROPHIC_REGRESSION = 0\.10;/.test(src),
-   'and the one refusal that survives a good average is the catastrophic fence, not the floor');
-// The veto now also decides SELECTION, not just acceptance of the top-ranked candidate: the
-// selector walks candidates in geomean order and takes the first this same predicate passes. That
-// direction can only bank a round that would otherwise have banked nothing, so it cannot loosen the
-// gate -- but it does mean the veto is applied to every candidate rather than to one, which is a
-// strictly wider application of the safety property this file is about.
+   'the old suite comparison remains only as a migration audit number');
+ok(/const routeReceipt = await routeGateFromPython\(gateSpec, null, \{/.test(src)
+   && /improved: !!\(routeReceipt && routeReceipt\.accepted === true\)/.test(src),
+   'the Python receipt alone decides commit acceptance');
+ok(!/improved:\s*legacyImproved/.test(src),
+   'missing raw evidence or a failed Python command bridge cannot fall back to a summary bank');
+ok(!/const routeGate =/.test(src) && !/CATASTROPHIC_REGRESSION/.test(src),
+   'route statistics and the catastrophic fence are not reimplemented in JavaScript');
 ok(/const passIdx = candidates\.findIndex\(c => judgeCandidate\(c\)\.improved\);/.test(src),
-   'selection uses the SAME predicate as acceptance, so a candidate cannot be selected by one rule ' +
-   'and judged by another');
+   'selection uses the SAME receipt predicate as acceptance');
 ok(/const suiteProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
-   'the suite progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
-// A route win is progress too, because the suite geomean divides a single-route win by the route
-// count and a round scored as a stall ends the WAVE at MAX_NO_IMPROVE. That is a STOPPING rule, so it
-// errs toward continuing: a false "advancing" costs one authorised round, a false "stalled" costs all
-// the remaining ones.
+   'the summary progress signal remains separate from commit acceptance');
 ok(/const madeProgress = suiteProgress \|\| routeProgress;/.test(src),
-   'progress is the union, so a verified single-route win is not counted toward stopping the search');
-// The other half of the stall counter, and the half that decides whether a lane can ever stop.
-// `improved` is settled BEFORE the commit is attempted, so resetting on it let a winner that
-// never LANDED clear the counter every round while `cumulative` stood still -- and the next
-// round's winner then cleared the same unchanged threshold, so MAX_NO_IMPROVE could not fire
-// and the whole budget went into re-deriving one unbankable patch.
+   'a target whose Python receipt proves movement can keep the search running');
 ok(/if \(madeProgress \|\| committedThisRound\) \{ phaseStall = 0; \} else \{ phaseStall\+\+; \}/.test(src),
-   'the stall counter resets on a COMMIT, not on an `improved` that may never have landed');
-ok(!/cumulative \* \(1 \+ CANDIDATE_FLOOR\)|CANDIDATE_FLOOR\)\s*;?\s*\/\/ commit/.test(src),
-   'and the floor is nowhere near the commit decision');
+   'the stall counter resets on measured progress or a landed commit');
+const gateTransport = (src.match(/const routeGateFromPython = [\s\S]*?\n\};\n/) || [''])[0];
+ok(gateTransport && !/CANDIDATE_FLOOR/.test(gateTransport),
+   'the admission floor is not an input to the statistical commit gate');
 
 // --- behavioral replay -------------------------------------------------------
-// Mirrors the real round loop: candidate filter, commit gate, progress signal, DEEP_COST, stall counter.
+// Models only the admission/progress summaries around the gate. Python receipt behaviour is tested above.
 function replay({ budget, deepCost, maxNoImprove, floor, minImprove, progressDelta }, traj) {
   let dispatched = 0, round = 0, noImprove = 0, cumulative = 1.0, bestSeen = 0, commits = 0;
   const log = [];
@@ -166,9 +142,7 @@ function replay({ budget, deepCost, maxNoImprove, floor, minImprove, progressDel
     const winner = raw > floor ? raw : null;
     const improved = winner !== null && winner > cumulative * (1 + minImprove);
     const progress = winner !== null && bestSeen > 0 && winner > bestSeen * (1 + progressDelta);
-    // This model's commit never fails, so `committed` tracks `improved` here. Named anyway,
-    // because the lane resets the stall counter on the COMMIT and a model that reads `improved`
-    // instead is one edit away from re-authorising the bug that change removed.
+    // A stand-in used only to compare old/new admission trajectories; not the live commit rule.
     const committed = improved;
     if (committed) { cumulative = winner; commits++; }
     if (winner !== null && winner > bestSeen) bestSeen = winner;
@@ -193,10 +167,9 @@ function legacy({ budget, deepCost, maxNoImprove }, traj) {
 
 console.log('\n# an explicit historical floor remains equivalent to the pre-knob loop');
 // The `bestSeen > 0` guard is what makes this hold: without it a first-round winner in (1.0, 1.02]
-// makes `suiteProgress` trivially true (bestSeen is 0), resetting a stall counter main would advance.
-// This replay models the SUITE arm only; `routeProgress` needs a band table, and the equivalence
-// being pinned here is with the pre-knob loop, which had none.
-// Values below straddle 1.0 and the 1.02 commit margin, and include no-candidate rounds.
+// would reset a stall counter the historical loop advanced. This replay models summary admission and
+// progress only; paired Python receipt decisions are deliberately outside this fixture.
+// Values below straddle 1.0 and the 1.02 audit margin, and include no-candidate rounds.
 {
   const VALS = [0.0, 0.5, 0.99, 1.0, 1.005, 1.01, 1.02, 1.021, 1.05, 1.1, 1.3];
   const cfg = { budget: o.BUDGET, deepCost: 1, maxNoImprove: o.MAX_NO_IMPROVE,
@@ -248,8 +221,8 @@ ok(replay(FLOOR_ONLY, TRAJ['pa_decode']).rounds < TRAJ['pa_decode'].length,
      `mni=6 -> ${noBestSeen(6).rounds} rounds, mni=8 -> ${noBestSeen(8).rounds} rounds`);
 }
 
-console.log('\n# a sub-baseline candidate is TRACKED but never BANKED');
-// The whole trajectory stays under the comparator: the floor admits every round, the gate refuses all.
+console.log('\n# lowering admission alone does not change this summary-only replay');
+// This legacy summary replay deliberately has no Python receipt; it tests the floor in isolation.
 const doomed = replay(PORT, [0.60, 0.72, 0.81, 0.88, 0.95, 0.99]);
 ok(doomed.commits === 0, 'nothing sub-baseline is ever committed', doomed.commits);
 ok(doomed.final === 1.0, 'and the cumulative best stays at the baseline', doomed.final);
@@ -270,5 +243,5 @@ console.log('\n# the Optimize prompt is built inline, so it must append the expe
 
 console.log(failures
   ? `\nFAIL: ${failures} check(s) failed.`
-  : '\nPASS: CANDIDATE_FLOOR defaults to 0.8; recovery tracks but never banks sub-baseline work.');
+  : '\nPASS: CANDIDATE_FLOOR defaults to 0.8; recovery tracks sub-baseline work and Python receipts alone decide banking.');
 process.exit(failures ? 1 : 0);

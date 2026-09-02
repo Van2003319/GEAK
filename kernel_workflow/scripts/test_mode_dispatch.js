@@ -319,7 +319,8 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     // the dispatcher was called. Pinned by name because the failure was one of OMISSION, and the
     // only thing that catches an omission is naming what has to be present.
     for (const k of ['min_improve', 'candidate_floor', 'progress_delta', 'max_no_improve',
-                     'route_bands', 'deep_cost', 'isa_evidence', 'gpu_lock_env',
+                     'route_bands', 'route_mde', 'route_non_regression_margin',
+                     'suite_non_inferiority_margin', 'deep_cost', 'isa_evidence', 'gpu_lock_env',
                      'harness_addendum', 'agent_timeout_ms', 'agent_retries',
                      'dra_enabled', 'dra_max_questions', 'dra_blindspot', 'dra_max_blindspots',
                      'compiler_source_dir']) {

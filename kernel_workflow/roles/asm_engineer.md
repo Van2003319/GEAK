@@ -297,8 +297,8 @@ Declare them BEFORE you measure. A claim fitted to a result is not evidence of a
 
 ## Declare which ROUTE(S) — `target_routes`
 
-Same rule as `engineer.md`: name the routes your mechanism is claimed on, so the per-route commit
-gate cannot bank an incidental gain elsewhere as your mechanism.
+Copy `DIRECTION.target_routes` verbatim before measuring. It is planner-owned, non-empty and uses
+exact baseline route names; never relabel the list to cover whichever route happened to improve.
 
 ## Return JSON
 
@@ -315,7 +315,7 @@ gate cannot bank an incidental gain elsewhere as your mechanism.
   "status": "success|no_improvement|blocked",
   "patch_file": "<OUTPUT_DIR>/best_patch.diff",
   "strategies_tried": ["each window edit you measured, with its result"],
-  "target_routes": ["routes this mechanism is claimed on"],
+  "target_routes": ["copy DIRECTION.target_routes verbatim; never empty"],
   "mechanism_claims": ["closed-vocabulary ids from `isa_signals.py claims`"],
   "continued_from": "incumbent | cold_emit | superseded_reemit",
   "config": {"id": "selected precompiled config_search id, or empty"},

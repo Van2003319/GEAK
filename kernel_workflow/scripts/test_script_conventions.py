@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -44,6 +45,9 @@ EXEMPT = {
     "json.dumps(str(dirname or SCRIPTS_DIR))":
         "same JS-literal escaping -- a single path string, where key order does "
         "not exist",
+    "json.dumps(meta)":
+        "experience_store JSON fallback mirrors its human-readable YAML metadata layout; "
+        "it is a document body rather than a CLI receipt, and preserving field order is intentional",
 }
 
 
@@ -87,6 +91,21 @@ COVERED_ELSEWHERE = {
         "of 'did the suite pass' is one more than can be trusted) and carries the "
         "disk-vs-registry inventory equality test",
     ),
+    "experience_store.py": (
+        "tests/test_experience_store.py",
+        "the measurement integration keeps its extensive store tests in the scripts/tests package; "
+        "that suite invokes the real CLI and persistence implementation",
+    ),
+    "fp8_two_day_run.sh": (
+        "test_script_conventions.py",
+        "this legacy operator launcher is covered here by root classification, existence, and bash "
+        "syntax checks without attempting to start a multi-day external agent run",
+    ),
+    "lane_two_day_run.sh": (
+        "test_script_conventions.py",
+        "this generic operator launcher is covered here by root classification, existence, and bash "
+        "syntax checks without attempting to start a multi-day external agent run",
+    ),
 }
 
 
@@ -107,12 +126,10 @@ OPERATOR_TOOLS = {
         "The LAUNCHER, so it is a root of this search and never a target of it. It runs the lane "
         "for a fixed wall-clock budget in waves, which is where 'two days' lives now that the lane "
         "has no clock of its own -- its only stop conditions are budget and deep_explore_exhausted.",
-    "route_gate.py":
-        "The Python twin of `routeGate` in kernel_lane.js, which is the LIVE gate. Nothing runs "
-        "this at runtime; test_route_gate_parity.py executes both on the same inputs and requires "
-        "the same verdict, after they were found disagreeing on four separate rules at once. Kept "
-        "because the parity test needs two implementations to compare -- deleting it would delete "
-        "the comparison, not the risk.",
+    "lane_two_day_run.sh":
+        "The generic operator LAUNCHER and therefore another root, not a pipeline target. It lifts "
+        "task-specific rules into lane JSON while supervising the same fixed wall-clock wave loop; "
+        "the lane itself still stops only on budget or deep_explore_exhausted.",
     "lockable_lanes.py":
         "Operator diagnostic for the GPU lock pool. Records why lanes 0 and 1 are unusable here: "
         "gpu_lock.sh opens the lock file for WRITE and /tmp/team_gpu_locks/gpu_{0,1}.lock are "
@@ -166,9 +183,8 @@ class ReachabilityIsDeclaredTest(unittest.TestCase):
 
     ROOTS = ("kernel_lane.js", "kernel_workflow.js")
 
-    # A mention is not a call, and the distinction is the whole check. `route_gate.py` is discussed
-    # at length in a comment explaining why the LIVE gate is the JS twin beside it, and
-    # `lockable_lanes.py` is named in a lane file's `_note_gpu_ids` prose. A first version of this
+    # A mention is not a call, and the distinction is the whole check. `lockable_lanes.py` is named
+    # in a lane file's `_note_gpu_ids` prose. A first version of this
     # matched a bare `scripts/x.py` anywhere and credited both -- passing for exactly the reason it
     # exists to catch. So comment lines are dropped before scanning, JSON `_`-prefixed keys (the
     # convention here for commentary) are dropped with them, and what is left must look like an
@@ -221,6 +237,12 @@ class ReachabilityIsDeclaredTest(unittest.TestCase):
                     f"kept -- a script that is none of the three is one the next reader will assume "
                     f"runs.")
 
+    def test_route_gate_is_live_and_not_classified_as_an_operator_tool(self):
+        """The Python gate is invoked by the lane's command bridge, not an offline twin."""
+        reachable = self._pipeline_reachable()
+        self.assertIn("route_gate.py", reachable)
+        self.assertNotIn("route_gate.py", OPERATOR_TOOLS)
+
     def test_no_declared_operator_tool_has_quietly_become_reachable(self):
         """The other direction, and the one that rots silently.
 
@@ -242,6 +264,12 @@ class ReachabilityIsDeclaredTest(unittest.TestCase):
                 self.assertTrue((HERE / name).exists(),
                                 f"{name} was deleted but is still declared; a list describing files "
                                 f"that are gone stops being read as a description of the directory")
+
+    def test_declared_shell_launchers_parse(self):
+        for name in sorted(n for n in OPERATOR_TOOLS if n.endswith(".sh")):
+            with self.subTest(script=name):
+                proc = subprocess.run(["bash", "-n", str(HERE / name)], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 class EveryScriptIsCoveredTest(unittest.TestCase):

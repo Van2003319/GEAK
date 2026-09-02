@@ -46,7 +46,8 @@ const KNOWN_ARGS = new Set([
   // Worker arguments, forwarded.
   'kernel_path', 'workflow_dir', 'exp_root', 'eval_dir', 'task', 'mode', 'target_language',
   'op_spec', 'budget', 'deep_cost', 'min_improve', 'candidate_floor', 'progress_delta',
-  'max_no_improve', 'route_bands', 'gpu_ids', 'gpu_mode', 'gpu_lock_env', 'apply_to_original',
+  'max_no_improve', 'route_bands', 'route_mde', 'route_non_regression_margin',
+  'suite_non_inferiority_margin', 'gpu_ids', 'gpu_mode', 'gpu_lock_env', 'apply_to_original',
   'state_dir', 'incremental_analyze', 'isa_evidence', 'ir_diagnostics', 'compiler_source_dir',
   'workload_spec_path', 'workload', 'perf_knowledge_dir', 'use_expert_skills', 'expert_skills_dir',
   'shared_kb', 'global_kb', 'e2e_feedback', 'harness_addendum',
@@ -443,6 +444,9 @@ const LANE_INHERITED = {
   ...(A.progress_delta != null ? { progress_delta: A.progress_delta } : {}),
   ...(A.max_no_improve != null ? { max_no_improve: A.max_no_improve } : {}),
   ...(A.route_bands != null ? { route_bands: A.route_bands } : {}),
+  ...(A.route_mde != null ? { route_mde: A.route_mde } : {}),
+  ...(A.route_non_regression_margin != null ? { route_non_regression_margin: A.route_non_regression_margin } : {}),
+  ...(A.suite_non_inferiority_margin != null ? { suite_non_inferiority_margin: A.suite_non_inferiority_margin } : {}),
   ...(A.deep_cost != null ? { deep_cost: A.deep_cost } : {}),
   ...(A.isa_evidence != null ? { isa_evidence: A.isa_evidence } : {}),
   // Separate from `isa_evidence` because the two layers cost different things: the

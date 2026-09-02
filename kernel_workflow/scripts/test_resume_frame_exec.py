@@ -33,6 +33,7 @@ WORKFLOW = Path(__file__).resolve().parents[1]
 LANE = WORKFLOW / "kernel_lane.js"
 STATE = WORKFLOW.parent / "exp" / "state_greedy_coldstart_20260817" / "STATE.json"
 SOURCE = LANE.read_text(encoding="utf-8")
+GATE_SOURCE = (WORKFLOW / "scripts" / "route_gate.py").read_text(encoding="utf-8")
 
 
 def _v8():
@@ -65,13 +66,10 @@ def improved_expr() -> str:
     """The suite-geomean rule that decides whether a round counts. Extracted, not retyped --
     retyping it would test my transcription of the rule instead of the rule.
 
-    This used to read `const improved = ...`. The lane now computes it in two stages: a
-    `legacyImproved` suite-geomean test, which is what these tests are about, and an optional
-    per-route band gate that can OVERTURN it when a measured band table is supplied. The tests
-    below exercise the resume frame -- how a carried `cumulative` enters the comparison -- and that
-    is entirely a property of the legacy expression, so extracting it is still the right anchor.
-    What the rename must not do is silently drop coverage of the newer, authoritative gate, so
-    `RouteGateStillOverridesTheSuiteGate` below pins that it exists and can disagree.
+    This used to read `const improved = ...`. It is now `legacyImproved`: an audit-only
+    cross-session summary retained so resume-frame arithmetic remains visible during migration.
+    The commit decision itself is the versioned receipt from route_gate.py, pinned separately below;
+    missing evidence or Python failure never falls back to this expression.
 
     The rule has since moved again, into `judgeCandidate(cand)`, so that SELECTING a winner and
     ACCEPTING one are decided by one implementation rather than two. It is therefore written in
@@ -214,74 +212,33 @@ class DegenerateStatesDoNotCorruptTheFrame(unittest.TestCase):
                                  f"{bad!r} must not become the lane total")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class PythonReceiptOverridesLegacySummary(unittest.TestCase):
+    """Resume arithmetic is diagnostic; the paired Python receipt owns commitment."""
 
+    def test_python_receipt_is_the_commit_decision(self):
+        self.assertIn("const routeReceipt = await routeGateFromPython(gateSpec, null, {", SOURCE)
+        self.assertIn("improved: !!(routeReceipt && routeReceipt.accepted === true)", SOURCE)
+        self.assertNotIn("improved: legacyImproved", SOURCE)
 
-class RouteGateStillOverridesTheSuiteGate(unittest.TestCase):
-    """The suite-geomean expression this file extracts is no longer the last word.
+    def test_missing_evidence_or_bridge_failure_has_no_summary_fallback(self):
+        self.assertIn("legacy suite geomean are diagnostics only and cannot bank this candidate",
+                      SOURCE)
+        self.assertIn("Python route gate failed closed", SOURCE)
 
-    Written when `const improved` became `legacyImproved` plus a per-route gate. Retargeting the
-    extractor at `legacyImproved` keeps every resume-frame test meaningful, but on its own it would
-    leave the suite asserting hard about a rule the lane can overrule and nothing at all about the
-    rule that overrules it. These lines are the minimum that notices if the override is deleted,
-    stops being authoritative, or stops being logged.
-
-    The relationship was a UNION for one lane's worth of rounds and is now a CONJUNCTION: the gate
-    banks when the suite geomean improves at all AND some route clears max(2%, its measured floor),
-    with a catastrophic-regression fence outside both. The union's regression veto was removed
-    because it refused two verified candidates that improved the objective this lane is scored on --
-    it optimised Pareto-improvement across routes, which nobody measures here.
-
-    So the extracted suite expression is no longer any part of the live decision. It survives for a
-    degraded path and for an audit line, and these tests pin exactly that much and no more: asserting
-    hard about a rule the lane does not use any more is how a suite comes to describe a design that
-    is gone.
-    """
-
-    def test_the_gate_verdict_is_the_commit_decision(self):
-        self.assertIn("improved: rv.accepted", SOURCE,
-                      "the gate's own verdict is no longer what decides the commit")
-        self.assertNotIn("rv.accepted || suiteSaysYes", SOURCE,
-                         "the union is gone; a second arm that can carry a candidate the gate "
-                         "refused would reinstate it")
-
-    def test_the_suite_threshold_survives_only_where_the_gate_cannot_run(self):
-        self.assertIn("if (!rv || !rv.applicable) {", SOURCE)
-        self.assertIn("suiteSaysYes: legacyImproved,", SOURCE,
-                      "with no paired per-case times there is nothing to compare route by route, "
-                      "and the legacy threshold is all that is left")
-
-    def test_the_catastrophic_fence_is_the_only_refusal_a_good_average_cannot_buy(self):
-        """What replaced the veto. Not a noise judgement -- an order of magnitude outside the widest
-        floor ever measured here (7.64%) -- so it cannot refuse real work; it exists so that "the
-        average improved" cannot ship one shape a third slower."""
-        self.assertIn("const CATASTROPHIC_REGRESSION = 0.10;", SOURCE)
-        self.assertIn("if (catastrophic.length) {", SOURCE)
+    def test_catastrophic_fence_lives_only_in_python(self):
+        self.assertIn("CATASTROPHIC_REGRESSION = 0.10", GATE_SOURCE)
+        self.assertIn("estimate_log < -math.log1p(CATASTROPHIC_REGRESSION)", GATE_SOURCE)
+        self.assertNotIn("const CATASTROPHIC_REGRESSION", SOURCE)
 
     def test_the_decision_that_selects_is_the_decision_that_judges(self):
-        """The two halves used to be able to disagree, and did. Ranking is by suite geomean while
-        acceptance is per-route, and only the top-ranked candidate was ever offered to the gate --
-        so a round could hold a candidate the gate would accept and bank nothing. The selector now
-        calls the same predicate, which is the only form of the fix that cannot drift apart again.
-        """
         self.assertIn("const passIdx = candidates.findIndex(c => judgeCandidate(c).improved);",
-                      SOURCE, "selection no longer uses the acceptance predicate")
-        self.assertIn("const verdict = winner ? judgeCandidate(winner) : null;", SOURCE,
-                      "the logged verdict is no longer the one selection was decided on")
+                      SOURCE)
+        self.assertIn("const verdict = winner ? judgeCandidate(winner) : null;", SOURCE)
 
-    def test_the_suite_gate_is_still_computed_so_disagreements_are_auditable(self):
-        # The override is only auditable if the number every prior round was judged on is still
-        # computed alongside it. If legacyImproved stops existing, this file's extractor is not the
-        # only thing that breaks -- the audit log below loses its comparison. The comparison is made
-        # against the FINAL decision (`improved`), not against one arm of it, or a round the suite
-        # test carried would be reported as an overturn of itself.
+    def test_legacy_summary_is_still_computed_for_auditable_disagreement(self):
         self.assertIn("const legacyImproved =", SOURCE)
         self.assertIn("improved !== legacyImproved", SOURCE)
-
-    def test_the_override_is_logged_in_both_directions(self):
-        self.assertIn("OVERTURNS the legacy suite-geomean gate", SOURCE)
-
+        self.assertIn("statistical receipt OVERTURNS the isolated legacy suite comparison", SOURCE)
 
 class ForcedPhaseResumeKeepsHistoryButNotTheOldStall(unittest.TestCase):
     def test_forced_phase_appends_an_auditable_override_and_resets_stall(self):
@@ -317,3 +274,7 @@ class ForcedPhaseResumeKeepsHistoryButNotTheOldStall(unittest.TestCase):
         self.assertIn("operator forced start_phase=phase2_asm", out["phase_log"][-1]["reason"])
         self.assertEqual(out["process_log"][-2]["event"], "resume_phase_override")
         self.assertEqual(out["process_log"][-1]["event"], "state_resumed")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

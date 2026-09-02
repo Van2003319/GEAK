@@ -829,7 +829,7 @@ def test_both_planes_offer_the_same_candidates(tmp_path):
     assert [{k: c.get(k) for k in keys} for c in remote["candidates"]] == \
            [{k: c.get(k) for k in keys} for c in local["candidates"]]
     assert remote["filtered"]["below_min_speedup"] == local["filtered"]["below_min_speedup"] == 1
-    assert remote["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm"
+    assert remote["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
 
 
 def test_the_store_plane_curates_what_the_store_itself_cannot(tmp_path):

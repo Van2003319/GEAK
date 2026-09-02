@@ -51,6 +51,7 @@ def register(tmp_path: Path, *, artifact: bool = True):
         worker_receipt=receipt,
         canonical=canonical,
         deadline_epoch=123,
+        target_routes=["route-a", "route-b"],
     )
     assert result["registered"] is True
     return journal, canonical, old_eval, patch, receipt, result
@@ -62,6 +63,7 @@ def test_engineer_completion_is_atomically_registered_with_all_receipts(tmp_path
     assert entry["schema"] == "geak.round-journal/v1"
     assert len(entry["artifact"]["sha256"]) == 64
     assert len(entry["worker_receipt"]["sha256"]) == 64
+    assert entry["target_routes"] == ["route-a", "route-b"]
     assert entry["integration"] == {"status": "pending", "receipt": None}
     assert set(entry["parent_canonical_hashes"]) == {"source", "asm", "binary"}
     assert not list((journal / "entries").glob(".*.tmp.*"))
@@ -77,6 +79,7 @@ def test_next_wave_discovers_only_registered_interrupted_artifacts(tmp_path: Pat
     assert found["policy"].startswith("registered-only")
     assert [entry["candidate_id"] for entry in found["recoverable"]] == ["r4:r4_d0"]
     assert found["recoverable"][0]["worker_result"]["structure_fingerprint"] == "persistent-grid-v2"
+    assert found["recoverable"][0]["target_routes"] == ["route-a", "route-b"]
     assert str(rogue) not in json.dumps(found)
 
 

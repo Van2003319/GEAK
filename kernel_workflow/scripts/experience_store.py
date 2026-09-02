@@ -1059,13 +1059,13 @@ def cmd_backfill_content(a) -> dict:
         if not changes:
             continue
         changed += 1
-        print(json.dumps({"dir": dirpath, **changes}, ensure_ascii=False))
+        print(json.dumps({"dir": dirpath, **changes}, ensure_ascii=False, sort_keys=True))
         if a.apply:
             try:
                 _atomic_write(meta_path, _dump_meta(new_meta))
             except OSError as e:
                 failed += 1
-                print(json.dumps({"dir": dirpath, "error": str(e)[:120]}))
+                print(json.dumps({"dir": dirpath, "error": str(e)[:120]}, sort_keys=True))
     return {"ok": True, "applied": bool(a.apply), "scanned": scanned,
             "changed": changed, "failed": failed}
 
@@ -1397,7 +1397,7 @@ def cmd_export_remote(a) -> dict:
         for rec in records:
             if by_id.get((rec["canonical_id"], rec["session_id"])) is not rec:
                 continue
-            line = json.dumps(rec, ensure_ascii=False)
+            line = json.dumps(rec, ensure_ascii=False, sort_keys=True)
             (out.write(line + "\n") if out else print(line))
             emitted += 1
     finally:
@@ -1954,7 +1954,7 @@ def main(argv=None):
                else {"attested": False, "reason": err} if a.cmd in ("attest", "attest-remote")
                else {"remapped": False, "reason": err} if a.cmd == "remap"
                else {"read_reason": err, "candidates": []})
-    print(json.dumps(out, ensure_ascii=False))
+    print(json.dumps(out, ensure_ascii=False, sort_keys=True))
     return 0
 
 

@@ -207,20 +207,15 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "notes": "anything downstream agents must know (incl. any naive-baseline / regime_prior caveats)"
 }
 ```
-`samples_ms` is the **raw per-repeat latency** for that case — at least three complete primed
-repeats, in the order measured, not a summary. `latency_ms` stays what it always was (the
-representative number the suite reports); `samples_ms` is what it was computed from.
+`num_test_cases` is required and must equal the number of unique rows in `baseline_per_case`. Together
+those exact route names are the commit gate's suite manifest: a verifier returning one measured route
+from an eleven-route suite must not turn that fragment into a complete non-regression claim.
 
-Send it whenever you have it. It is what gives the baseline a real measurement interval instead of
-a definitional one (95). The baseline's speedup against itself is 1 by construction, so without
-repeats there is nothing to say about how much a *null* comparison on that route wanders — and the
-lane has to fall back on a floor table measured on other hardware. Three repeats replace the guess
-with this machine's own answer. Omitting the field is not an error and the run proceeds, but every
-later comparison against this baseline inherits the floored interval.
-
-Do not synthesize the repeats from one measurement, and do not report a spread you did not
-observe. A fabricated `samples_ms` is worse than an absent one: absent is handled, fabricated
-silently narrows the bar every future candidate has to clear.
+Baseline `samples_ms` remains useful descriptive calibration and provenance, but it is **not** gate
+evidence and is never converted into a confidence interval. In particular, `(max-min)/median` from
+three or five baseline repeats is a legacy spread summary, not a hypothesis test. The live gate uses
+at least eight explicitly paired candidate/control raw blocks collected later by the verifier in one
+session. Do not synthesize baseline repeats; omit them when they were not observed.
 
 When `workload_aligned` is true, `baseline_per_case[].count` is the coefficient the time-weighted
 metric uses, and `weight = count·latency_ms` is the case's time share. On an unweighted run omit the

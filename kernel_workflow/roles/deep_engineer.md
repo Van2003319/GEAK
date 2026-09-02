@@ -149,6 +149,8 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    exhaustion evidence.
 6. If your best correct version regresses vs baseline (it shouldn't), submit `status:"failed"` with no
    patch and explain — that is signal for the ledger.
+7. Copy `DIRECTION.target_routes` verbatim before measuring. A deep/suite-wide rewrite still has
+   explicit targets (normally the full suite); never return an empty list or fit it to observed wins.
 
 ## Outputs
 **Return channel:** return the same object you atomically wrote to `worker_result.json`.
@@ -171,6 +173,7 @@ receipt; unregistered files are intentionally ignored. `report.md` remains the h
   "strategies_tried": ["the full exploration trace — what worked AND what didn't"],
   "config": {"id": "precompiled config_search id(s), or empty"},
   "structure_fingerprint": "result-independent identity of the algorithm/layout/schedule structure",
+  "target_routes": ["copy DIRECTION.target_routes verbatim; never empty"],
   "notes": "roofline % achieved per representative case, where the remaining wall-clock sits (kernel vs floor), and what a follow-up could still attack — written for the TechLead's insight log"
 }
 ```

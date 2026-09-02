@@ -144,6 +144,7 @@ def register(
     worker_receipt: os.PathLike[str] | str,
     canonical: os.PathLike[str] | str,
     deadline_epoch: int = 0,
+    target_routes: Sequence[str] = (),
 ) -> dict[str, Any]:
     root = Path(journal_dir)
     if round_number < 1:
@@ -152,6 +153,13 @@ def register(
         raise JournalError("direction must be non-empty")
     if phase not in workflow_state.SEARCH_PHASES:
         raise JournalError(f"unsupported search phase: {phase}")
+    frozen_targets: list[str] = []
+    for route in target_routes:
+        if not isinstance(route, str) or not route or route != route.strip():
+            raise JournalError("target routes must be non-empty exact strings")
+        if route in frozen_targets:
+            raise JournalError(f"duplicate target route: {route}")
+        frozen_targets.append(route)
     artifact_info = _artifact_record(Path(artifact))
     try:
         receipt_info, receipt_payload = _receipt_record(Path(worker_receipt))
@@ -165,6 +173,9 @@ def register(
         "entry_id": _entry_key(eval_dir, candidate_id),
         "candidate_id": candidate_id,
         "direction": direction,
+        # Frozen by the orchestrator from the planner-owned direction. Recovery must not rebuild
+        # this list from a verifier's post-measurement report.
+        "target_routes": frozen_targets,
         "round": round_number,
         "phase": phase,
         "eval_dir": os.path.abspath(eval_dir),
@@ -187,7 +198,8 @@ def register(
             old = _read_json(path)
             same_artifact = (old.get("artifact") or {}).get("sha256") == artifact_info.get("sha256")
             same_receipt = (old.get("worker_receipt") or {}).get("sha256") == receipt_info["sha256"]
-            if same_artifact and same_receipt:
+            same_targets = list(old.get("target_routes") or []) == frozen_targets
+            if same_artifact and same_receipt and same_targets:
                 return {"registered": True, "idempotent": True, "schema": SCHEMA,
                         "entry": old, "entry_file": str(path)}
             return {"registered": False, "schema": SCHEMA, "candidate_id": candidate_id,
@@ -441,6 +453,7 @@ def _parser() -> argparse.ArgumentParser:
     reg.add_argument("--worker-receipt", required=True)
     reg.add_argument("--canonical", required=True)
     reg.add_argument("--deadline-epoch", type=int, default=0)
+    reg.add_argument("--target-route", action="append", default=[])
 
     trans = sub.add_parser("transition")
     trans.add_argument("--journal-dir", required=True)
@@ -475,7 +488,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                               candidate_id=args.candidate_id, round_number=args.round,
                               direction=args.direction, phase=args.phase, artifact=args.artifact,
                               worker_receipt=args.worker_receipt, canonical=args.canonical,
-                              deadline_epoch=args.deadline_epoch)
+                              deadline_epoch=args.deadline_epoch, target_routes=args.target_route)
         elif args.command == "transition":
             result = transition(args.journal_dir, eval_dir=args.eval_dir,
                                 candidate_id=args.candidate_id, status=args.status,
