@@ -366,14 +366,16 @@ class OracleAdapterContractTest(unittest.TestCase):
             self.assertIn('if trusted:', runner)
             self.assertNotIn("oracle routes unavailable for absolute report", runner)
 
-    def test_checked_in_manifests_fail_closed_for_v2_until_rebaked(self):
-        protocol = hl.measurement_protocol(
-            "semantic_weight_rotating", seed=73, latency_cycles=3,
-            throughput_cycles=3, throughput_inner=4, warmup_cycles=0,
-            output_ring_size=2, rotation_target_mb=2, assumed_cache_mb=1,
-            max_slots=4)
+    def test_checked_in_manifests_are_current_and_drift_fails_closed(self):
         for task in ("dense_bf16_gemm_fused", "dense_fp8_gemm_rowwise"):
             root = REPO / "examples/tasks" / task
+            contract = json.loads(
+                (REPO / "asm_tuner/manifests/tasks" / f"{task}.json").read_text())
+            protocol_spec = contract["protocol"]
+            protocol = hl.measurement_protocol(
+                protocol_spec["name"], **protocol_spec["arguments"])
+            score_metric = hl.validate_score_metric(
+                dict(contract["score_metric"]), protocol)
             frozen = route_mod.FrozenRouteManifest(root / "oracle_routes.v2.json", task)
             payload = frozen.snapshot()
             tree = ast.parse((root / "scripts/task_runner.py").read_text())
@@ -384,12 +386,42 @@ class OracleAdapterContractTest(unittest.TestCase):
                 and any(isinstance(target, ast.Name) and target.id == "CASES"
                         for target in node.targets)
             )
+
+            self.assertIs(payload["frozen"], True)
+            self.assertEqual(len(payload["routes"]), 11)
             self.assertEqual(set(payload["routes"]), {case["id"] for case in cases})
-            score_metric = hl.score_metric_config(
-                "sustained_throughput", protocol=protocol)
-            ok, errors = frozen.validate_for(protocol["hash"], score_metric, cases)
-            self.assertFalse(ok)
-            self.assertTrue(any("selection metric differs" in error for error in errors))
+            self.assertEqual(payload["protocol_hash"], protocol["hash"])
+            self.assertEqual(payload["score_metric"], score_metric)
+            self.assertEqual(payload["selection_metric"], score_metric["id"])
+            self.assertEqual(
+                frozen.validate_for(protocol["hash"], score_metric, cases),
+                (True, []),
+            )
+
+            with tempfile.TemporaryDirectory() as tmp:
+                metric_drift = json.loads(json.dumps(payload))
+                metric_drift["score_metric"]["inner"] += 1
+                metric_drift["score_metric"]["hash"] = hl.score_metric_hash(
+                    metric_drift["score_metric"])
+
+                protocol_drift = json.loads(json.dumps(payload))
+                protocol_drift["protocol_hash"] = "0" * 64
+                protocol_drift["score_metric"]["protocol_hash"] = "0" * 64
+                protocol_drift["score_metric"]["hash"] = hl.score_metric_hash(
+                    protocol_drift["score_metric"])
+
+                for name, drifted, expected_error in (
+                    ("metric", metric_drift, "score_metric object differs"),
+                    ("protocol", protocol_drift, "protocol hash differs"),
+                ):
+                    with self.subTest(task=task, drift=name):
+                        drift_path = Path(tmp) / f"{name}.json"
+                        drift_path.write_text(json.dumps(drifted))
+                        drifted_manifest = route_mod.FrozenRouteManifest(drift_path, task)
+                        ok, errors = drifted_manifest.validate_for(
+                            protocol["hash"], score_metric, cases)
+                        self.assertFalse(ok)
+                        self.assertTrue(any(expected_error in error for error in errors))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -14,18 +15,46 @@ MANIFESTS = sorted(MANIFEST_DIR.glob("*.json"))
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS, ids=lambda p: p.stem)
-def test_contract_binds_cases_builders_correctness_protocol_and_oracle(manifest):
-    contract = TaskContract.load(manifest)
+def test_contract_binds_cases_builders_correctness_protocol_and_oracle(manifest, tmp_path):
+    contract = TaskContract.load(manifest, require_oracle_compatible=True)
     assert len(contract.routes) == 11
     assert [route.name for route in contract.routes] == [case["id"] for case in contract.cases]
     assert contract.protocol["schema"] == "geak.measurement-protocol/v2"
     assert contract.score_metric["schema"] == "geak.score-metric/v1"
     assert contract.score_metric_id == "sustained_throughput"
     assert contract.score_metric_inner > 1
-    # Checked-in latency bakeoff data is intentionally not relabelled. Integration must re-bake.
-    assert contract.oracle_compatible is False
-    with pytest.raises(Exception, match="re-run oracle-bakeoff"):
-        TaskContract.load(manifest, require_oracle_compatible=True)
+    assert contract.oracle_compatible is True
+    assert contract.oracle["frozen"] is True
+    assert len(contract.oracle["routes"]) == 11
+    assert set(contract.oracle["routes"]) == {case["id"] for case in contract.cases}
+    assert contract.oracle["protocol_hash"] == contract.protocol["hash"]
+    assert contract.oracle["score_metric"] == contract.score_metric
+    assert contract.oracle["selection_metric"] == contract.score_metric_id
+
+    for drift in ("metric", "protocol"):
+        copied = tmp_path / drift
+        shutil.copytree(
+            contract.task_root, copied,
+            ignore=shutil.ignore_patterns("build", ".torch_ext"),
+        )
+        oracle_path = copied / "oracle_routes.v2.json"
+        oracle = json.loads(oracle_path.read_text())
+        if drift == "metric":
+            oracle["score_metric"]["inner"] += 1
+        else:
+            oracle["protocol_hash"] = "0" * 64
+            oracle["score_metric"]["protocol_hash"] = "0" * 64
+        metric_body = dict(oracle["score_metric"])
+        metric_body.pop("hash")
+        oracle["score_metric"]["hash"] = hashlib.sha256(json.dumps(
+            metric_body, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        oracle_path.write_text(json.dumps(oracle))
+        with pytest.raises(Exception, match="re-run oracle-bakeoff"):
+            TaskContract.load(
+                manifest, task_root=copied, require_oracle_compatible=True)
+
     assert len(contract.task_digest) == 64
     assert set(contract.binding_hashes) == {"cases", "input_builder", "correctness"}
     assert "scripts/task_runner.py" in contract.semantic_hashes
