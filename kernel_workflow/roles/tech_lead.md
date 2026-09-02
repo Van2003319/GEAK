@@ -469,6 +469,17 @@ Rules:
    `reopens_when` conditions now holds. A direction that survives with a justification is fine; a
    direction that trips the check and ships unchanged is a wasted slot.
 
+   Pass the current closure identity as a wrapper-level `scope` (or on each direction), with all eight
+   fields: `kernel`, `task`, `dtype`, `gfx`, `toolchain`, `body_hash`, `config`, and `protocol`. A
+   legacy closure whose scope mismatches, or a modern call with an incomplete scope, is returned as
+   advisory evidence under `advisory` and **must not be used as a strong anchor**. Hash the executed
+   body/config/protocol, not a nearby source file or a planned command.
+
+   Keep decomposition mechanisms separate in both the direction and its justification: uniform
+   split-K assigns the same K partitions to every output tile and reduces them; Stream-K parcels a
+   flattened tile×K iteration space and fixes boundary partials; static persistent grid-stride walks
+   complete output tiles with a bounded resident grid. Evidence against one is not closure of another.
+
    **"A quieter box" is no longer a justification you can give.** It used to be the standard one — a
    closure is only as tight as the noise floor that bounded it, so a narrower floor reopens it — and
    the tooling that measured and registered those floors has been deleted. Nothing can turn an entry's

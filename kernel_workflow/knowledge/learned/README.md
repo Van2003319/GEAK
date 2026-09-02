@@ -57,9 +57,17 @@ was measured on, and its keywords. So the read path is simply:
 lookup mechanism: it matches strings, and what you are looking for is a concept. Never conclude "there is
 no card for this" from a failed grep.
 
+`kb.py ... match` is an auditable shortlist helper, not a replacement for that semantic read. It filters
+on the card header's canonical `kernel_class`, `platforms`, `regime`, `language(s)` and `dtype(s)` fields;
+it never tries to parse the plain-English `key` back into a machine tuple. Its JSON includes a stable
+`query`/`filter`/`reason`/`digest` receipt, each returned card's content digest and match reasons, and
+explicitly labelled `adjacent_classes`. A neighboring-class card is transfer evidence, never an exact
+class match. Missing optional metadata stays visible as unknown and ranks below an exact header match;
+a known mismatch is filtered and counted in the receipt.
+
 Each card also opens with the same **discovery header** (`name`, `description`, `keywords`, `kernels`,
-`platforms`, `kernel_class`, `regime`, `confidence`), so it stays self-describing when opened directly or
-when the index is missing.
+`platforms`, `kernel_class`, `regime`, `confidence`, plus optional canonical `language(s)` and
+`dtype(s)`), so it stays self-describing when opened directly or when the index is missing.
 
 `INDEX.md` is **generated** from those headers by `kernel_workflow/scripts/kb.py ... index`
 (grouped by `kernel_class`, ordered by confidence, plus the keyword vocabulary appendix). The generator is
@@ -114,6 +122,10 @@ keywords: [<lowercase-hyphenated terms>]    # PICK FROM the "keyword vocabulary"
 kernels: [<kernel symbol / entry point measured>] # e.g. _gqa_sparse_fwd_kernel, fused_moe_kernel. The
                                             # concrete name matters: greps hit it long before a class does.
 platforms: [<gfx>]                          # e.g. [gfx942] — the arch the evidence was measured on
+language: <canonical language>              # optional during migration; e.g. hip | asm | triton | flydsl
+                                              # use `languages: [...]` only when evidence spans several
+dtype: <canonical dtype>                    # optional during migration; e.g. bf16 | fp8_e4m3_fnuz
+                                              # use `dtypes: [...]` only when evidence spans several
 kernel_class: <kernel_class>                # e.g. dense_gemm | moe_grouped_gemm | attention_decode | method
 regime: decode | prefill | both | n/a       # the shape regime the evidence covers
 # --- classification + evidence ---
@@ -261,8 +273,37 @@ does not have to: `kb.py drain` takes proposals from `_inbox/` (one JSON per run
 gate above, enforces the per-class budget, and regenerates the index — one operator, between
 campaigns, so that "merge if the key exists" is actually implementable.
 
+The apply path is transactional:
+1. An atomic single-writer lease excludes a second drain, then one filename-stable batch is claimed;
+   proposals arriving later remain pending for the next boundary.
+2. Every claimed event records an event hash and canonical JSON content hash. Content already named by
+   a committed receipt is archived as an idempotent duplicate, never applied again.
+3. Cards and citations are applied in a private staged tree. The complete staged card set must pass
+   `lint --cards`, and its generated index must byte-match `build_index`, before publication begins.
+4. Changed files are snapshotted and atomically replaced, with `INDEX.md` last as the documented read
+   fence. An interrupted publication rolls back to those bytes and replays the same stage.
+5. Only then are claimed inputs renamed `*.json.drained` and an immutable `_receipts/<tx>.json` written
+   with batch/event/content hashes, validation results and published-file hashes. Re-running the same
+   batch returns that receipt and changes no counters.
+
+The orchestrator-facing boundary is explicit:
+```
+python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned \
+  campaign-boundary --campaign-id <id> --boundary post-campaign \
+  --holdout-receipt <frozen-holdout-receipt> --validated-runs <N> --apply
+```
+Use it only after producers have stopped and the holdout assignment/result has been frozen. Direct
+`drain --apply` remains compatible for operators, but records `campaign_id=manual` and
+`boundary=manual`, which makes the weaker provenance visible in its transaction receipt.
+
 That is how this tree was seeded: 20 kernels' worth of finished 16h campaigns distilled in one pass
 instead of 20 runs. Anything the gates refuse is reported with its reason rather than dropped.
+
+### Pending-inbox migration rule
+Do **not** drain the inherited pending handoff set on a feature branch. Land the transaction code first;
+after integration, freeze the holdout and its receipt, stop proposal producers, take a read-only
+inventory/content-hash snapshot, and invoke the campaign-boundary interface once. This branch updates
+only the mechanism and tests: it deliberately neither consumes nor renames any inherited pending event.
 
 **Budget is per class, not global.** A flat total is set by whichever class was optimized most — one
 ingest put 15 cards in `moe_grouped_gemm` and 2 in `quantize_cast`, and a global cap would have had

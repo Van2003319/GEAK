@@ -211,6 +211,69 @@ class RouteScopeTest(unittest.TestCase):
         self.assertTrue(CM.relevant(traffic, None))
 
 
+class IdentityScopeTest(unittest.TestCase):
+    def scoped(self, **changes):
+        scope = CM.LEGACY_SCOPE.as_dict()
+        scope.update(changes)
+        return {"axis": "rasterization", "route": "prefill_m1024_down", "scope": scope}
+
+    def test_every_closure_scope_has_the_complete_identity_tuple(self):
+        for closure in CM.CLOSED:
+            self.assertEqual(set(closure.scope.as_dict()), set(CM.SCOPE_FIELDS), closure.axis)
+            self.assertTrue(all(closure.scope.as_dict().values()), closure.axis)
+
+    def test_a_fully_matching_scope_can_anchor(self):
+        verdict = CM.check([self.scoped()])
+        self.assertEqual(len(verdict["flagged"]), 1)
+        self.assertEqual(verdict["flagged"][0]["scope_status"], "exact")
+
+    def test_each_scope_dimension_can_disqualify_a_legacy_anchor(self):
+        for field in CM.SCOPE_FIELDS:
+            with self.subTest(field=field):
+                verdict = CM.check([self.scoped(**{field: f"different-{field}"})])
+                self.assertEqual(verdict["flagged"], [])
+                self.assertEqual(len(verdict["advisory"]), 1)
+                self.assertEqual(verdict["advisory"][0]["scope_status"], "mismatch")
+                self.assertIn(field, {m["field"] for m in
+                                      verdict["advisory"][0]["scope_mismatches"]})
+
+    def test_a_partial_modern_scope_is_not_a_strong_anchor(self):
+        verdict = CM.check([{"axis": "rasterization", "route": "prefill_m1024_down",
+                             "scope": {"kernel": CM.LEGACY_UNRECORDED, "gfx": "gfx942"}}])
+        self.assertEqual(verdict["flagged"], [])
+        self.assertEqual(verdict["advisory"][0]["scope_status"], "incomplete")
+        self.assertIn("body_hash", verdict["advisory"][0]["scope_missing"])
+
+    def test_unscoped_legacy_call_is_labelled_for_compatibility(self):
+        verdict = CM.check([{"axis": "rasterization", "route": "prefill_m1024_down"}])
+        self.assertEqual(verdict["flagged"][0]["scope_status"], "legacy-unscoped")
+
+
+class DecompositionMechanismTest(unittest.TestCase):
+    def test_the_three_parallelism_mechanisms_classify_differently(self):
+        self.assertEqual(CM.mechanism_family("uniform split-K with four K partitions"),
+                         "uniform_split_k")
+        self.assertEqual(CM.mechanism_family("Stream-K over flattened MAC iteration space"),
+                         "stream_k")
+        self.assertEqual(CM.mechanism_family("static persistent grid-stride over whole tiles"),
+                         "static_persistent")
+
+    def test_stream_k_is_not_closed_by_a_uniform_split_k_measurement(self):
+        axes = [c.axis for c in CM.matches("Stream-K to fill the machine with a persistent grid")]
+        self.assertNotIn("raising the split-K slice count to fill idle CUs", axes)
+        self.assertFalse(any(c.mechanism_family == "uniform_split_k" for c in
+                             CM.matches("Stream-K to fill the machine with a persistent grid")))
+
+    def test_static_persistent_is_not_an_alias_for_more_split_k_slices(self):
+        axes = [c.axis for c in CM.matches(
+            "fill idle CUs with a static persistent grid-stride over whole output tiles")]
+        self.assertNotIn("raising the split-K slice count to fill idle CUs", axes)
+
+    def test_uniform_split_k_closure_still_matches_its_own_mechanism(self):
+        hits = CM.matches("raise the uniform split-K slice count to fill idle CUs")
+        self.assertTrue(any(c.mechanism_family == "uniform_split_k" for c in hits))
+
+
 class CheckTest(unittest.TestCase):
     def test_a_closed_proposal_is_flagged_with_its_citation(self):
         verdict = CM.check([{"axis": "rasterization", "route": "prefill_m1024_down"}])

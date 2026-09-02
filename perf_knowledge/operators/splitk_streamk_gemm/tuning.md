@@ -18,6 +18,20 @@ sources:
 > stream-K (or split-K for large-K) and size the persistent grid ≈ CU count (304 MI300X / 256 MI350X).
 > Otherwise leave it off.
 
+## Do not collapse the decomposition names
+- **Uniform split-K**: every output tile is split into the same number of K partitions; all tiles pay
+  partial-output storage/atomics and reduction. The grid grows with `output_tiles × split_count`.
+- **Stream-K**: a bounded grid consumes balanced ranges of the flattened tile×K-iteration space. A
+  workgroup can cross tile boundaries; only partial boundary tiles need fix-up. It is not uniform
+  split-K with a different grid constant.
+- **Static persistent tile grid-stride**: a bounded resident grid loops over complete output tiles.
+  One workgroup owns each tile's whole K reduction unless a separate split mechanism is added, so it
+  has no inherent partial-output reduction.
+
+Record which mechanism, body hash, config, toolchain and measurement protocol produced a result. A
+loss from uniform split-K's reduction traffic does not close Stream-K balancing or whole-tile static
+persistence, and a win from one must not be generalized to the others.
+
 ## The levers
 - **SPLIT_K** (split-K): number of K-partitions. Larger SPLIT_K → more parallelism but more reduction
   cost; tune 2/4/8/16 against large-K small-M shapes.

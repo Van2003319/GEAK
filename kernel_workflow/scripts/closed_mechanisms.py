@@ -69,6 +69,54 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 SUITE = "suite"
+SCOPE_FIELDS = ("kernel", "task", "dtype", "gfx", "toolchain", "body_hash", "config", "protocol")
+LEGACY_UNRECORDED = "legacy-unrecorded"
+
+
+@dataclasses.dataclass(frozen=True)
+class ClosureScope:
+    """Identity of the code and measurement contract that earned a closure."""
+
+    kernel: str
+    task: str
+    dtype: str
+    gfx: str
+    toolchain: str
+    body_hash: str
+    config: str
+    protocol: str
+
+    def as_dict(self) -> dict[str, str]:
+        return dataclasses.asdict(self)
+
+
+# These rows predate scoped closure receipts. Preserve what the evidence actually establishes and
+# spell every unrecorded field out; inventing a hash/config would be worse than declining to anchor.
+# A fully scoped modern proposal therefore mismatches these legacy rows unless it explicitly carries
+# this historical sentinel, and a mismatch is advisory only (never exit 6).
+LEGACY_SCOPE = ClosureScope(
+    kernel=LEGACY_UNRECORDED,
+    task="dense_bf16_gemm_fused",
+    dtype="bf16",
+    gfx="gfx942",
+    toolchain=LEGACY_UNRECORDED,
+    body_hash=LEGACY_UNRECORDED,
+    config=LEGACY_UNRECORDED,
+    protocol=LEGACY_UNRECORDED,
+)
+
+# Decompositions that all increase apparent parallelism but have different ownership and costs.
+# In particular, Stream-K and a whole-tile persistent grid are not aliases for uniform split-K.
+MECHANISM_FAMILIES = {
+    "fixed_output_tile_parallel": (
+        "one owner per output tile; retile to change the natural grid, with no K fix-up by default"),
+    "uniform_split_k": (
+        "every output tile receives the same K partitions and pays an atomic/workspace reduction"),
+    "stream_k": (
+        "a bounded grid consumes flattened tile-by-K iteration ranges; only boundary tiles need fix-up"),
+    "static_persistent": (
+        "a bounded resident grid grid-strides over complete output tiles; it adds no K reduction"),
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,6 +134,8 @@ class Closure:
     control: str                  # the negative control and what it did
     bound: str                    # what the prize is bounded at, honestly
     reopens_when: str             # mandatory
+    scope: ClosureScope = LEGACY_SCOPE
+    mechanism_family: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -252,8 +302,7 @@ CLOSED: tuple[Closure, ...] = (
                  "higher slice count", "more split-k", "deeper split-k",
                  "split-k to fill", "fill the idle cu", "fill idle cu",
                  "idle cus", "idle cu", "cu occupancy", "fill the device",
-                 "raise cta count", "more ctas", "persistent cta",
-                 "grid-stride", "grid stride"),
+                 "raise cta count", "more ctas"),
         routes=("prefill_m128_square", SUITE),
         epoch="R",
         finding="run 17, section 74",
@@ -1270,22 +1319,63 @@ CLOSED: tuple[Closure, ...] = (
     ),
 )
 
+_UNIFORM_SPLIT_K_AXES = {
+    "output_path on split-K routes",
+    "raising the split-K slice count to fill idle CUs",
+    "four split-K slices",
+    "slice-length quantisation as a PREDICTOR of the best split count",
+    "split-K fp32 partial-plane DRAM locality (XCD-affine slice mapping, tile-major workspace, non-temporal finalize)",
+    "machine fill on prefill_m2048_square / split-K on the BN=128 wide-tile body / raising CTA/CU by adding split slices on macro_gemm_128x128_exact",
+}
+_FIXED_OUTPUT_AXES = {
+    "shortening the N-strip to raise CU occupancy",
+    "raising the workgroup count / machine fill on prefill_m2048_square by moving the dispatch gate onto a narrower (BN=64) tile",
+}
+CLOSED = tuple(
+    dataclasses.replace(c, mechanism_family=(
+        "uniform_split_k" if c.axis in _UNIFORM_SPLIT_K_AXES else
+        "fixed_output_tile_parallel" if c.axis in _FIXED_OUTPUT_AXES else c.mechanism_family))
+    for c in CLOSED
+)
+
+
 
 def _norm(text: str) -> str:
-    return re.sub(r"[\s_\-]+", " ", text.lower())
+    return re.sub(r"[\s_\-]+", " ", text.lower()).strip()
+
+
+def mechanism_family(text: str) -> str:
+    """Classify only explicit decomposition language; motivation words are not mechanisms."""
+    hay = _norm(text)
+    tests = (
+        ("stream_k", ("stream k", "streamk", "mac iteration space", "tile k iteration", "streaming k")),
+        ("static_persistent", ("static persistent", "persistent tile", "persistent grid",
+                               "grid stride whole tile", "grid stride over tile", "resident grid")),
+        ("uniform_split_k", ("uniform split k", "split k", "splitk", "k partition", "more slices",
+                             "slice count", "partial plane")),
+        ("fixed_output_tile_parallel", ("fixed output tile", "one cta per tile", "n strip",
+                                        "retile", "smaller n tile", "natural tile grid")),
+    )
+    for family, aliases in tests:
+        if any(alias in hay for alias in aliases):
+            return family
+    return ""
 
 
 def matches(text: str) -> list[Closure]:
-    """Every closure whose vocabulary appears in `text`.
+    """Every closure whose vocabulary appears, without conflating decompositions.
 
-    Substring matching on normalised text, deliberately. A planner writes
-    `rasterization: grouped_m -> xcd_remapped_grouped`, not a tidy axis name,
-    and a matcher that only accepted the tidy name would be silent exactly when
-    it mattered -- which is finding (128) in another costume.
+    Substring matching remains intentionally forgiving. Once a proposal explicitly names Stream-K,
+    static persistent, uniform split-K, or fixed-output tiling, however, it may only match a closure
+    for that same family. Shared motivations such as "fill the machine" are not evidence that the
+    mechanism was measured.
     """
     hay = _norm(text)
+    proposed_family = mechanism_family(text)
     hits = []
     for closure in CLOSED:
+        if proposed_family and closure.mechanism_family and proposed_family != closure.mechanism_family:
+            continue
         if any(_norm(alias) in hay for alias in closure.aliases):
             hits.append(closure)
     return hits
@@ -1298,40 +1388,101 @@ def relevant(closure: Closure, route: str | None) -> bool:
     return route in closure.routes
 
 
-def check(proposals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Flag proposals naming a mechanism already measured shut.
+def _scope_value(field: str, value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (Mapping, list, tuple)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    value = re.sub(r"\s+", " ", str(value).strip()).lower()
+    if field == "gfx":
+        match = re.search(r"gfx\d+[a-z]*", value)
+        return match.group(0) if match else re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+    if field in ("kernel", "task", "dtype"):
+        value = re.sub(r"[^a-z0-9+.]+", "_", value).strip("_")
+    return value
 
-    A proposal carrying a non-empty `reopen_justification` is reported but not
-    flagged: the registry aims work, it does not forbid it, and the epoch that
-    justified a closure is not always the epoch running the proposal.
+
+def proposal_scope(proposal: Mapping[str, Any]) -> dict[str, str]:
+    nested = proposal.get("scope") if isinstance(proposal.get("scope"), Mapping) else {}
+    aliases = {
+        "kernel": ("kernel", "kernel_name"), "task": ("task", "task_id"),
+        "dtype": ("dtype",), "gfx": ("gfx", "platform", "device"),
+        "toolchain": ("toolchain", "toolchain_fingerprint"),
+        "body_hash": ("body_hash", "kernel_body_hash"),
+        "config": ("config", "config_digest"),
+        "protocol": ("protocol", "protocol_digest"),
+    }
+    out = {}
+    for field, names in aliases.items():
+        value = nested.get(field)
+        if value in (None, ""):
+            for name in names:
+                if proposal.get(name) not in (None, ""):
+                    value = proposal.get(name); break
+        out[field] = _scope_value(field, value)
+    return out
+
+
+def scope_compatibility(closure: Closure, proposal: Mapping[str, Any]):
+    actual = proposal_scope(proposal)
+    if not any(actual.values()):
+        # Compatibility path for old callers. It is explicitly labelled; once a caller supplies any
+        # scope it must supply the complete receipt before an old closure can become a strong anchor.
+        return "legacy-unscoped", [], list(SCOPE_FIELDS), actual
+    missing = [field for field in SCOPE_FIELDS if not actual[field]]
+    expected = {field: _scope_value(field, getattr(closure.scope, field)) for field in SCOPE_FIELDS}
+    mismatches = [
+        {"field": field, "closure": expected[field], "proposal": actual[field]}
+        for field in SCOPE_FIELDS if actual[field] and expected[field] and actual[field] != expected[field]
+    ]
+    if mismatches:
+        return "mismatch", mismatches, missing, actual
+    if missing:
+        return "incomplete", [], missing, actual
+    return "exact", [], [], actual
+
+
+def check(proposals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Flag only closures that match mechanism, route, and a compatible scope.
+
+    A scope mismatch or incomplete modern scope is returned as advisory evidence and never strongly
+    anchored. Unscoped legacy callers retain their old exit behaviour, but the receipt calls that
+    compatibility path out so campaigns can migrate deliberately.
     """
-    flagged, justified = [], []
+    flagged, justified, advisory = [], [], []
     for i, proposal in enumerate(proposals):
         text = " ".join(str(proposal.get(k, "")) for k in
                         ("axis", "mechanism", "direction", "description",
                          "rationale", "title", "name", "why", "prompt"))
         route = proposal.get("route") or proposal.get("context") or proposal.get("test_case_id")
+        proposed_family = mechanism_family(text)
         for closure in matches(text):
             if not relevant(closure, route):
                 continue
+            scope_status, mismatches, missing, actual_scope = scope_compatibility(closure, proposal)
             record = {
-                "proposal_index": i,
-                "route": route,
-                "axis": closure.axis,
-                "finding": closure.finding,
-                "measured": closure.measured,
-                "bound": closure.bound,
-                "epoch": closure.epoch,
-                "reopens_when": closure.reopens_when,
+                "proposal_index": i, "route": route, "axis": closure.axis,
+                "mechanism_family": closure.mechanism_family or proposed_family or "unspecified",
+                "finding": closure.finding, "measured": closure.measured, "control": closure.control,
+                "bound": closure.bound, "epoch": closure.epoch, "reopens_when": closure.reopens_when,
+                "closure_scope": closure.scope.as_dict(), "proposal_scope": actual_scope,
+                "scope_status": scope_status,
             }
+            if mismatches:
+                record["scope_mismatches"] = mismatches
+            if missing:
+                record["scope_missing"] = missing
+            if scope_status in ("mismatch", "incomplete"):
+                record["reason"] = "closure is evidence from another or unproven scope; not a strong anchor"
+                advisory.append(record)
+                continue
             if str(proposal.get("reopen_justification") or "").strip():
                 record["reopen_justification"] = proposal["reopen_justification"]
                 justified.append(record)
             else:
                 flagged.append(record)
-    return {"flagged": flagged, "justified": justified,
+    return {"flagged": flagged, "justified": justified, "advisory": advisory,
             "proposals_checked": len(proposals)}
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -1356,6 +1507,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{len(CLOSED)} mechanisms measured shut. Aim a NEW mechanism at a rich route; do not "
               f"re-aim a priced one. A route appearing here is not finished -- only the listed "
               f"mechanism is.")
+        print("Decomposition families are distinct: " + "; ".join(
+              f"{name} = {meaning}" for name, meaning in MECHANISM_FAMILIES.items()))
+        print("Strong anchoring requires matching kernel/task/dtype/gfx/toolchain/body_hash/config/"
+              "protocol. Legacy rows name unknown fields as legacy-unrecorded.")
         for c in CLOSED:
             where = "suite" if c.routes == (SUITE,) else ", ".join(c.routes)
             print(f"\n- {c.axis}\n    where: {where}   finding: {c.finding}   epoch: {c.epoch}"
@@ -1382,6 +1537,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # possible failure for a tool whose job is to notice things.
         proposals = (parsed.get("candidate_directions")
                      or parsed.get("directions") or [])
+        if isinstance(parsed.get("scope"), Mapping):
+            proposals = [dict(item, scope=(item.get("scope")
+                         if isinstance(item.get("scope"), Mapping) else parsed["scope"]))
+                         for item in proposals]
     verdict = check(proposals)
 
     for record in verdict["justified"]:
@@ -1389,6 +1548,11 @@ def main(argv: Sequence[str] | None = None) -> int:
               f"{record['axis']} (closed by {record['finding']}) and states a "
               f"reopen justification: {record['reopen_justification']}",
               file=sys.stderr)
+    for record in verdict["advisory"]:
+        detail = record.get("scope_mismatches") or record.get("scope_missing")
+        print(f"SCOPE NOT ANCHORED: proposal {record['proposal_index']} names {record['axis']}, "
+              f"but scope is {record['scope_status']} ({detail}); historical evidence is advisory "
+              f"and does not trigger exit 6.", file=sys.stderr)
     for record in verdict["flagged"]:
         print(f"ALREADY MEASURED SHUT: proposal {record['proposal_index']} "
               f"({record['route'] or 'no route named'}) names {record['axis']}. "

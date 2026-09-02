@@ -425,6 +425,182 @@ check("a well-formed card is admitted", json.loads(out)["cards_failing"] == 0,
       json.dumps(json.loads(out)["failures"]))
 shutil.rmtree(dd)
 
+
+# --- canonical matcher receipt and adjacent-class recall ---------------------
+dd = fresh()
+write(dd, "exact.md", card("exact", kernel_class="dense_gemm", platforms="[gfx942]",
+                              regime="prefill", language="hip",
+                              key="plain-English rowwise GEMM evidence, not a machine triple"))
+write(dd, "neighbor.md", card("neighbor", kernel_class="quantized_gemm", platforms="[gfx942]",
+                                 regime="prefill", language="hip",
+                                 key="quantized sibling evidence"))
+write(dd, "wrong-platform.md", card("wrong-platform", kernel_class="dense_gemm",
+                                       platforms="[gfx950]", regime="prefill", language="hip",
+                                       key="same class but another platform"))
+rc, out, err = run(dd, "match", "--operator", "dense_gemm", "--device", "MI300X/gfx942",
+                   "--regime", "prefill", "--language", "hip", "--max", "5", "--explain")
+matched = json.loads(out)
+paths = [os.path.basename(item["path"]) for item in matched["cards"]]
+check("matcher uses canonical card headers rather than parsing plain-English key",
+      rc == 0 and paths[0] == "exact.md", err or str(paths))
+check("matcher exposes adjacent classes without labelling them exact",
+      "quantized_gemm" in matched["adjacent_classes"] and "neighbor.md" in paths
+      and next(x for x in matched["cards"] if x["path"].endswith("neighbor.md"))["class_relation"] == "adjacent",
+      json.dumps(matched.get("cards"), ensure_ascii=False)[:500])
+check("known platform mismatch is filtered by header metadata",
+      "wrong-platform.md" not in paths and matched["reason"]["excluded"].get("platform") == 1,
+      json.dumps(matched["reason"]))
+check("match returns a query/filter/reason/digest receipt",
+      set(matched["receipt"]) == {"query", "filter", "reason", "digest"}
+      and matched["receipt"]["digest"] == matched["digest"]
+      and all(item.get("digest", "").startswith("sha256:") for item in matched["cards"]),
+      json.dumps(matched.get("receipt"), ensure_ascii=False)[:500])
+_, out2, _ = run(dd, "match", "--operator", "dense_gemm", "--device", "MI300X/gfx942",
+                 "--regime", "prefill", "--language", "hip", "--max", "5", "--explain")
+check("matcher receipt digest is deterministic", json.loads(out2)["digest"] == matched["digest"])
+shutil.rmtree(dd)
+
+
+def proposal(run_id, title="Transactional card", key="one transactional dense GEMM situation"):
+    return {
+        "run_id": run_id, "date": "2026-09-02", "kernel_names": ["kernel_a"],
+        "validation_status": "accepted", "box_quiet": True, "held_out": False,
+        "citations": [],
+        "cards": [{
+            "title": title, "name": kb.slugify(title), "key": key, "type": "lever",
+            "confidence": "★★", "effect": "+11% geomean; per-case +12% at M=4096.",
+            "attempts": 1, "confirms_cited": 0, "confirms_blind": 0, "losses": 0,
+            "description": f"{title}: +11% on the measured large shapes.",
+            "keywords": ["tiling"], "kernels": [], "platforms": ["gfx950"],
+            "kernel_class": "dense_gemm", "regime": "prefill", "language": "hip",
+            "lifecycle": "active", "source": f"{run_id} 2026-09-02",
+            "lever": "change tile ownership", "verify": "race the frozen baseline per case",
+        }],
+    }
+
+
+def file_event(d, name, payload):
+    path = os.path.join(d, "_inbox", name)
+    with open(path, "w") as out:
+        json.dump(payload, out, ensure_ascii=False, indent=2)
+    return path
+
+
+def run_with_failpoint(d, point):
+    env = dict(os.environ, KB_DRAIN_FAILPOINT=point)
+    return subprocess.run([sys.executable, os.path.join(HERE, "kb.py"), "--kb-dir", d,
+                           "drain", "--apply", "--campaign-id", "test-campaign",
+                           "--boundary", "post-campaign"],
+                          capture_output=True, text=True, timeout=120, env=env)
+
+
+# --- staged crash recovery ---------------------------------------------------
+dd = fresh()
+payload = proposal("crash-after-stage")
+file_event(dd, "crash-after-stage.json", payload)
+failed = run_with_failpoint(dd, "after_stage")
+root_cards = [f for f in os.listdir(dd) if f.endswith(".md") and not f.startswith("_")
+              and f not in ("README.md", "INDEX.md")]
+check("a crash after staging leaves the live cards untouched", failed.returncode == 70 and not root_cards,
+      failed.stderr)
+_, doctor_out, _ = run(dd, "doctor")
+check("doctor exposes a claimed incomplete transaction",
+      json.loads(doctor_out)["incomplete_transactions"][0]["status"] == "staged",
+      doctor_out[:500])
+rc, out, err = run(dd, "drain", "--apply", "--campaign-id", "test-campaign",
+                   "--boundary", "post-campaign")
+committed = json.loads(out)
+check("rerun resumes the claimed batch and commits it once",
+      rc == 0 and committed["transaction"]["status"] == "committed", err or out[:500])
+receipt = json.load(open(committed["transaction"]["receipt"]))
+check("transaction receipt carries event/content hashes and staged validation",
+      receipt["events"][0]["event_hash"].startswith("sha256:")
+      and receipt["events"][0]["content_hash"].startswith("sha256:")
+      and receipt["stage_validation"]["cards_failing"] == 0
+      and receipt["stage_validation"]["index_digest"].startswith("sha256:"),
+      json.dumps(receipt, ensure_ascii=False)[:500])
+card_file = next(f for f in os.listdir(dd) if f.endswith(".md") and not f.startswith("_")
+                 and f not in ("README.md", "INDEX.md"))
+before = open(os.path.join(dd, card_file)).read()
+file_event(dd, "crash-after-stage.json", payload)
+rc, out, err = run(dd, "drain", "--apply", "--campaign-id", "test-campaign",
+                   "--boundary", "post-campaign")
+replay = json.loads(out)
+check("replaying an already committed event is idempotent",
+      rc == 0 and replay.get("idempotent_replay") is True
+      and open(os.path.join(dd, card_file)).read() == before, err or out[:500])
+shutil.rmtree(dd)
+
+# Canonical content hashes dedupe formatting variants even when both arrive in one claimed batch.
+dd = fresh()
+same = proposal("same-batch", title="Same batch card", key="same batch content identity")
+file_event(dd, "same-a.json", same)
+with open(os.path.join(dd, "_inbox", "same-b.json"), "w") as out:
+    json.dump(same, out, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+rc, out, err = run(dd, "drain", "--apply", "--campaign-id", "same-batch",
+                   "--boundary", "post-campaign")
+same_commit = json.loads(out)
+same_receipt = json.load(open(same_commit["transaction"]["receipt"]))
+same_cards = [f for f in os.listdir(dd) if f.endswith(".md") and not f.startswith("_")
+              and f not in ("README.md", "INDEX.md")]
+check("one claim dedupes canonical-identical content events",
+      rc == 0 and len(same_cards) == 1
+      and [e["duplicate_content"] for e in same_receipt["events"]] == [False, True],
+      err or json.dumps(same_receipt["events"], ensure_ascii=False))
+shutil.rmtree(dd)
+
+# A process death after one atomic replace leaves a write-ahead manifest. INDEX.md is the visibility
+# fence; the next writer reclaims the dead same-host lease, rolls back to base, and replays the batch.
+dd = fresh()
+file_event(dd, "hard-crash.json", proposal("hard-crash", title="Hard crash card",
+                                           key="another transactional dense GEMM situation"))
+failed = run_with_failpoint(dd, "hard_after_first_publish")
+check("hard crash occurs inside publication before INDEX visibility", failed.returncode == 91
+      and not os.path.exists(os.path.join(dd, "INDEX.md")), failed.stderr)
+rc, out, err = run(dd, "drain", "--apply", "--campaign-id", "test-campaign",
+                   "--boundary", "post-campaign")
+check("hard-crash recovery rolls back and publishes a coherent index",
+      rc == 0 and open(os.path.join(dd, "INDEX.md")).read() == kb.build_index(dd), err or out[:500])
+shutil.rmtree(dd)
+
+# --- one writer --------------------------------------------------------------
+dd = fresh()
+file_event(dd, "concurrent.json", proposal("concurrent"))
+with kb.DrainLock(kb.KB(dd), stale_after=3600):
+    rc, out, err = run(dd, "drain", "--apply", "--campaign-id", "other-writer",
+                       "--boundary", "post-campaign")
+check("a concurrent drain is rejected by the single-writer lease",
+      rc == 73 and "already active" in err, err or out)
+check("the losing writer did not claim the batch",
+      os.path.exists(os.path.join(dd, "_inbox", "concurrent.json")))
+shutil.rmtree(dd)
+
+
+# The integration-facing command makes the migration ordering executable: apply cannot happen before
+# an external holdout-freeze receipt exists.
+dd = fresh()
+file_event(dd, "boundary.json", proposal("boundary"))
+proc = subprocess.run([sys.executable, os.path.join(HERE, "kb.py"), "--kb-dir", dd,
+                       "campaign-boundary", "--campaign-id", "c-boundary",
+                       "--boundary", "post-campaign", "--apply"],
+                      capture_output=True, text=True, timeout=120)
+check("campaign boundary refuses apply without a frozen-holdout receipt",
+      proc.returncode == 2 and "holdout-receipt" in proc.stderr, proc.stderr)
+check("the boundary gate refuses before claiming inbox events",
+      os.path.exists(os.path.join(dd, "_inbox", "boundary.json")))
+proc = subprocess.run([sys.executable, os.path.join(HERE, "kb.py"), "--kb-dir", dd,
+                       "campaign-boundary", "--campaign-id", "c-boundary",
+                       "--boundary", "post-campaign", "--holdout-receipt", "sha256:frozen",
+                       "--apply"], capture_output=True, text=True, timeout=120)
+boundary_commit = json.loads(proc.stdout)
+boundary_receipt = json.load(open(boundary_commit["transaction"]["receipt"]))
+check("campaign boundary records campaign and holdout provenance",
+      proc.returncode == 0 and boundary_receipt["campaign_id"] == "c-boundary"
+      and boundary_receipt["boundary"] == "post-campaign"
+      and boundary_receipt["holdout_receipt"] == "sha256:frozen",
+      proc.stderr or proc.stdout[:500])
+shutil.rmtree(dd)
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: {', '.join(FAILED)}")

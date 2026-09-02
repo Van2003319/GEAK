@@ -12,6 +12,7 @@
     kb.py --kb-dir <tree> propose --file <proposal.json>        # validate + place in _inbox/
     kb.py --kb-dir <tree> cite    --run-id R --kernel K [--date D] --citations -   # loss half
     kb.py --kb-dir <tree> drain   [--apply] [--validated-runs N]
+    kb.py --kb-dir <tree> campaign-boundary --campaign-id ID --boundary post-campaign [--apply]
     kb.py --kb-dir <tree> doctor  [--toolchain <fingerprint>]
     kb.py --kb-dir <tree> stats
 
@@ -29,6 +30,9 @@ NFSv3 mount. Neither takes a lock: `match` only reads, and `propose` creates one
 contains the run id, so two writers can never collide.
 
 `drain` is the ONLY writer of INDEX.md / cards / _archive.md, run by one operator between campaigns.
+It atomically claims one inbox batch, records event/content hashes, renders and audits a private staged
+tree, publishes files by atomic replacement with INDEX.md last, and writes a transaction receipt.
+A manifest resumes the same staged bytes after a crash, so retries cannot apply citations twice.
 That is not merely lock-avoidance: "MERGE if the key already exists" is not implementable
 concurrently, because 20 curators cannot see each other's proposals and would each insert a
 near-duplicate for the same key. One writer holding the whole inbox dedupes correctly, and gives a
@@ -37,11 +41,17 @@ human a review gate over what enters the KB.
 import argparse
 from collections import Counter
 import glob as globmod
+import hashlib
 import json
 import os
 import re
+import shutil
+import socket
 import sys
-from datetime import date, datetime
+import tempfile
+import time
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 INDEX_CAP = 40   # retained: the archive header still reports the budget it was written under
 CLASS_CAP = int(os.environ.get("KB_CLASS_CAP", "32"))
@@ -102,37 +112,67 @@ class KB:
 # being quietly coerced into the nearest class.
 # ---------------------------------------------------------------------------
 CLASS_VOCAB = {
-    "dense gemm": ["gemm_a16_w16", "dense gemm", "a16w16", "wvsplitk", "skinny gemm", "gemv"],
-    "quantized gemm": ["a8w8", "w8a8", "blockscale", "fp8 gemm", "int4 gemm", "w4a16", "mxfp4",
-                       "scaled_quant", "quantized gemm"],
-    "moe grouped gemm": ["fused_moe", "moe_gemm", "moe_stage", "grouped gemm", "moe"],
-    "attention": ["attention", "paged_attention", "flash", "mla", "sdpa"],
-    "linear attention": ["chunk_scaled_dot", "kkt", "fla", "mamba", "linear attention", "delta rule"],
-    "quantize / cast": ["per_token_group_quant", "quant", "cast", "dynamic_quant"],
-    "topk / routing": ["topk", "router", "argmax", "sort", "sampling"],
-    "memory movement": ["write_req", "token_pool", "copy", "gather", "scatter", "reshape", "rope"],
-    "reduction / norm": ["rmsnorm", "layernorm", "softmax", "reduce", "norm"],
+    "dense_gemm": ["gemm_a16_w16", "dense gemm", "a16w16", "wvsplitk", "skinny gemm", "gemv"],
+    "quantized_gemm": ["a8w8", "w8a8", "blockscale", "fp8 gemm", "int4 gemm", "w4a16", "mxfp4",
+                       "scaled quant", "quantized gemm"],
+    "moe_grouped_gemm": ["fused_moe", "moe_gemm", "moe_stage", "grouped gemm", "moe"],
+    "attention_decode": ["attention decode", "decode attention", "paged attention", "paged_attention"],
+    "linear_attention": ["chunk_scaled_dot", "kkt", "fla", "mamba", "linear attention", "delta rule"],
+    "attention": ["attention", "flash", "mla", "sdpa"],
+    "quantize_cast": ["per_token_group_quant", "quantize", "dequant", "dynamic quant", "cast"],
+    "moe_router_topk": ["moe router", "moe topk", "moe top k"],
+    "topk_router": ["topk router", "top k router", "router topk", "topk", "top k",
+                    "router", "argmax", "sort", "sampling"],
+    "memory_movement": ["write_req", "token_pool", "memory movement", "copy", "gather", "scatter", "reshape", "rope"],
+    "reduction_norm": ["rmsnorm", "layernorm", "softmax", "reduce", "reduction", "norm"],
+    "fused_norm_gemm": ["fused norm gemm", "norm gemm"],
+    "composable": ["composable"],
+    "method": ["method", "benchmark methodology", "measurement methodology"],
 }
-REGIME_VOCAB = ["decode", "prefill", "mixed", "launch-bound", "memory-bound", "compute-bound",
-                "small-batch", "large-batch", "unknown"]
+
+# Adjacent classes are an explicit recall surface, never an implicit exact match. The matcher returns
+# them labelled as neighbours so a reader can inspect a split/reduction or quantized sibling without
+# mistaking transfer evidence for same-class evidence.
+CLASS_ADJACENCY = {
+    "dense_gemm": ("quantized_gemm", "fused_norm_gemm", "moe_grouped_gemm"),
+    "quantized_gemm": ("dense_gemm", "moe_grouped_gemm", "quantize_cast"),
+    "moe_grouped_gemm": ("quantized_gemm", "dense_gemm", "moe_router_topk"),
+    "attention_decode": ("attention", "linear_attention"),
+    "attention": ("attention_decode", "linear_attention"),
+    "linear_attention": ("attention", "attention_decode"),
+    "quantize_cast": ("quantized_gemm", "memory_movement"),
+    "moe_router_topk": ("topk_router", "moe_grouped_gemm"),
+    "topk_router": ("moe_router_topk",),
+    "fused_norm_gemm": ("dense_gemm", "reduction_norm"),
+    "memory_movement": ("quantize_cast",),
+    "reduction_norm": ("fused_norm_gemm",),
+}
+
+REGIME_VOCAB = ["decode", "prefill", "both", "mixed", "launch-bound", "memory-bound", "compute-bound",
+                "small-batch", "large-batch", "n/a", "unknown"]
 UNMATCHED = "unmatched"
 
 
-def normalize_class(operator, kernel_name=""):
-    """Longest matching needle wins — NEVER first-match-in-dict-order.
+def _canonical_words(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
-    The classes overlap by construction: "linear attention" contains "attention", "moe grouped gemm"
-    contains "gemm". With first-match, whichever class happened to be declared first in the dict won,
-    so a curator that correctly said "linear attention" had its card filed under "attention" — and a
-    later attention kernel would then be handed linear-attention cards. That mis-filing is silent:
-    the card exists, the lookup succeeds, and only the content is wrong. Observed on the first real
-    batch. Specificity, not declaration order, decides.
+
+def normalize_class(operator, kernel_name=""):
+    """Return the canonical discovery-header class; longest alias wins.
+
+    Header values use snake_case while callers commonly send symbols, prose, or hyphenated operator
+    names. The old matcher compared a space-separated derived class with a plain-English `key`, so it
+    silently returned zero cards even when the header was an exact match.
     """
-    hay = f"{operator or ''} {kernel_name or ''}".lower()
+    direct = re.sub(r"[^a-z0-9]+", "_", str(operator or "").lower()).strip("_")
+    if direct in CLASS_VOCAB or direct in {x for xs in CLASS_ADJACENCY.values() for x in xs}:
+        return direct
+    hay = _canonical_words(f"{operator or ''} {kernel_name or ''}")
     best, best_len = UNMATCHED, 0
     for cls, needles in CLASS_VOCAB.items():
-        for n in needles:
-            if n in hay and len(n) > best_len:
+        for needle in (cls.replace("_", " "), *needles):
+            n = _canonical_words(needle)
+            if n and n in hay and len(n) > best_len:
                 best, best_len = cls, len(n)
     return best
 
@@ -449,79 +489,179 @@ def rank(c):
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-def cmd_match(kb, a):
-    """At most --max cards. Never the whole index.
+def _as_list(value):
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    return [str(value).strip()] if value is not None and str(value).strip() else []
 
-    plan_round already carries four other advisory channels (knowledge/, perf_knowledge, the deep-mode
-    blackboards, its own HISTORY). Pasting a 40-line index in as a fifth would dilute the profile
-    evidence that makes the workflow work with no KB at all.
-    """
-    key = make_key(a.operator, a.device, a.regime, a.kernel_name)
-    cls, gfx, regime = key.split(" · ")
-    scored = []
+
+def normalize_language(value):
+    v = _canonical_words(value)
+    aliases = {
+        "hip c": "hip", "hip cpp": "hip", "raw hip": "hip", "c": "hip", "cpp": "hip",
+        "assembly": "asm", "amdgpu asm": "asm", "triton amd": "triton",
+        "composable kernel": "ck", "ck tile": "ck", "fly dsl": "flydsl",
+    }
+    return aliases.get(v, v.replace(" ", "-")) if v else ""
+
+
+def canonical_card_metadata(meta):
+    """Read only discovery-header metadata; never reverse-engineer scope from prose `key`."""
+    raw_class = str(meta.get("kernel_class") or "other").strip()
+    kernel_class = re.sub(r"[^a-z0-9]+", "_", raw_class.lower()).strip("_") or "other"
+    platforms = sorted(set(filter(lambda x: x != UNMATCHED,
+                                  (normalize_gfx(x) for x in _as_list(meta.get("platforms"))))))
+    regimes = [normalize_regime(x) for x in _as_list(meta.get("regime"))]
+    languages = sorted(set(filter(None, (normalize_language(x) for x in
+                          (_as_list(meta.get("languages")) + _as_list(meta.get("language")))))))
+    dtypes = sorted(set(_canonical_words(x).replace(" ", "_") for x in
+                        (_as_list(meta.get("dtypes")) + _as_list(meta.get("dtype"))) if x))
+    return {
+        "kernel_class": kernel_class,
+        "platforms": platforms,
+        "regimes": regimes,
+        "languages": languages,
+        "dtypes": dtypes,
+        "kernels": _as_list(meta.get("kernels")),
+    }
+
+
+def _sha256_bytes(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def cmd_match(kb, a):
+    """Return a canonical, auditable shortlist plus explicitly-labelled adjacent classes."""
+    cls = normalize_class(a.operator, a.kernel_name)
+    gfx = normalize_gfx(a.device)
+    regime = normalize_regime(a.regime)
+    language = normalize_language(a.language)
+    dtype = _canonical_words(getattr(a, "dtype", "")).replace(" ", "_")
+    adjacent = list(CLASS_ADJACENCY.get(cls, ()))
+    raw_query = {
+        "operator": a.operator, "kernel_name": a.kernel_name, "device": a.device,
+        "regime": a.regime, "language": a.language, "dtype": getattr(a, "dtype", ""),
+    }
+    canonical = {
+        "kernel_class": cls, "platform": None if gfx == UNMATCHED else gfx,
+        "regime": None if regime == "unknown" else regime,
+        "language": language or None, "dtype": dtype or None,
+    }
+    query = {"raw": raw_query, "canonical": canonical}
+    filter_receipt = {
+        "kernel_class": {"exact": cls, "adjacent": adjacent},
+        "platforms": [gfx] if gfx != UNMATCHED else [],
+        "regimes": [regime] if regime != "unknown" else [],
+        "languages": [language] if language else [],
+        "dtypes": [dtype] if dtype else [], "limit": a.max, "include_score": bool(a.explain),
+        "policy": "exclude known metadata mismatches; retain missing optional metadata at lower rank",
+    }
+
+    scored, considered, excluded = [], 0, Counter()
     for c in all_cards(kb):
-        parts = [p.strip() for p in c["meta"].get("key", "").split("·")]
-        if len(parts) != 3 or parts[0] != cls:
-            continue
-        why = ["class matches"]
-        score = rank(c)
-        if parts[1] == gfx:
-            score += 1.0; why.append("same gfx")
-        if parts[2] == regime:
-            score += 0.5; why.append("same regime")
-        scored.append((score, c, why))
-    scored.sort(key=lambda t: -t[0])
-    out = {"key": key,
-           # Named loudly: an unmatched dimension means this lookup could not have matched anything,
-           # which reads exactly like "the KB had nothing useful" unless it is reported.
-           "unmatched_dims": [d for d, v in (("kernel_class", cls), ("gfx", gfx)) if v == UNMATCHED],
-           "cards": []}
-    for score, c, why in scored[:a.max]:
+        considered += 1
         m = c["meta"]
-        card = {"path": c["path"], "key": m.get("key"), "confidence": m.get("confidence"),
-                "effect": m.get("effect"), "attempts": m.get("attempts"),
-                "confirms_cited": m.get("confirms_cited"), "confirms_blind": m.get("confirms_blind"),
-                "losses": m.get("losses", 0)}
+        cm = canonical_card_metadata(m)
+        relation = "exact" if cm["kernel_class"] == cls else (
+                   "adjacent" if cm["kernel_class"] in adjacent else "unrelated")
+        if relation == "unrelated":
+            excluded["kernel_class"] += 1; continue
+        if gfx != UNMATCHED and cm["platforms"] and gfx not in cm["platforms"]:
+            excluded["platform"] += 1; continue
+        if regime != "unknown" and cm["regimes"]:
+            compatible = regime in cm["regimes"] or "both" in cm["regimes"] or "n/a" in cm["regimes"]
+            if not compatible:
+                excluded["regime"] += 1; continue
+        if language and cm["languages"] and language not in cm["languages"]:
+            excluded["language"] += 1; continue
+        if dtype and cm["dtypes"] and dtype not in cm["dtypes"]:
+            excluded["dtype"] += 1; continue
+
+        why = [f"{relation} kernel_class={cm['kernel_class']}"]
+        score = rank(c) + (4.0 if relation == "exact" else 1.0)
+        if gfx != UNMATCHED:
+            if gfx in cm["platforms"]: score += 2.0; why.append(f"platform={gfx}")
+            elif not cm["platforms"]: why.append("platform metadata unknown")
+        if regime != "unknown":
+            if regime in cm["regimes"]: score += 1.0; why.append(f"regime={regime}")
+            elif "both" in cm["regimes"]: score += 0.5; why.append("regime=both")
+            elif not cm["regimes"]: why.append("regime metadata unknown")
+        if language:
+            if language in cm["languages"]: score += 1.0; why.append(f"language={language}")
+            elif not cm["languages"]: why.append("language metadata unknown")
+        if dtype:
+            if dtype in cm["dtypes"]: score += 0.75; why.append(f"dtype={dtype}")
+            elif not cm["dtypes"]: why.append("dtype metadata unknown")
+        if a.kernel_name and a.kernel_name in cm["kernels"]:
+            score += 2.0; why.append("kernel symbol exact")
+        scored.append((score, c, cm, relation, why))
+
+    # Adjacent classes are recall only: exhaust exact-class candidates before spending the cap on a
+    # neighbour, even when an old neighbouring card has higher standing.
+    scored.sort(key=lambda row: (row[3] != "exact", -row[0], os.path.basename(row[1]["path"])))
+    cards = []
+    for score, c, cm, relation, why in scored[:a.max]:
+        m = c["meta"]
+        raw = open(c["path"], "rb").read()
+        item = {
+            "path": c["path"], "key": m.get("key"), "confidence": m.get("confidence"),
+            "effect": m.get("effect"), "attempts": m.get("attempts"),
+            "confirms_cited": m.get("confirms_cited"), "confirms_blind": m.get("confirms_blind"),
+            "losses": m.get("losses", 0), "metadata": cm, "class_relation": relation,
+            "reason": why, "digest": _sha256_bytes(raw),
+        }
         if a.explain:
-            card["why_matched"] = why
-            card["score"] = round(score, 3)
-        out["cards"].append(card)
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+            item["why_matched"] = why  # compatibility with the old --explain field
+            item["score"] = round(score, 3)
+        cards.append(item)
+
+    exact_n = sum(1 for row in scored if row[3] == "exact")
+    adjacent_n = len(scored) - exact_n
+    reason = {
+        "code": "matched" if cards else ("unmatched-kernel-class" if cls == UNMATCHED else "no-canonical-metadata-match"),
+        "considered": considered, "eligible_exact": exact_n, "eligible_adjacent": adjacent_n,
+        "returned": len(cards), "excluded": dict(sorted(excluded.items())),
+    }
+    out = {
+        "key": make_key(a.operator, a.device, a.regime, a.kernel_name),
+        "unmatched_dims": [d for d, v in (("kernel_class", cls), ("gfx", gfx)) if v == UNMATCHED],
+        "query": query, "filter": filter_receipt, "reason": reason,
+        "adjacent_classes": adjacent, "cards": cards,
+    }
+    # Receipt digests survive a checkout move: absolute paths are presentation, card digests are identity.
+    digest_view = dict(out)
+    digest_view["cards"] = [dict(item, path=os.path.basename(item["path"])) for item in cards]
+    digest_payload = json.dumps(digest_view, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":")).encode()
+    out["digest"] = _sha256_bytes(digest_payload)
+    out["receipt"] = {k: out[k] for k in ("query", "filter", "reason", "digest")}
+    print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+
+def audit_stored_cards(kb):
+    """Return stored-card failures for both active and archived cards."""
+    bad = {}
+    for c in all_cards(kb, include_archived=True):
+        card = dict(c["meta"])
+        h1 = re.search(r"^#\s+(.+)$", c["body"], re.M)
+        card["title"] = h1.group(1).strip() if h1 else ""
+        for field in ("lever", "apply", "verify", "caution", "source"):
+            match = re.search(rf"^- {field}:\s*(.*?)(?=\n- \w+:|\Z)", c["body"], re.S | re.M)
+            if match:
+                card[field] = match.group(1)
+        if "attempts" not in c["meta"] or not c["meta"].get("attempts"):
+            card["attempts"] = 1
+        errors = lint_card(card, strict_source=False, is_new=False)
+        if errors:
+            bad[os.path.basename(c["path"])] = errors
+    return bad
 
 
 def cmd_lint(kb, a):
     if a.cards:
-        # Audit a tree that predates these rules. `source` is not required here: the point is to find
-        # contract violations in existing cards, not to fail every card for a missing field.
-        bad = {}
-        # Audit EVERY card, archived included. Auditing only the active ones excludes exactly the
-        # cards most likely to be malformed — a card whose `lifecycle` is a typo is not active, so
-        # the reader that filters on active never sees it and reports a clean tree.
-        for c in all_cards(kb, include_archived=True):
-            card = dict(c["meta"])
-            # Take the title from the body's H1, which is where it actually lives — NOT from the
-            # filename. Substituting the filename here made "this card has no title" unobservable to
-            # the only check that would report it, and two cards reached disk named `none-*.md`.
-            h1 = re.search(r"^#\s+(.+)$", c["body"], re.M)
-            card["title"] = h1.group(1).strip() if h1 else ""
-            for f in ("lever", "apply", "verify", "caution", "source"):
-                m = re.search(rf"^- {f}:\s*(.*?)(?=\n- \w+:|\Z)", c["body"], re.S | re.M)
-                if m:
-                    card[f] = m.group(1)
-            if "attempts" not in c["meta"] or not c["meta"].get("attempts"):
-                card["attempts"] = 1  # older schema had no attempts; don't report that 17 times
-            e = lint_card(card, strict_source=False, is_new=False)
-            if e:
-                bad[os.path.basename(c["path"])] = e
-        # Count what was actually audited. Reporting len(all_cards(kb)) here counted ACTIVE cards
-        # while the loop above walks archived ones too, so an audit of 32 cards announced 23 — and
-        # the number a reader checks against "did it look at everything?" was the wrong one.
+        bad = audit_stored_cards(kb)
         print(json.dumps({"cards_audited": len(all_cards(kb, include_archived=True)),
-                          "cards_failing": len(bad),
-                          "failures": bad}, ensure_ascii=False, indent=2))
-        # Non-zero when the audit found something. It returned 0 unconditionally, so `lint --cards`
-        # in a CI step or a `&&` chain reported success while printing failures — a gate that always
-        # opens. Reported in review of #411.
+                          "cards_failing": len(bad), "failures": bad},
+                         ensure_ascii=False, indent=2, sort_keys=True))
         return 1 if bad else 0
     prop = json.load(open(a.file))
     errs = {"proposal": lint_proposal(prop)}
@@ -531,7 +671,7 @@ def cmd_lint(kb, a):
         if e:
             errs[f"card[{i}] {card.get('title', '?')}"] = e
     errs = {k: v for k, v in errs.items() if v}
-    print(json.dumps({"ok": not errs, "rejections": errs}, ensure_ascii=False, indent=2))
+    print(json.dumps({"ok": not errs, "rejections": errs}, ensure_ascii=False, indent=2, sort_keys=True))
     return 1 if errs else 0
 
 
@@ -558,7 +698,7 @@ def cmd_cite(kb, a):
         print("REJECTED — citations must be a JSON array", file=sys.stderr)
         return 1
     if not cites:
-        print(json.dumps({"written": None, "citations": 0, "note": "no citations, nothing to file"}))
+        print(json.dumps({"written": None, "citations": 0, "note": "no citations, nothing to file"}, sort_keys=True))
         return 0
     prop = {
         "run_id": f"{a.run_id}-citations",
@@ -579,14 +719,17 @@ def cmd_cite(kb, a):
         dest = os.path.join(kb.inbox, base + (".json" if n == 1 else f"-{n}.json"))
         try:
             with open(dest, "x") as f:
-                json.dump(prop, f, ensure_ascii=False, indent=2)
+                json.dump(prop, f, ensure_ascii=False, indent=2, sort_keys=True)
             break
         except FileExistsError:
             continue
     else:
         print("REJECTED — 1000 ledgers already filed under this run id", file=sys.stderr)
         return 1
-    print(json.dumps({"written": dest, "citations": len(cites)}))
+    event = _event_from_path(dest)
+    print(json.dumps({"written": dest, "citations": len(cites),
+                      "event_hash": event["event_hash"],
+                      "content_hash": event["content_hash"]}, sort_keys=True))
     return 0
 
 
@@ -664,7 +807,7 @@ def cmd_backfill_origins(kb, a):
         "no_provenance": no_provenance,
         "proposal_cards_matching_no_card": unmatched_cards,
         "detail": changed if not a.apply else [],
-    }, ensure_ascii=False, indent=2))
+    }, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
@@ -678,9 +821,12 @@ def cmd_propose(kb, a):
     # across hosts on NFSv3, where cross-host NLM locking has never been exercised on this mount.
     dest = os.path.join(kb.inbox, f"{slugify(prop['run_id'])}.json")
     with open(dest, "x") as f:
-        json.dump(prop, f, ensure_ascii=False, indent=2)
+        json.dump(prop, f, ensure_ascii=False, indent=2, sort_keys=True)
+    event = _event_from_path(dest)
     print(json.dumps({"written": dest, "cards": len(prop.get("cards", [])),
-                      "citations": len(prop.get("citations", []))}))
+                      "citations": len(prop.get("citations", [])),
+                      "event_hash": event["event_hash"],
+                      "content_hash": event["content_hash"]}, sort_keys=True))
     return 0
 
 
@@ -848,7 +994,7 @@ def cmd_index(kb, a):
     return 0
 
 
-def cmd_drain(kb, a):
+def _drain_tree(kb, a):
     proposals, skipped = [], []
     for f in sorted(os.listdir(kb.inbox)) if os.path.isdir(kb.inbox) else []:
         if not f.endswith(".json"):
@@ -903,10 +1049,10 @@ def cmd_drain(kb, a):
                 m = cards[fn]["meta"]
                 # A merge refreshes the header too: a card whose description still describes the
                 # first run it came from is a stale index line, and the index line is the read path.
-                for hf in ("description", "kernel_class", "regime"):
+                for hf in ("description", "kernel_class", "regime", "language", "dtype"):
                     if card.get(hf):
                         m[hf] = card[hf]
-                for lf in ("keywords", "kernels", "platforms"):
+                for lf in ("keywords", "kernels", "platforms", "languages", "dtypes"):
                     if card.get(lf):
                         m[lf] = sorted(set(list(m.get(lf) or []) + list(card[lf])))
                 # A second run proposing the same key is EVIDENCE THE SITUATION RECURRED, not a
@@ -964,7 +1110,8 @@ def cmd_drain(kb, a):
                     "toolchain": prop.get("toolchain", "unknown"),
                     "last_seen": prop.get("date", str(date.today())),
                 }
-                for opt in ("cost", "verified_on", "roofline", "levers"):
+                for opt in ("cost", "verified_on", "roofline", "levers",
+                            "language", "languages", "dtype", "dtypes"):
                     if card.get(opt):
                         meta[opt] = card[opt]
                 body = f"# {card.get('title')}\n"
@@ -1088,9 +1235,8 @@ def cmd_drain(kb, a):
         "merged": merged, "inserted": inserted, "rejected_cards": rejected,
         "demoted_by_citations": demoted, "evicted": evicted, "index_lines": len(live),
     }
-    print(json.dumps(report, ensure_ascii=False, indent=2))
     if not a.apply:
-        return 0
+        return report
 
     for c in live:
         write_card(c["path"], c["meta"], c["body"])
@@ -1121,8 +1267,552 @@ def cmd_drain(kb, a):
     # drift" and "the index can never drift as long as everyone remembers"; a stale index after a
     # bulk import is indistinguishable from a KB that learned nothing.
     open(os.path.join(kb.root, "INDEX.md"), "w").write(build_index(kb.root))
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Transactional drain. A batch is claimed once, rendered in a private tree, audited there, then
+# published with atomic file replacement and INDEX.md last. The manifest is a write-ahead receipt:
+# a crash in any phase resumes the same staged bytes instead of re-applying counters to live cards.
+# ---------------------------------------------------------------------------
+TX_SCHEMA = 1
+
+
+class DrainBusy(RuntimeError):
+    pass
+
+
+def _json_bytes(value):
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+
+
+def _atomic_write_bytes(path, data):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    mode = (os.stat(path).st_mode & 0o777) if os.path.exists(path) else 0o644
+    fd, tmp = tempfile.mkstemp(prefix=".kb-tmp-", dir=directory)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+        try:
+            dfd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _atomic_json(path, value):
+    _atomic_write_bytes(path, _json_bytes(value))
+
+
+def _hash_file(path):
+    if not os.path.isfile(path):
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as src:
+        for block in iter(lambda: src.read(1024 * 1024), b""):
+            h.update(block)
+    return "sha256:" + h.hexdigest()
+
+
+def _content_hash(raw):
+    try:
+        value = json.loads(raw.decode("utf-8"))
+        canonical = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":")).encode()
+    except Exception:
+        canonical = raw
+    return _sha256_bytes(canonical)
+
+
+def _event_from_path(path):
+    raw = open(path, "rb").read()
+    parse_error = None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        payload, parse_error = {}, str(exc)
+    content_hash = _content_hash(raw)
+    identity = {
+        "source": os.path.basename(path), "run_id": payload.get("run_id"),
+        "kind": "citations" if payload.get("citations") and not payload.get("cards") else "proposal",
+        "content_hash": content_hash,
+    }
+    event_hash = _sha256_bytes(json.dumps(identity, sort_keys=True,
+                               separators=(",", ":")).encode())
+    return {
+        **identity, "event_hash": event_hash, "raw_hash": _sha256_bytes(raw),
+        "parse_error": parse_error, "duplicate_content": False,
+    }
+
+
+def _tx_home(kb):
+    return os.path.join(kb.inbox, "_transactions")
+
+
+def _receipt_home(kb):
+    return os.path.join(kb.inbox, "_receipts")
+
+
+def _read_json(path, default=None):
+    try:
+        return json.load(open(path))
+    except Exception:
+        return default
+
+
+class DrainLock:
+    """Atomic single-writer lease with same-host crash recovery."""
+    def __init__(self, kb, stale_after=21600):
+        self.kb, self.stale_after = kb, stale_after
+        self.path = os.path.join(_tx_home(kb), ".writer-lock")
+        self.token = f"{socket.gethostname()}:{os.getpid()}:{time.time_ns()}"
+
+    @staticmethod
+    def _pid_alive(pid):
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except (PermissionError, ValueError, TypeError):
+            return True
+
+    def _stale(self):
+        owner = _read_json(os.path.join(self.path, "owner.json"), {}) or {}
+        try:
+            age = time.time() - float(owner.get("started", os.path.getmtime(self.path)))
+        except OSError:
+            return True
+        same_host = owner.get("host") == socket.gethostname()
+        if same_host and owner.get("pid") and not self._pid_alive(owner["pid"]):
+            return True
+        return age > self.stale_after
+
+    def __enter__(self):
+        os.makedirs(_tx_home(self.kb), exist_ok=True)
+        for _ in range(3):
+            try:
+                os.mkdir(self.path)
+            except FileExistsError:
+                if not self._stale():
+                    owner = _read_json(os.path.join(self.path, "owner.json"), {}) or {}
+                    raise DrainBusy(f"drain writer already active: {owner}")
+                stale = self.path + f".stale-{time.time_ns()}"
+                try:
+                    os.rename(self.path, stale)
+                except (FileNotFoundError, FileExistsError):
+                    continue
+                shutil.rmtree(stale, ignore_errors=True)
+                continue
+            _atomic_json(os.path.join(self.path, "owner.json"), {
+                "token": self.token, "host": socket.gethostname(), "pid": os.getpid(),
+                "started": time.time(),
+            })
+            return self
+        raise DrainBusy("could not acquire drain writer lease")
+
+    def __exit__(self, exc_type, exc, tb):
+        owner = _read_json(os.path.join(self.path, "owner.json"), {}) or {}
+        if owner.get("token") == self.token:
+            shutil.rmtree(self.path, ignore_errors=True)
+
+
+def _seen_content_hashes(kb):
+    seen = set()
+    root = _receipt_home(kb)
+    if not os.path.isdir(root):
+        return seen
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".json"):
+            continue
+        receipt = _read_json(os.path.join(root, name), {}) or {}
+        for event in receipt.get("events", []):
+            if event.get("content_hash"):
+                seen.add(event["content_hash"])
+    return seen
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _write_manifest(path, manifest, status=None):
+    if status:
+        manifest["status"] = status
+    manifest["updated_at"] = _utc_now()
+    _atomic_json(path, manifest)
+
+
+def _discover_incomplete(kb):
+    root = _tx_home(kb)
+    if not os.path.isdir(root):
+        return None
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name, "transaction.json")
+        manifest = _read_json(path)
+        if manifest and manifest.get("status") != "committed":
+            return path, manifest
+    return None
+
+
+def _incomplete_transaction_summaries(kb):
+    summaries = []
+    root = _tx_home(kb)
+    if not os.path.isdir(root):
+        return summaries
+    for name in sorted(os.listdir(root)):
+        manifest = _read_json(os.path.join(root, name, "transaction.json"))
+        if manifest and manifest.get("status") != "committed":
+            summaries.append({
+                "id": manifest.get("transaction_id", name),
+                "status": manifest.get("status"),
+                "campaign_id": manifest.get("campaign_id"),
+                "events": len(manifest.get("events", [])),
+                "batch_hash": manifest.get("batch_hash"),
+            })
+    return summaries
+
+
+def _archive_event(kb, event, source):
+    """Move a claimed event to the legacy *.json.drained archive, idempotently."""
+    original = event["source"]
+    primary = os.path.join(kb.inbox, original + ".drained")
+    candidates = [primary]
+    stem = original[:-5] if original.endswith(".json") else original
+    candidates.append(os.path.join(kb.inbox,
+                      f"{stem}-{event['content_hash'].split(':')[-1][:12]}.json.drained"))
+    for dest in candidates:
+        if os.path.isfile(dest) and _content_hash(open(dest, "rb").read()) == event["content_hash"]:
+            if os.path.exists(source):
+                os.unlink(source)
+            return dest
+    if not os.path.exists(source):
+        return next((d for d in candidates if os.path.exists(d)), primary)
+    dest = primary if not os.path.exists(primary) else candidates[1]
+    os.replace(source, dest)
+    return dest
+
+
+def _claim_batch(kb, a):
+    os.makedirs(kb.inbox, exist_ok=True)
+    pending = [os.path.join(kb.inbox, name) for name in sorted(os.listdir(kb.inbox))
+               if name.endswith(".json") and os.path.isfile(os.path.join(kb.inbox, name))]
+    if not pending:
+        return None, None, None
+    events = [_event_from_path(path) for path in pending]
+    seen = _seen_content_hashes(kb)
+    for event in events:
+        event["duplicate_content"] = event["content_hash"] in seen
+        seen.add(event["content_hash"])  # dedupe two byte-different copies inside this same claim
+    batch_hash = _sha256_bytes(json.dumps([e["event_hash"] for e in events],
+                               sort_keys=True, separators=(",", ":")).encode())
+    txid = "tx-" + batch_hash.split(":")[-1][:20]
+    receipt_path = os.path.join(_receipt_home(kb), txid + ".json")
+    if os.path.isfile(receipt_path):
+        for event, source in zip(events, pending):
+            _archive_event(kb, event, source)
+        receipt = _read_json(receipt_path, {}) or {}
+        receipt = dict(receipt)
+        receipt["idempotent_replay"] = True
+        receipt["reason"] = "the same event batch already committed"
+        return None, None, receipt
+
+    txdir = os.path.join(_tx_home(kb), txid)
+    claim_dir = os.path.join(txdir, "claimed")
+    os.makedirs(claim_dir, exist_ok=True)
+    for event in events:
+        event["claim"] = os.path.join("claimed", event["source"])
+    manifest = {
+        "schema_version": TX_SCHEMA, "transaction_id": txid, "status": "claiming",
+        "campaign_id": getattr(a, "campaign_id", "") or "manual",
+        "boundary": getattr(a, "boundary", "") or "manual",
+        "holdout_receipt": getattr(a, "holdout_receipt", "") or None,
+        "batch_hash": batch_hash, "validated_runs": a.validated_runs,
+        "created_at": _utc_now(),
+        "events": events,
+    }
+    manifest_path = os.path.join(txdir, "transaction.json")
+    _write_manifest(manifest_path, manifest)
+    for event in events:
+        source = os.path.join(kb.inbox, event["source"])
+        claimed = os.path.join(txdir, event["claim"])
+        if os.path.exists(claimed):
+            continue
+        if not os.path.exists(source):
+            raise RuntimeError(f"batch claim lost event {event['source']}")
+        os.replace(source, claimed)
+    _write_manifest(manifest_path, manifest, "claimed")
+    return manifest_path, manifest, None
+
+
+def _finish_claim(kb, manifest_path, manifest):
+    txdir = os.path.dirname(manifest_path)
+    for event in manifest["events"]:
+        claimed = os.path.join(txdir, event["claim"])
+        source = os.path.join(kb.inbox, event["source"])
+        if os.path.exists(claimed):
+            continue
+        if os.path.exists(source):
+            os.replace(source, claimed)
+            continue
+        raise RuntimeError(f"cannot resume claim for {event['source']}: source and claim both absent")
+    _write_manifest(manifest_path, manifest, "claimed")
+
+
+def _trigger_failpoint(a, phase):
+    selected = getattr(a, "failpoint", "") or os.environ.get("KB_DRAIN_FAILPOINT", "")
+    if selected == "hard_" + phase:
+        os._exit(91)  # test-only hard crash: exercises stale lease + publishing recovery
+    if selected == phase:
+        raise RuntimeError(f"injected drain failure at {phase}")
+
+
+def _stage_transaction(kb, a, manifest_path, manifest):
+    txdir = os.path.dirname(manifest_path)
+    stage_container = os.path.join(txdir, "stage")
+    stage = os.path.join(stage_container, os.path.basename(kb.root.rstrip(os.sep)) or "learned")
+    if os.path.exists(stage_container):
+        shutil.rmtree(stage_container)
+    os.makedirs(os.path.join(stage, "_inbox"), exist_ok=True)
+    manifest["stage_relpath"] = os.path.relpath(stage, txdir)
+    for name in sorted(os.listdir(kb.root)):
+        source = os.path.join(kb.root, name)
+        if name.endswith(".md") and os.path.isfile(source):
+            shutil.copy2(source, os.path.join(stage, name))
+    active_events = [e for e in manifest["events"] if not e.get("duplicate_content")]
+    for event in active_events:
+        if event.get("parse_error"):
+            raise ValueError(f"{event['source']} is not valid JSON: {event['parse_error']}")
+        shutil.copy2(os.path.join(txdir, event["claim"]),
+                     os.path.join(stage, "_inbox", event["source"]))
+
+    validated = manifest.get("validated_runs")
+    if validated is None:
+        validated = len(manifest["events"])
+    if active_events:
+        report = _drain_tree(KB(stage), SimpleNamespace(apply=True, validated_runs=validated))
+        report["kb_dir"] = kb.root
+    else:
+        report = {
+            "kb_dir": kb.root, "dry_run": False, "coverage": f"0/{validated} new events",
+            "skipped_proposals": [], "merged": [], "inserted": [], "rejected_cards": [],
+            "demoted_by_citations": [], "evicted": [], "index_lines": len(all_cards(kb)),
+        }
+        with open(os.path.join(stage, "INDEX.md"), "w") as out:
+            out.write(build_index(stage))
+
+    failures = audit_stored_cards(KB(stage))
+    if failures:
+        raise ValueError("staged card lint failed: " + json.dumps(failures, ensure_ascii=False, sort_keys=True))
+    expected_index = build_index(stage)
+    actual_index = open(os.path.join(stage, "INDEX.md")).read()
+    if actual_index != expected_index:
+        raise ValueError("staged INDEX.md does not match staged cards")
+
+    files = []
+    for name in sorted(os.listdir(stage)):
+        staged = os.path.join(stage, name)
+        if not name.endswith(".md") or not os.path.isfile(staged):
+            continue
+        target = os.path.join(kb.root, name)
+        target_hash = _hash_file(staged)
+        base_hash = _hash_file(target)
+        if target_hash != base_hash:
+            files.append({"path": name, "base_hash": base_hash,
+                          "content_hash": target_hash, "bytes": os.path.getsize(staged)})
+    # INDEX is the publication fence: readers of the documented read path see it only after cards.
+    files.sort(key=lambda item: (item["path"] == "INDEX.md", item["path"]))
+    backup = os.path.join(txdir, "backup")
+    if os.path.exists(backup):
+        shutil.rmtree(backup)
+    os.makedirs(backup, exist_ok=True)
+    for item in files:
+        target = os.path.join(kb.root, item["path"])
+        if item["base_hash"] is not None:
+            shutil.copy2(target, os.path.join(backup, item["path"]))
+            if _hash_file(os.path.join(backup, item["path"])) != item["base_hash"]:
+                raise RuntimeError(f"could not snapshot publication base: {item['path']}")
+    manifest["report"] = report
+    manifest["stage_validation"] = {
+        "cards_audited": len(all_cards(KB(stage), include_archived=True)),
+        "cards_failing": 0, "index_digest": _hash_file(os.path.join(stage, "INDEX.md")),
+    }
+    manifest["publish_files"] = files
+    manifest["published"] = []
+    _write_manifest(manifest_path, manifest, "staged")
+
+
+def _rollback_publish(kb, manifest_path, manifest):
+    """Restore the pre-publication tree after an interrupted multi-file commit."""
+    txdir = os.path.dirname(manifest_path)
+    backup = os.path.join(txdir, "backup")
+    for item in reversed(manifest.get("publish_files", [])):
+        target = os.path.join(kb.root, item["path"])
+        current = _hash_file(target)
+        if current == item.get("base_hash"):
+            continue
+        if current != item.get("content_hash"):
+            raise RuntimeError(f"cannot roll back externally changed file: {item['path']}")
+        if item.get("base_hash") is None:
+            os.unlink(target)
+        else:
+            source = os.path.join(backup, item["path"])
+            if _hash_file(source) != item["base_hash"]:
+                raise RuntimeError(f"publication backup is corrupt: {item['path']}")
+            _atomic_write_bytes(target, open(source, "rb").read())
+    manifest["published"] = []
+    _write_manifest(manifest_path, manifest, "staged")
+
+
+def _publish_transaction(kb, a, manifest_path, manifest):
+    txdir = os.path.dirname(manifest_path)
+    stage = os.path.join(txdir, manifest.get("stage_relpath", "stage"))
+    _write_manifest(manifest_path, manifest, "publishing")
+    published = set(manifest.get("published", []))
+    first = True
+    try:
+        for item in manifest.get("publish_files", []):
+            name = item["path"]
+            source = os.path.join(stage, name)
+            target = os.path.join(kb.root, name)
+            if _hash_file(source) != item["content_hash"]:
+                raise RuntimeError(f"staged content changed before publish: {name}")
+            current = _hash_file(target)
+            if current != item["content_hash"]:
+                if current != item.get("base_hash"):
+                    raise RuntimeError(f"live file changed outside transaction: {name}")
+                _atomic_write_bytes(target, open(source, "rb").read())
+            if _hash_file(target) != item["content_hash"]:
+                raise RuntimeError(f"atomic publish verification failed: {name}")
+            if name not in published:
+                manifest.setdefault("published", []).append(name)
+                published.add(name)
+                _write_manifest(manifest_path, manifest, "publishing")
+            if first:
+                first = False
+                _trigger_failpoint(a, "after_first_publish")
+    except Exception:
+        _rollback_publish(kb, manifest_path, manifest)
+        raise
+    _write_manifest(manifest_path, manifest, "published")
+
+
+def _commit_transaction(kb, manifest_path, manifest):
+    txdir = os.path.dirname(manifest_path)
+    archived = []
+    for event in manifest["events"]:
+        dest = _archive_event(kb, event, os.path.join(txdir, event["claim"]))
+        archived.append(os.path.relpath(dest, kb.root))
+    receipt_path = os.path.join(_receipt_home(kb), manifest["transaction_id"] + ".json")
+    receipt = _read_json(receipt_path)
+    if receipt:
+        if (receipt.get("transaction_id") != manifest["transaction_id"]
+                or receipt.get("batch_hash") != manifest["batch_hash"]):
+            raise RuntimeError("existing transaction receipt conflicts with the publishing batch")
+    else:
+        receipt = {
+            "schema_version": TX_SCHEMA, "transaction_id": manifest["transaction_id"],
+            "status": "committed", "campaign_id": manifest.get("campaign_id"),
+            "boundary": manifest.get("boundary"), "holdout_receipt": manifest.get("holdout_receipt"),
+            "batch_hash": manifest["batch_hash"], "events": manifest["events"],
+            "archived_events": archived, "stage_validation": manifest.get("stage_validation", {}),
+            "published_files": manifest.get("publish_files", []), "report": manifest.get("report", {}),
+            "committed_at": _utc_now(),
+        }
+        receipt["digest"] = _sha256_bytes(json.dumps(receipt, sort_keys=True,
+                                          separators=(",", ":")).encode())
+        _atomic_json(receipt_path, receipt)
+    manifest["receipt"] = os.path.relpath(receipt_path, kb.root)
+    manifest["receipt_digest"] = receipt["digest"]
+    _write_manifest(manifest_path, manifest, "committed")
+    shutil.rmtree(os.path.join(txdir, "stage"), ignore_errors=True)
+    output = dict(manifest.get("report", {}))
+    output["transaction"] = {
+        "id": manifest["transaction_id"], "status": "committed",
+        "batch_hash": manifest["batch_hash"], "receipt": receipt_path,
+        "digest": receipt["digest"], "events": len(manifest["events"]),
+        "published_files": [x["path"] for x in manifest.get("publish_files", [])],
+    }
+    return output
+
+
+def _run_transaction(kb, a):
+    found = _discover_incomplete(kb)
+    replay = None
+    if found:
+        manifest_path, manifest = found
+    else:
+        manifest_path, manifest, replay = _claim_batch(kb, a)
+        if replay is not None:
+            return replay
+        if manifest is None:
+            return {
+                "kb_dir": kb.root, "dry_run": False, "status": "noop",
+                "reason": "no pending events", "transaction": None,
+            }
+    if manifest.get("status") == "claiming":
+        _finish_claim(kb, manifest_path, manifest)
+    if manifest.get("status") == "publishing":
+        _rollback_publish(kb, manifest_path, manifest)
+    _trigger_failpoint(a, "after_claim")
+    if manifest.get("status") in ("claiming", "claimed"):
+        _stage_transaction(kb, a, manifest_path, manifest)
+    _trigger_failpoint(a, "after_stage")
+    if manifest.get("status") in ("staged", "publishing"):
+        _publish_transaction(kb, a, manifest_path, manifest)
+    _trigger_failpoint(a, "after_publish")
+    if manifest.get("status") == "published":
+        return _commit_transaction(kb, manifest_path, manifest)
+    if manifest.get("status") == "committed":
+        receipt = _read_json(os.path.join(_receipt_home(kb),
+                             manifest["transaction_id"] + ".json"), {}) or {}
+        receipt["idempotent_replay"] = True
+        return receipt
+    raise RuntimeError(f"unknown transaction state {manifest.get('status')!r}")
+
+
+def cmd_drain(kb, a):
+    if not a.apply:
+        report = _drain_tree(kb, a)
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    try:
+        with DrainLock(kb, getattr(a, "stale_lock_seconds", 21600)):
+            result = _run_transaction(kb, a)
+    except DrainBusy as exc:
+        print(json.dumps({"status": "busy", "reason": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 73
+    except Exception as exc:
+        print(json.dumps({"status": "incomplete", "reason": str(exc),
+                          "resume": "rerun the same drain command; the manifest is idempotent"},
+                         ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        return 70
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
+
+def cmd_campaign_boundary(kb, a):
+    """Explicit integration hook: drain only between campaigns, after holdout freeze."""
+    a.campaign_id = a.campaign_id.strip()
+    if not a.campaign_id:
+        print("campaign-boundary requires a non-empty --campaign-id", file=sys.stderr)
+        return 2
+    if a.apply and not str(a.holdout_receipt or "").strip():
+        print("campaign-boundary --apply requires --holdout-receipt from the frozen holdout",
+              file=sys.stderr)
+        return 2
+    return cmd_drain(kb, a)
 
 def cmd_doctor(kb, a):
     """Make rot visible. Silent no-match is the most likely way this whole thing dies."""
@@ -1165,8 +1855,9 @@ def cmd_doctor(kb, a):
         "unreachable_keys": [base(c) for c in cs if UNMATCHED in c["meta"].get("key", "")],
         "inbox_pending": len([f for f in os.listdir(kb.inbox) if f.endswith(".json")])
                          if os.path.isdir(kb.inbox) else 0,
+        "incomplete_transactions": _incomplete_transaction_summaries(kb),
     }
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 def cmd_stats(kb, a):
@@ -1180,7 +1871,8 @@ def cmd_stats(kb, a):
         "total_losses": sum(int(c["meta"].get("losses", 0)) for c in cs),
         "inbox_pending": len([f for f in os.listdir(kb.inbox) if f.endswith(".json")])
                          if os.path.isdir(kb.inbox) else 0,
-    }, ensure_ascii=False, indent=2))
+        "incomplete_transactions": _incomplete_transaction_summaries(kb),
+    }, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 def main():
@@ -1193,6 +1885,7 @@ def main():
 
     m = sub.add_parser("match"); m.set_defaults(fn=cmd_match)
     m.add_argument("--operator", default=""); m.add_argument("--language", default="")
+    m.add_argument("--dtype", default="")
     m.add_argument("--device", default=""); m.add_argument("--regime", default="")
     m.add_argument("--kernel-name", dest="kernel_name", default="")
     m.add_argument("--max", type=int, default=3)
@@ -1210,6 +1903,26 @@ def main():
     d.add_argument("--apply", action="store_true", help="without this it is a dry run")
     d.add_argument("--validated-runs", type=int, default=None,
                    help="denominator for the coverage line")
+    d.add_argument("--campaign-id", default="", help="campaign receipt identity")
+    d.add_argument("--boundary", default="manual",
+                   help="why this is safely between campaigns")
+    d.add_argument("--holdout-receipt", default="",
+                   help="receipt proving the holdout was frozen before migration")
+    d.add_argument("--stale-lock-seconds", type=int, default=21600,
+                   help="cross-host writer lease age after which recovery is allowed")
+    d.add_argument("--failpoint", default="", help=argparse.SUPPRESS)
+
+    cb = sub.add_parser("campaign-boundary",
+                        help="transactional drain hook for an orchestrator between campaigns")
+    cb.set_defaults(fn=cmd_campaign_boundary)
+    cb.add_argument("--campaign-id", required=True)
+    cb.add_argument("--boundary", choices=("pre-campaign", "post-campaign"),
+                    default="post-campaign")
+    cb.add_argument("--holdout-receipt", default="")
+    cb.add_argument("--validated-runs", type=int, default=None)
+    cb.add_argument("--apply", action="store_true")
+    cb.add_argument("--stale-lock-seconds", type=int, default=21600)
+    cb.add_argument("--failpoint", default="", help=argparse.SUPPRESS)
 
     ix = sub.add_parser("index", help="regenerate INDEX.md from the cards — the ONLY writer of it")
     ix.set_defaults(fn=cmd_index)

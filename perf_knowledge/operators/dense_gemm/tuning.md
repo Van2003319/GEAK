@@ -21,8 +21,10 @@ sources:
 ## TL;DR
 The only tuning lever that engages the **live** sglang/vllm GEMM path is **aiter's per-shape DB**
 (see [backends/aiter.md](backends/aiter.md)); everything below is the knob space that aiter/CK/triton
-search over. Defaults worth burning into any hand kernel: **`mfma_16x16` over `32x32`**, **≥1024
-workgroups**, **8-multiple tiles** (XCD/L2 friendliness), `OPTIMIZE_EPILOGUE=1` to dodge the 512B Tagram hotspot.
+search over. Defaults worth testing in a hand kernel are **`mfma_16x16` against `32x32`**, tile
+multiples compatible with the layout/XCD mapping, and `OPTIMIZE_EPILOGUE=1` where the backend exposes
+that CShuffle path. Launch geometry is not a universal constant: derive it from the decomposition and
+the measured bound class; **≥1024 workgroups is not a blanket requirement**.
 
 ## What dominates time
 Prefill GEMMs (large M) are compute-bound; the win is keeping all 304 CUs busy at high MFMA occupancy.
@@ -51,18 +53,47 @@ The 8-wave ping-pong and 4-wave interleave scheduling patterns both **originate 
 ## Knob space (per backend, what the tuners search)
 - **MFMA instruction**: `mfma_16x16x16` usually beats `mfma_32x32x8` on MI300X for LLM N/K (better
   occupancy / less register pressure). In triton this is `matrix_instr_nonkdim=16`.
-- **Tile (BLOCK_M/N/K)**: keep N/M tiles **multiples of 8**; common winners 128×128×64, 256×128×64,
-  256×256×64. Decode (skinny M) → small BLOCK_M (16/32) + larger SPLIT_K.
-- **Workgroup count ≥1024**: ensures every XCD/CU is fed; sub-1024 leaves CUs idle on prefill shapes.
+- **Tile (BLOCK_M/N/K)**: layout-compatible multiples (often 8 on the indexed dimensions) are a
+  useful starting set; common candidates are 128×128×64, 256×128×64 and 256×256×64. Decode
+  (skinny M) may justify small BLOCK_M (16/32) plus a reduction decomposition. Non-power-of-two tile,
+  split, or grid values are **allowed candidates** when they remove a divisibility/tail/topology loss;
+  they are not general winners and must be raced against neighboring power-of-two values.
+- **Workgroup/grid construction**: first identify the mechanism. A fixed-output tile-parallel GEMM has
+  `ceil(M/BM) * ceil(N/BN)` independent workgroups; manufacturing more requires smaller tiles or a
+  reduction and may lose reuse/MFMA efficiency. A persistent tile kernel launches a bounded resident
+  grid and grid-strides over **whole output tiles**. Stream-K instead grid-strides a flattened
+  tile×K-iteration space and can require partial-tile fix-up. Uniform split-K gives every output tile
+  the same K partitions and pays a reduction. These are different mechanisms, not spellings of one
+  “more workgroups” rule.
 - **XCD/L2 placement**: distribute workgroups that share data onto the **same XCD** to cut cross-die
   L2 traffic and stabilize timing.
-- **SPLIT_K / Stream-K**: essential for skinny decode M and tall-K reduction shapes →
+- **SPLIT_K / Stream-K / persistent grid-stride**: candidates for a measured machine-fill or
+  wave-quantization deficit, not defaults for every skinny or tall-K shape →
   see [[operators/splitk_streamk_gemm/overview.md]].
 - **waves_per_eu / num_stages / num_warps** (triton): raise stages for K-deep prefill; lower
   waves_per_eu if register-spilling.
 - **b_preshuffle**: pre-permute B to the MFMA-native layout to kill the LDS shuffle on the hot path
   (part of aiter's lookup key as `bpreshuffle`).
 - **`OPTIMIZE_EPILOGUE=1`**: routes the C write-out away from the 512B Tagram hotspot (CShuffle path).
+
+## Grid size is conditional on the bound class
+- **Fixed-output tile-parallel**: preserve one owner per output tile when the natural tile grid already
+  supplies enough resident waves. A grid below 1024 can still be optimal when MFMA efficiency, operand
+  reuse, or reduction/output traffic is the binding term; compare active waves/CU and tail occupancy,
+  not a raw threshold.
+- **Persistent tile grid-stride**: choose a resident grid near the useful residency of the target part,
+  then let each workgroup consume multiple complete output tiles. This attacks launch/tail overhead and
+  does not, by itself, parallelize one tile's K reduction.
+- **Persistent Stream-K**: distribute contiguous MAC-iteration ranges over a bounded grid. It attacks
+  load imbalance/wave quantization, but partial tiles and their fix-up are part of the cost model.
+- **Uniform split-K**: multiply work by a common K partition count and reduce partial outputs. It can fill
+  a genuinely underoccupied grid, but the extra operand rereads, atomics/workspace and finalize pass can
+  dominate even when occupancy rises.
+
+Classify the current case before selecting among them: compute/MFMA-bound cases protect tile efficiency;
+memory-bound cases protect reuse and bytes; reduction-bound cases avoid more partials; launch-bound cases
+may favor a bounded persistent grid. A workgroup-count observation is evidence only for the body, shape,
+dtype, toolchain and protocol that produced it. Re-measure after any of those changes.
 
 ## How to tune (the live lever)
 1. Capture real shapes with `AITER_TUNE_GEMM=1` on a warm server (bias must match live calls).
@@ -77,7 +108,8 @@ Full recipe in [backends/aiter.md](backends/aiter.md). Validated **+2.23% e2e** 
 - Presenting theoretical peak as a target; the real bar is the best tuned library kernel.
 
 ## Sources
-- MI300X levers (mfma_16x16, ≥1024 WGs, 8-multiple tiles, XCD placement, Tagram): ROCm workload guide.
+- MI300X candidate levers (mfma shape, grid sizing, layout-compatible tile multiples, XCD placement,
+  Tagram): ROCm workload guide. Grid and tile values remain shape/decomposition-specific candidates.
 - bf16/fp8 peak-utilization ceilings; ~45% MI300X sustained (third-party, narrowing): ScalarLM bench + arXiv 2510.27583 (cited in numerics.md).
 - Live tuning recipe + +2.23%: `ROCm/aiter@HEAD`, perf_knowledge e2e run 2026-06-08 (see backends/aiter.md).
 - HIP/C++ 8-wave ping-pong FP8 2680@4096 / 3204@8192 (>hipBLASLt 3130, no asm), MI355X ROCm 7.1: AMD CDNA4 GEMM blog + 4-wave interleave blog (cdna4-gemm-kernels, 4wave-fp8gemm).
