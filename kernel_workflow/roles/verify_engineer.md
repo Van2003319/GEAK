@@ -468,9 +468,10 @@ absolute per-case selected-metric execution times. The script trusts only your n
 7. **Prepare deterministic candidate/incumbent roots for the paired producer.** The candidate
    root is exactly `$VERIFY_DIR/candidate` from step 1. Build an untouched control at exactly
    `$VERIFY_DIR/incumbent` by the same symlink-preserving, build-excluding tar copy from `CANONICAL`.
-   Never apply the candidate patch there. If that control contains `asm_tuner_selection.json`, read
-   its exact `registry_id` and run `config_search materialize` for that id under gpu_lock + gpu_fence
-   in the control workspace before it is built or timed; never substitute the candidate's id. Verify
+   Never apply the candidate patch there. If that control contains the tracked asm_tuner
+   registry/table/selection trio, read its selection's exact `registry_id` and run
+   `config_search materialize` for that id under gpu_lock + gpu_fence in the control workspace before
+   it is built or timed; never substitute the candidate's id. Verify
    the control's runtime-table, artifact, generated-source, task, and measurement-protocol hashes in
    place. In `ASM_TUNER_MODE=required`, a missing selection, failed materialization, or hash mismatch
    fails closed instead of timing a canonical fallback. The candidate remains governed by step 1b's

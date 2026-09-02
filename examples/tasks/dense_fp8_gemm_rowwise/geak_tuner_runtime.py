@@ -19,7 +19,8 @@ _TABLE_SCHEMA = "geak.runtime_table/v2"
 _EXPECTED_SCORE_METRIC_ID = "sustained_throughput"
 _EXPECTED_SCORE_METRIC_INNER = 16
 _TASK_ROOT = Path(__file__).resolve().parent
-_TABLE_PATH = _TASK_ROOT / ".geak_tuner" / "runtime_table.json"
+_TABLE_RELATIVE_PATH = "asm_tuner_runtime_table.json"
+_TABLE_PATH = _TASK_ROOT / _TABLE_RELATIVE_PATH
 _LIBRARIES: Dict[str, Any] = {}
 _TABLE: Optional[Mapping[str, Any]] = None
 _TABLE_LOADED = False
@@ -101,8 +102,13 @@ def _load_table() -> Optional[Mapping[str, Any]]:
         raise TunerDispatchError("runtime table route set is incomplete")
     task = value.get("task") or {}
     semantic = task.get("semantic_hashes") or {}
-    if not semantic:
-        raise TunerDispatchError("runtime table has no canonical semantic hashes")
+    binding = task.get("binding_hashes") or {}
+    source_digest = hashlib.sha256(_canonical({
+        "semantic_hashes": semantic,
+        "binding_hashes": binding,
+    })).hexdigest()
+    if (not semantic or not binding or task.get("source_digest") != source_digest):
+        raise TunerDispatchError("runtime table has no valid canonical source digest")
     for relative, expected in semantic.items():
         path = (_TASK_ROOT / relative).resolve()
         if not _within(path, _TASK_ROOT) or not path.is_file() or _sha256(path) != expected:

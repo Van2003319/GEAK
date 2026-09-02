@@ -60,10 +60,12 @@ Every combined or hand-written result is a new candidate and must be independent
    re-run correctness and only then benchmark. Without it every arm you time is the source-compiled
    program and the whole comparison is between identical binaries.
 
-1c. **A config selection is executable candidate state.** In `ASM_TUNER_MODE=required`, never
-   combine two `asm_tuner_selection.json` files textually. Choose the registry id belonging to the
-   best parent in the stack; if another parent's mechanism requires a different release, test that
-   as a separate stack. After applying each stack, run `config_search materialize` for that exact id,
+1c. **A config selection is executable candidate state.** In `ASM_TUNER_MODE=required`, treat
+   `asm_tuner_registry.json`, `asm_tuner_runtime_table.json`, and `asm_tuner_selection.json` as one
+   hash-bound unit; never combine files from different parents textually. Choose the registry id
+   belonging to the best parent in the stack; if another parent's mechanism requires a different
+   release, test that as a separate stack. After applying each stack, run `config_search materialize`
+   for that exact id,
    then `verify-materialization --rebuild --in-place`, then `smoke`, all under `gpu_lock.sh` plus
    `gpu_fence_run.sh`, exactly as verify_engineer does. A mismatch or missing id rejects that stack.
    Return the three verbatim objects as

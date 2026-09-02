@@ -4,7 +4,9 @@
 Consumers may select only hash-valid, precompiled registry entries.  Creating a new configuration
 also goes through this capability: it executes an argv array without a shell, validates that the
 artifact stays inside the authorised workspace, hashes it, and atomically registers the receipt.
-There is intentionally no phase argument or phase lock.
+Canonical asm releases publish a tracked task-root registry/table/selection contract while keeping
+content-addressed release bytes and receipts below the ignored ``.geak_tuner`` directory.  There is
+intentionally no phase argument or phase lock.
 """
 from __future__ import annotations
 
@@ -42,6 +44,8 @@ from asm_tuner.integration import (
 SCHEMA = "geak.config-search/v2"
 LEGACY_SCHEMA = "geak.config-search/v1"
 SCHEMA_VERSION = 2
+LAUNCH_CONTRACT_SCHEMA = "geak.asm-launch-contract/v1"
+ARTIFACT_SET_SCHEMA = "geak.asm-artifact-set/v1"
 
 
 class ConfigSearchError(RuntimeError):
@@ -103,10 +107,37 @@ def _registry_path(value: os.PathLike[str] | str) -> Path:
     return path / "registry.json" if path.suffix.lower() != ".json" else path
 
 
+def _registry_state_root(registry: Path) -> Path:
+    if registry.name == "asm_tuner_registry.json":
+        return registry.parent / ".geak_tuner" / "config_search"
+    return registry.parent
+
+
+def _entry_path(registry: Path, value: object) -> Path:
+    path = Path(str(value or ""))
+    return path if path.is_absolute() else registry.parent / path
+
+
+def _stored_path(registry: Path, value: os.PathLike[str] | str) -> str:
+    path = Path(value).resolve()
+    try:
+        return path.relative_to(registry.parent.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _canonical_digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
 @contextlib.contextmanager
 def _locked(registry: Path) -> Iterator[None]:
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    with (registry.parent / ".config-search.lock").open("a+b") as lock:
+    state_root = _registry_state_root(registry)
+    state_root.mkdir(parents=True, exist_ok=True)
+    with (state_root / ".config-search.lock").open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -146,7 +177,7 @@ def _config_id(config: Mapping[str, Any], artifact_sha256: str) -> str:
     return "cfg-" + hashlib.sha256(encoded + b"\0" + artifact_sha256.encode()).hexdigest()[:20]
 
 
-def _entry_valid(entry: Mapping[str, Any]) -> tuple[bool, str]:
+def _entry_valid(entry: Mapping[str, Any], registry: Path) -> tuple[bool, str]:
     if entry.get("precompiled") is not True:
         return False, "not_precompiled"
     if entry.get("status") != "ready":
@@ -179,7 +210,7 @@ def _entry_valid(entry: Mapping[str, Any]) -> tuple[bool, str]:
                 or metric.get("id") != config.get("score_metric_id")
                 or metric.get("inner") != config.get("score_metric_inner")):
             return False, "score_metric_binding_missing_or_stale"
-    artifact = Path(str(entry.get("artifact") or ""))
+    artifact = _entry_path(registry, entry.get("artifact"))
     if not _regular(artifact):
         return False, "artifact_missing"
     actual = _sha256(artifact)
@@ -189,7 +220,7 @@ def _entry_valid(entry: Mapping[str, Any]) -> tuple[bool, str]:
     if not isinstance(artifact_set, list):
         return False, "artifact_set_not_array"
     for row in artifact_set:
-        path = Path(str((row or {}).get("path") or ""))
+        path = _entry_path(registry, (row or {}).get("path"))
         expected = str((row or {}).get("sha256") or "")
         if not _regular(path):
             return False, "nested_artifact_missing(%s)" % path
@@ -219,13 +250,19 @@ def register_config(
         "id": identifier,
         "config": dict(config),
         "mechanism": mechanism,
-        "artifact": str(artifact_path),
+        "artifact": _stored_path(registry_path, artifact_path),
         "artifact_sha256": artifact_hash,
         "precompiled": True,
         "status": "ready",
         "created_unix_ns": now,
         "build_receipt": dict(build_receipt or {}),
-        "artifact_set": [dict(row) for row in (artifact_set or [])],
+        "artifact_set": [
+            {
+                **dict(row),
+                "path": _stored_path(registry_path, str(row.get("path") or "")),
+            }
+            for row in (artifact_set or [])
+        ],
     }
     with _locked(registry_path):
         registry = _load_registry(registry_path)
@@ -233,7 +270,7 @@ def register_config(
         for index, old in enumerate(registry["configs"]):
             if old.get("id") != identifier:
                 continue
-            valid, _ = _entry_valid(old)
+            valid, _ = _entry_valid(old, registry_path)
             if valid:
                 return {"ok": True, "schema": SCHEMA, "created": False, "config": old}
             # The content-addressed id is unchanged, so replace the stale row in place. Appending a
@@ -271,7 +308,7 @@ def search_configs(
         for entry in registry["configs"]:
             if entry.get("status") == "invalidated":
                 continue
-            valid, why = _entry_valid(entry)
+            valid, why = _entry_valid(entry, registry_path)
             if not valid:
                 entry.update({"status": "invalidated", "invalidated_reason": why,
                               "invalidated_unix_ns": time.time_ns()})
@@ -308,7 +345,7 @@ def select_config(
         for entry in registry["configs"]:
             if entry.get("id") != config_id:
                 continue
-            valid, why = _entry_valid(entry)
+            valid, why = _entry_valid(entry, registry_path)
             if not valid:
                 entry.update({"status": "invalidated", "invalidated_reason": why,
                               "invalidated_unix_ns": time.time_ns()})
@@ -384,7 +421,7 @@ def create_config(
         "started_unix_ns": started,
         "finished_unix_ns": time.time_ns(),
     }
-    receipt_dir = _registry_path(registry_value).parent / "receipts"
+    receipt_dir = _registry_state_root(_registry_path(registry_value)) / "receipts"
     receipt_name = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:20]
     receipt_path = receipt_dir / f"create-{receipt_name}-{started}.json"
     _atomic_json(receipt_path, receipt)
@@ -410,14 +447,15 @@ def _require_lane_gpu_boundary() -> None:
 
 
 def _release_artifact_set(release: Mapping[str, Any]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+    unique: dict[tuple[str, str, str], dict[str, str]] = {}
     for artifact in release.get("artifacts") or []:
         for key, hash_key in (("artifact", "artifact_sha256"),
                               ("source", "source_sha256"),
                               ("compile_manifest", "compile_manifest_sha256")):
-            rows.append({"kind": key, "path": str(artifact[key]),
-                         "sha256": str(artifact[hash_key])})
-    return rows
+            row = {"kind": key, "path": str(artifact[key]),
+                   "sha256": str(artifact[hash_key])}
+            unique[(row["kind"], row["path"], row["sha256"])] = row
+    return [unique[key] for key in sorted(unique)]
 
 
 def create_asm_config(
@@ -507,6 +545,233 @@ def search_asm_configs(
     return registered
 
 
+def _materialized_artifact_set(
+    workspace: Path, table: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    unique: dict[tuple[str, str, str], dict[str, str]] = {}
+    for route_id in table.get("suite", {}).get("route_ids") or []:
+        route = (table.get("routes") or {}).get(route_id) or {}
+        for entry in route.get("entries") or []:
+            for kind, path_key, hash_key in (
+                ("artifact", "artifact", "artifact_sha256"),
+                ("source", "source", "source_sha256"),
+                ("compile_manifest", "compile_manifest", "compile_manifest_sha256"),
+            ):
+                raw = Path(str(entry.get(path_key) or ""))
+                expected = str(entry.get(hash_key) or "")
+                if raw.is_absolute() or ".." in raw.parts or len(expected) != 64:
+                    raise ConfigSearchError(
+                        "runtime table has non-portable %s path/hash for %s" % (kind, route_id)
+                    )
+                path = (workspace / raw).resolve()
+                if (not _within(path, workspace) or not _regular(path)
+                        or _sha256(path) != expected):
+                    raise ConfigSearchError(
+                        "runtime table %s is missing or hash-stale for %s" % (kind, route_id)
+                    )
+                row = {"kind": kind, "path": raw.as_posix(), "sha256": expected}
+                unique[(kind, row["path"], expected)] = row
+    if not unique:
+        raise ConfigSearchError("materialized runtime table has no artifact set")
+    return [unique[key] for key in sorted(unique)]
+
+
+def _artifact_set_summary(rows: Sequence[Mapping[str, str]]) -> dict[str, Any]:
+    normalized = [
+        {"kind": str(row["kind"]), "path": str(row["path"]), "sha256": str(row["sha256"])}
+        for row in rows
+    ]
+    kinds: dict[str, int] = {}
+    for row in normalized:
+        kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
+    return {
+        "schema": ARTIFACT_SET_SCHEMA,
+        "count": len(normalized),
+        "kinds": dict(sorted(kinds.items())),
+        "sha256": _canonical_digest(normalized),
+    }
+
+
+def _repo_relative(path: Path, root: Path, label: str) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise ConfigSearchError("%s is outside repository root: %s" % (label, path)) from exc
+
+
+def _publish_launch_registry(
+    source_entry: Mapping[str, Any],
+    contract: TaskContract,
+    *,
+    workspace: Path,
+    materialization: Mapping[str, Any],
+) -> dict[str, Any]:
+    workspace = workspace.resolve()
+    local = TaskContract.load(
+        contract.manifest_path, task_root=workspace, require_oracle_compatible=True,
+    )
+    registry_path = local.materialization_path("registry", task_root=workspace)
+    table_path = local.materialization_path("runtime_table", task_root=workspace)
+    selection_path = local.materialization_path("selection_file", task_root=workspace)
+    table = _read_object(table_path)
+    selection = _read_object(selection_path)
+    artifact_rows = _materialized_artifact_set(workspace, table)
+    artifact_summary = _artifact_set_summary(artifact_rows)
+    table_config_ids = sorted({
+        str(entry.get("config_id") or "")
+        for route in (table.get("routes") or {}).values()
+        for entry in (route.get("entries") or [])
+    })
+    config = dict(source_entry.get("config") or {})
+    if (not table_config_ids or "" in table_config_ids
+            or table_config_ids != sorted(set(config.get("config_ids") or []))):
+        raise ConfigSearchError("selected registry release and runtime-table config sets differ")
+    if (config.get("release_id") != table.get("release_id")
+            or config.get("task_digest") != local.task_digest
+            or config.get("oracle_manifest_sha256") != local.oracle_sha256):
+        raise ConfigSearchError("selected registry release differs from materialized task/table")
+
+    release_manifest = Path(str(materialization.get("release_manifest") or "")).resolve()
+    if not _within(release_manifest, workspace) or not _regular(release_manifest):
+        raise ConfigSearchError("materialized release manifest is outside the task workspace")
+    release_relative = release_manifest.relative_to(workspace).as_posix()
+    release_sha256 = _sha256(release_manifest)
+
+    published_entry = dict(source_entry)
+    published_entry.update({
+        "artifact": release_relative,
+        "artifact_sha256": release_sha256,
+        "artifact_set": artifact_rows,
+        "published_unix_ns": time.time_ns(),
+    })
+    build_receipt = {
+        "schema": "geak.asm-materialized-release/v1",
+        "task": local.task,
+        "task_digest": local.task_digest,
+        "source_digest": local.source_digest,
+        "protocol_hash": local.protocol["hash"],
+        "score_metric": dict(local.score_metric),
+        "oracle_manifest_sha256": local.oracle_sha256,
+        "release_id": table["release_id"],
+        "table_digest": table["table_digest"],
+        "artifact_set_sha256": artifact_summary["sha256"],
+        "search_id": str((table.get("search") or {}).get("search_id") or ""),
+    }
+    published_entry["build_receipt"] = build_receipt
+    valid, reason = _entry_valid(published_entry, registry_path)
+    if not valid:
+        raise ConfigSearchError("cannot publish materialized registry row: %s" % reason)
+
+    consumer_path = contract.repo_root / "kernel_workflow" / "kernel_lane.js"
+    manifest_path = contract.manifest_path
+    loader_relative = local.materialization_relative_path("dispatch_module")
+    loader_path = workspace / loader_relative
+    if not _regular(consumer_path) or not _regular(loader_path):
+        raise ConfigSearchError("workflow consumer or task runtime loader is missing")
+    task_prefix = Path(str(contract.value["task_root"]))
+    launch_contract = {
+        "schema": LAUNCH_CONTRACT_SCHEMA,
+        "task": local.task,
+        "task_digest": local.task_digest,
+        "source_digest": local.source_digest,
+        "protocol": {
+            "schema": local.protocol["schema"],
+            "version": local.protocol["version"],
+            "hash": local.protocol["hash"],
+        },
+        "protocol_hash": local.protocol["hash"],
+        "score_metric": dict(local.score_metric),
+        "score_metric_hash": local.score_metric["hash"],
+        "score_metric_id": local.score_metric_id,
+        "score_metric_inner": local.score_metric_inner,
+        "oracle_manifest_sha256": local.oracle_sha256,
+        "registry_id": str(published_entry["id"]),
+        "release_id": str(table["release_id"]),
+        "registry": str(local.materialization_relative_path("registry")),
+        "runtime_table": str(local.materialization_relative_path("runtime_table")),
+        "runtime_table_path_base": "task_root",
+        "runtime_table_sha256": _sha256(table_path),
+        "selection": {
+            "path": str(local.materialization_relative_path("selection_file")),
+            "path_base": "task_root",
+            "sha256": _sha256(selection_path),
+        },
+        "task_manifest": {
+            "path": _repo_relative(manifest_path, contract.repo_root, "task manifest"),
+            "sha256": _sha256(manifest_path),
+        },
+        "task_runtime_loader": {
+            "path": (task_prefix / loader_relative).as_posix(),
+            "sha256": _sha256(loader_path),
+            "runtime_table": str(local.materialization_relative_path("runtime_table")),
+        },
+        "workflow_consumer": {
+            "path": _repo_relative(consumer_path, contract.repo_root, "workflow consumer"),
+            "sha256": _sha256(consumer_path),
+        },
+        "artifact_set": artifact_summary,
+    }
+    registry = {
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "configs": [published_entry],
+        "launch_contract": launch_contract,
+        "updated_unix_ns": time.time_ns(),
+    }
+    with _locked(registry_path):
+        _atomic_json(registry_path, registry)
+    return {
+        "registry": str(registry_path),
+        "registry_sha256": _sha256(registry_path),
+        "runtime_table": str(table_path),
+        "runtime_table_sha256": launch_contract["runtime_table_sha256"],
+        "selection_file": str(selection_path),
+        "selection_sha256": launch_contract["selection"]["sha256"],
+        "launch_contract": launch_contract,
+        "config": published_entry,
+    }
+
+
+def _write_publication_receipt(
+    workspace: Path,
+    materialization: Mapping[str, Any],
+    publication: Mapping[str, Any],
+) -> dict[str, Any]:
+    core = {
+        "schema": "geak.asm-tracked-publication/v1",
+        "task": publication["launch_contract"]["task"],
+        "task_digest": publication["launch_contract"]["task_digest"],
+        "source_digest": publication["launch_contract"]["source_digest"],
+        "release_id": publication["launch_contract"]["release_id"],
+        "registry_id": publication["launch_contract"]["registry_id"],
+        "protocol_hash": publication["launch_contract"]["protocol_hash"],
+        "score_metric": publication["launch_contract"]["score_metric"],
+        "oracle_manifest_sha256": publication["launch_contract"]["oracle_manifest_sha256"],
+        "artifact_set": publication["launch_contract"]["artifact_set"],
+        "published_files": [
+            {"kind": "registry", "path": publication["registry"],
+             "sha256": publication["registry_sha256"]},
+            {"kind": "runtime_table", "path": publication["runtime_table"],
+             "sha256": publication["runtime_table_sha256"]},
+            {"kind": "selection", "path": publication["selection_file"],
+             "sha256": publication["selection_sha256"]},
+        ],
+        "materialization_receipt": materialization.get("receipt"),
+        "created_unix_ns": time.time_ns(),
+    }
+    receipt_id = _canonical_digest(core)
+    receipt_path = workspace / ".geak_tuner" / "receipts" / (
+        "tracked-publication-%s.json" % receipt_id
+    )
+    value = {**core, "receipt_id": receipt_id}
+    _atomic_json(receipt_path, value)
+    return {
+        **value,
+        "receipt": str(receipt_path),
+        "receipt_sha256": _sha256(receipt_path),
+    }
+
+
 def materialize_asm_config(
     registry_value: os.PathLike[str] | str,
     *,
@@ -514,6 +779,7 @@ def materialize_asm_config(
     task_manifest: os.PathLike[str] | str,
     workspace: os.PathLike[str] | str,
 ) -> dict[str, Any]:
+    source_registry = _registry_path(registry_value)
     selected = select_config(registry_value, config_id=config_id)
     if not selected.get("ok"):
         return selected
@@ -527,17 +793,32 @@ def materialize_asm_config(
             or config.get("score_metric_id") != contract.score_metric_id
             or config.get("score_metric_inner") != contract.score_metric_inner):
         raise ConfigSearchError("selected registry row score metric differs from task contract")
-    release = load_release(Path(entry["artifact"]), contract)
+    release = load_release(_entry_path(source_registry, entry["artifact"]), contract)
+    workspace_path = Path(workspace).resolve()
     receipt = materialize_release(
-        contract, release, workspace=Path(workspace), registry_id=str(entry["id"]),
+        contract, release, workspace=workspace_path, registry_id=str(entry["id"]),
     )
+    publication = _publish_launch_registry(
+        entry, contract, workspace=workspace_path, materialization=receipt,
+    )
+    publication_receipt = _write_publication_receipt(
+        workspace_path, receipt, publication,
+    )
+    receipt = {
+        **receipt,
+        "published_registry": publication["registry"],
+        "published_registry_sha256": publication["registry_sha256"],
+        "publication_receipt": publication_receipt["receipt"],
+        "publication_receipt_sha256": publication_receipt["receipt_sha256"],
+    }
     return {
         "ok": True,
         "schema": SCHEMA,
         "phase_independent": True,
         "selection_contract": "precompiled-hash-valid-canonical-suite-only",
-        "config": dict(entry),
+        "config": publication["config"],
         "materialization": receipt,
+        "publication": publication_receipt,
     }
 
 
@@ -554,7 +835,9 @@ def prepare_asm_config(
     contract = TaskContract.load(Path(task_manifest), require_oracle_compatible=True)
     operations: list[dict[str, Any]] = []
     requested = config_id.strip()
-    selection_file = Path(workspace) / "asm_tuner_selection.json"
+    selection_file = contract.materialization_path(
+        "selection_file", task_root=Path(workspace),
+    )
     if not requested and selection_file.is_file():
         incumbent = _read_object(selection_file)
         if (incumbent.get("task") == contract.task
@@ -597,7 +880,7 @@ def prepare_asm_config(
         if cases:
             created = search_asm_configs(
                 registry_value, task_manifest=task_manifest, cache=cache,
-                output=_registry_path(registry_value).parent / "bootstrap_search",
+                output=Path(cache).resolve().parent / "bootstrap_search",
                 variants=variants, cases=cases, bootstrap=True,
             )
             create_mode = "protocol_v2_generated_halving_bootstrap"

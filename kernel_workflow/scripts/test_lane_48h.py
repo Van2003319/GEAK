@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import asm_tuner.integration as tuner_integration
+from asm_tuner.contracts import TaskContract, sha256_file
 
 SCRIPT = Path(__file__).with_name("lane_48h.py")
 SPEC = importlib.util.spec_from_file_location("lane_48h", SCRIPT)
@@ -23,6 +28,14 @@ L = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = L
 SPEC.loader.exec_module(L)
 ROOT = Path(__file__).resolve().parents[2]
+CONFIG_SEARCH_SCRIPT = Path(__file__).with_name("config_search.py")
+CONFIG_SEARCH_SPEC = importlib.util.spec_from_file_location(
+    "config_search_for_lane_contract_test", CONFIG_SEARCH_SCRIPT,
+)
+assert CONFIG_SEARCH_SPEC and CONFIG_SEARCH_SPEC.loader
+CS = importlib.util.module_from_spec(CONFIG_SEARCH_SPEC)
+sys.modules[CONFIG_SEARCH_SPEC.name] = CS
+CONFIG_SEARCH_SPEC.loader.exec_module(CS)
 
 
 def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -47,14 +60,15 @@ def deadline(now: int = 1_000_000) -> L.Deadline:
 
 def current_spec(lane: str = "bf16", state: Path | None = None) -> L.LaunchSpec:
     task = L.LANES[lane]["task"]
+    task_root = ROOT / "examples" / "tasks" / task
     state = state or ROOT / "exp" / f"test-never-created-{lane}"
     return L.build_spec(
         lane=lane,
         root=ROOT,
         state_dir=state,
         expected_commit="0" * 40,
-        tuner_registry=ROOT / "asm_tuner" / "launch" / task / "registry.json",
-        tuner_table=ROOT / "asm_tuner" / "launch" / task / "runtime_table.json",
+        tuner_registry=task_root / "asm_tuner_registry.json",
+        tuner_table=task_root / "asm_tuner_runtime_table.json",
         deadline=deadline(),
     )
 
@@ -87,6 +101,10 @@ class TemplateContractTest(unittest.TestCase):
             self.assertEqual("off", doc["_require"]["warm_start"])
             self.assertEqual("sustained_throughput", doc["score_metric"])
             self.assertEqual("sustained_throughput", doc["_require"]["score_metric"])
+            self.assertEqual("required", doc["asm_tuner_mode"])
+            self.assertEqual("required", doc["_require"]["asm_tuner_mode"])
+            self.assertEqual("@TUNER_REGISTRY@", doc["tuner_registry"])
+            self.assertEqual("@TUNER_TABLE@", doc["tuner_table"])
             self.assertEqual(L.EXPECTED_SCORE_METRIC,
                              doc["_launch"]["expected_score_metric"])
             self.assertEqual("@STOP_NEW_ROUND_EPOCH@", doc["deadline_epoch"])
@@ -184,90 +202,178 @@ class DeadlineContractTest(unittest.TestCase):
 
 
 class TunerContractTest(unittest.TestCase):
-    def test_registry_and_table_are_cross_bound_to_workflow_and_protocol(self):
+    def test_prepare_tracked_publish_then_preflight_contract(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
+            root = Path(td) / "repo"
+            manifest = ROOT / "asm_tuner/manifests/tasks/dense_bf16_gemm_fused.json"
+            contract = TaskContract.load(manifest, require_oracle_compatible=True)
+            task = root / contract.value["task_root"]
+            shutil.copytree(
+                contract.task_root, task,
+                ignore=shutil.ignore_patterns(
+                    ".geak_tuner", "build", "__pycache__",
+                    "asm_tuner_registry.json", "asm_tuner_runtime_table.json",
+                    "asm_tuner_selection.json",
+                ),
+            )
+            copied_manifest = root / "asm_tuner/manifests/tasks" / manifest.name
+            copied_manifest.parent.mkdir(parents=True)
+            shutil.copy2(manifest, copied_manifest)
+            for dependency_key in ("route_manifest", "search_space_manifest"):
+                relative = Path(str(contract.value[dependency_key]))
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, target)
             consumer = root / "kernel_workflow/kernel_lane.js"
             consumer.parent.mkdir(parents=True)
-            consumer.write_text(
-                "const registry = A.tuner_registry; const table = A.tuner_table;\n"
-                "const bridge = 'asm_tuner runtime_table';\n")
-            artifact = root / "artifacts/kernel.so"
-            artifact.parent.mkdir()
-            artifact.write_bytes(b"ELF-test-artifact")
-            registry = root / "tuner/registry.json"
-            table = root / "tuner/runtime_table.json"
-            registry.parent.mkdir()
-            routes = {f"route_{i}": (i + 1, 64, 64) for i in range(11)}
-            table_doc = {
-                "schema": L.RUNTIME_TABLE_SCHEMA,
-                "task": "dense_bf16_gemm_fused",
-                "protocol_hash": L.EXPECTED_PROTOCOL_HASH,
-                "score_metric": L.EXPECTED_SCORE_METRIC,
-                "revision": 1,
-                "routes": {
-                    name: {
-                        "shape": {"name": name, "m": shape[0], "n": shape[1], "k": shape[2]},
-                        "entries": [{"config_id": "cfg-ready",
-                                     "metric_id": L.EXPECTED_SCORE_METRIC_ID,
-                                     "metric_inner": L.EXPECTED_SCORE_METRIC["inner"]}],
-                    }
-                    for name, shape in routes.items()
-                },
-            }
-            table.write_text(json.dumps(table_doc))
-            registry_doc = {
-                "schema": L.CONFIG_REGISTRY_SCHEMA,
-                "schema_version": 1,
-                "launch_contract": {
-                    "task": "dense_bf16_gemm_fused",
-                    "protocol_hash": L.EXPECTED_PROTOCOL_HASH,
-                    "score_metric": L.EXPECTED_SCORE_METRIC,
-                    "runtime_table": str(table),
-                    "runtime_table_sha256": L.sha256_file(table),
-                    "workflow_consumer": {
-                        "path": str(consumer.relative_to(root)),
-                        "sha256": L.sha256_file(consumer),
+            shutil.copy2(ROOT / "kernel_workflow/kernel_lane.js", consumer)
+            registry = task / "asm_tuner_registry.json"
+            table = task / "asm_tuner_runtime_table.json"
+            base_head = commit_all(root)
+
+            def fake_create(registry_value, **kwargs):
+                cache = task / ".geak_tuner/cache/fake"
+                cache.mkdir(parents=True, exist_ok=True)
+                config = contract.default_config
+                source = cache / "shard.hip"
+                source.write_text("// generated test source\n")
+                artifact = cache / "shard.so"
+                artifact.write_bytes(b"ELF-test-artifact")
+                compile_manifest = cache / "manifest.json"
+                compile_manifest.write_text("{}\n")
+                config_id = config.config_id
+                artifact_row = {
+                    "config_id": config_id,
+                    "config": config.to_dict(include_derived=True),
+                    "kernel": contract.adapter.kernel_name(config),
+                    "symbol": contract.adapter.launch_name(config),
+                    "isa_hash": "a" * 64,
+                    "cache_key": "test-cache",
+                    "compile_manifest": str(compile_manifest),
+                    "compile_manifest_sha256": sha256_file(compile_manifest),
+                    "artifact": str(artifact),
+                    "artifact_sha256": sha256_file(artifact),
+                    "source": str(source),
+                    "source_sha256": sha256_file(source),
+                }
+                release = {
+                    "schema": tuner_integration.RELEASE_SCHEMA,
+                    "task": contract.identity(),
+                    "protocol": dict(contract.protocol),
+                    "score_metric": dict(contract.score_metric),
+                    "oracle": {
+                        "manifest_sha256": contract.oracle_sha256,
+                        "protocol_hash": contract.protocol["hash"],
+                        "compatible": True,
+                        "selection_metric": contract.score_metric_id,
+                        "score_metric": dict(contract.score_metric),
                     },
-                },
-                "configs": [{
-                    "id": "cfg-ready", "precompiled": True, "status": "ready",
-                    "artifact": str(artifact), "artifact_sha256": L.sha256_file(artifact),
-                    "build_receipt": {
-                        "task": "dense_bf16_gemm_fused",
-                        "protocol_hash": L.EXPECTED_PROTOCOL_HASH,
-                        "score_metric": L.EXPECTED_SCORE_METRIC,
+                    "fallback": {"kind": "canonical", "reason": "outside suite"},
+                    "search_space_manifest": contract.value["search_space_manifest"],
+                    "variant": "unit",
+                    "selection_reason": "unit contract",
+                    "route_selection": {
+                        route.name: config_id for route in contract.routes
                     },
-                }],
+                    "route_rankings": {
+                        route.name: [config_id] for route in contract.routes
+                    },
+                    "search": {"search_id": "b" * 64, "compiled_candidates": 1},
+                    "artifacts": [artifact_row],
+                }
+                release["release_id"] = tuner_integration._release_identity(release)
+                release["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                release_manifest = cache / "releases" / release["release_id"] / "release.json"
+                release_manifest.parent.mkdir(parents=True)
+                release_manifest.write_text(json.dumps(release, indent=2, sort_keys=True) + "\n")
+                registry_config = {
+                    "kind": "asm_tuner_release",
+                    "task": contract.task,
+                    "adapter": contract.adapter_name,
+                    "task_digest": contract.task_digest,
+                    "protocol_hash": contract.protocol["hash"],
+                    "score_metric": dict(contract.score_metric),
+                    "score_metric_hash": contract.score_metric["hash"],
+                    "score_metric_id": contract.score_metric_id,
+                    "score_metric_inner": contract.score_metric_inner,
+                    "oracle_manifest_sha256": contract.oracle_sha256,
+                    "release_id": release["release_id"],
+                    "variant": "unit",
+                    "config_ids": [config_id],
+                    "priority": 0,
+                }
+                return CS.register_config(
+                    registry_value, config=registry_config, artifact=release_manifest,
+                    mechanism="unit prepare contract",
+                    artifact_set=CS._release_artifact_set(release),
+                )
+
+            with mock.patch.object(CS, "search_asm_configs", side_effect=fake_create), \
+                 mock.patch.object(CS, "create_asm_config", side_effect=fake_create), \
+                 mock.patch.dict(os.environ, {
+                     "GEAK_GPU_LOCK_HELD": "1", "GEAK_GPU_FENCE_HELD": "1",
+                 }):
+                prepared = CS.prepare_asm_config(
+                    registry, task_manifest=manifest, workspace=task,
+                    cache=task / ".geak_tuner/cache",
+                )
+            self.assertTrue(prepared["ok"])
+            self.assertTrue(prepared["publication"]["receipt"].startswith(str(task / ".geak_tuner")))
+            first_status = git(
+                root, "status", "--short", "--untracked-files=all",
+            ).stdout.splitlines()
+            self.assertEqual({
+                "?? " + str(registry.relative_to(root)),
+                "?? " + str(table.relative_to(root)),
+                "?? " + str((task / "asm_tuner_selection.json").relative_to(root)),
+            }, set(first_status))
+            routes = {
+                route.name: (route.m, route.n, route.k) for route in contract.routes
             }
-            registry.write_text(json.dumps(registry_doc))
-            commit_all(root)
             spec = L.LaunchSpec(
-                lane="bf16", task="dense_bf16_gemm_fused", root=root,
-                state_dir=root / "exp/new", expected_commit="0" * 40,
+                lane="bf16", task=contract.task, root=root,
+                state_dir=root / "exp/new", expected_commit=base_head,
                 template_path=root / "template", allocation_path=root / "allocation",
                 tuner_registry=registry, tuner_table=table, gpu_ids=(2, 3, 4),
                 deadline=deadline(), raw_lane={},
-                args={"tuner_registry": str(registry), "tuner_table": str(table)},
+                args={
+                    "kernel_path": str(task),
+                    "tuner_registry": str(registry),
+                    "tuner_table": str(table),
+                },
                 meta={}, config_sha256="0" * 64,
             )
+            with self.assertRaisesRegex(L.LaunchError, "not tracked"):
+                L.check_tuner(spec, routes)
+            head = commit_all(root)
+            spec = dataclasses.replace(spec, expected_commit=head)
+            self.assertNotIn(".geak_tuner/", git(root, "ls-files").stdout)
             L.check_tuner(spec, routes)
+            registry_text = registry.read_text()
+            registry_doc = json.loads(registry_text)
             registry_doc["launch_contract"]["score_metric"] = {
                 **L.EXPECTED_SCORE_METRIC, "id": "single_call_latency"}
             registry.write_text(json.dumps(registry_doc))
             with self.assertRaises(L.LaunchError) as metric_caught:
                 L.check_tuner(spec, routes)
             self.assertIn("score-metric", str(metric_caught.exception))
-            registry_doc["launch_contract"]["score_metric"] = L.EXPECTED_SCORE_METRIC
-            registry.write_text(json.dumps(registry_doc))
-            table_doc["protocol_hash"] = "stale"
-            table.write_text(json.dumps(table_doc))
-            registry_doc["launch_contract"]["runtime_table_sha256"] = L.sha256_file(table)
-            registry.write_text(json.dumps(registry_doc))
-            with self.assertRaises(L.LaunchError) as caught:
-                L.check_tuner(spec, routes)
-            self.assertEqual(L.EXIT_TUNER, caught.exception.code)
-            self.assertIn("stale protocol", str(caught.exception))
+            registry.write_text(registry_text)
+
+            with mock.patch.dict(os.environ, {
+                    "GEAK_GPU_LOCK_HELD": "1", "GEAK_GPU_FENCE_HELD": "1",
+                 }):
+                updated = CS.prepare_asm_config(
+                    registry, task_manifest=manifest, workspace=task,
+                    cache=task / ".geak_tuner/cache",
+                )
+            self.assertTrue(updated["ok"])
+            status = git(root, "status", "--short", "--untracked-files=all").stdout.splitlines()
+            self.assertEqual({
+                " M " + str(registry.relative_to(root)),
+                " M " + str(table.relative_to(root)),
+                " M " + str((task / "asm_tuner_selection.json").relative_to(root)),
+            }, set(status))
+            self.assertTrue(Path(updated["publication"]["receipt"]).is_file())
 
 
 class LockContractTest(unittest.TestCase):

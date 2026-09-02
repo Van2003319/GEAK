@@ -51,7 +51,13 @@ def test_canonical_tuner_is_materialized_before_baseline_and_refreshed_after_com
     bootstrap = LANE.index("let canonicalTunerPreparation")
     benchmark = LANE.index("PHASE: Benchmark")
     assert bootstrap < benchmark
-    assert "asm_tuner: select canonical suite release" in LANE[bootstrap:benchmark]
+    bootstrap_window = LANE[bootstrap:benchmark]
+    assert "asm_tuner: publish canonical suite contract" in bootstrap_window
+    for published in (
+        "asm_tuner_registry.json", "asm_tuner_runtime_table.json",
+        "asm_tuner_selection.json",
+    ):
+        assert published in bootstrap_window
     commit_refresh = LANE.index("config_search:refresh canonical")
     reprofile = LANE.index("profile_engineer', 'reprofile", commit_refresh)
     assert commit_refresh < reprofile

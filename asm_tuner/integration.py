@@ -719,6 +719,10 @@ def materialize_release(
         raise IntegrationError("workspace semantic task digest differs before materialization")
     validate_release(value, local_contract)
     target, installed = _install_release_files(value, workspace)
+    installed_release = read_object(target / "release.json")
+    validate_release(installed_release, local_contract)
+    if canonical_json(installed_release) != canonical_json(dict(value)):
+        raise IntegrationError("installed release manifest differs from selected registry release")
     by_id = {str(row["config_id"]): row for row in value["artifacts"]}
     for config_id, local_paths in installed.items():
         source_row = by_id[config_id]
@@ -757,6 +761,7 @@ def materialize_release(
             "name": local_contract.task,
             "adapter": local_contract.adapter_name,
             "digest": local_contract.task_digest,
+            "source_digest": local_contract.source_digest,
             "semantic_hashes": dict(local_contract.semantic_hashes),
             "binding_hashes": dict(local_contract.binding_hashes),
         },
@@ -771,17 +776,21 @@ def materialize_release(
         "fallback": value["fallback"],
         "search": dict(value.get("search") or {}),
     }
-    table_path = workspace / ".geak_tuner" / "runtime_table.json"
-    table = RuntimeTableStore(table_path).publish_suite(
+    table_path = local_contract.materialization_path("runtime_table", task_root=workspace)
+    table = RuntimeTableStore(
+        table_path, state_root=workspace / ".geak_tuner" / "runtime_table_state",
+    ).publish_suite(
         local_contract.routes, selections,
         run_id="materialize-%s" % value["release_id"][:16],
-        receipts_root=target,
+        receipts_root=target.relative_to(workspace),
         release=release_context,
     )
+    table_sha256 = sha256_file(table_path)
     selection = {
         "schema": SELECTION_SCHEMA,
         "task": local_contract.task,
         "task_digest": local_contract.task_digest,
+        "source_digest": local_contract.source_digest,
         "release_id": value["release_id"],
         "registry_id": registry_id,
         "protocol_hash": local_contract.protocol["hash"],
@@ -789,12 +798,17 @@ def materialize_release(
         "score_metric_id": local_contract.score_metric_id,
         "score_metric_inner": local_contract.score_metric_inner,
         "oracle_manifest_sha256": local_contract.oracle_sha256,
+        "runtime_table": str(local_contract.materialization_relative_path("runtime_table")),
+        "runtime_table_sha256": table_sha256,
         "table_digest": table["table_digest"],
         "config_ids": sorted({
             config_id for ranking in value["route_rankings"].values() for config_id in ranking
         }),
     }
-    _atomic_json(workspace / "asm_tuner_selection.json", selection)
+    selection_path = local_contract.materialization_path("selection_file", task_root=workspace)
+    _atomic_json(selection_path, selection)
+    selection_sha256 = sha256_file(selection_path)
+    release_manifest_path = target / "release.json"
     receipt = {
         "schema": MATERIALIZATION_SCHEMA,
         "ok": True,
@@ -802,8 +816,10 @@ def materialize_release(
         "release_id": value["release_id"],
         "registry_id": registry_id,
         "runtime_table": str(table_path),
+        "runtime_table_sha256": table_sha256,
         "table_digest": table["table_digest"],
         "task_digest": local_contract.task_digest,
+        "source_digest": local_contract.source_digest,
         "protocol_hash": local_contract.protocol["hash"],
         "score_metric": dict(local_contract.score_metric),
         "score_metric_id": local_contract.score_metric_id,
@@ -811,6 +827,10 @@ def materialize_release(
         "oracle_manifest_sha256": local_contract.oracle_sha256,
         "route_count": len(local_contract.routes),
         "config_ids": selection["config_ids"],
+        "selection_file": str(selection_path),
+        "selection_sha256": selection_sha256,
+        "release_manifest": str(release_manifest_path),
+        "release_manifest_sha256": sha256_file(release_manifest_path),
         "artifacts": [dict(row) for row in installed.values()],
     }
     receipt_path = workspace / ".geak_tuner" / "materialization_receipt.json"
@@ -867,7 +887,10 @@ def _verify_workspace(
     cache_root: Optional[Path],
 ) -> Dict[str, Any]:
     local = TaskContract.load(contract.manifest_path, task_root=workspace, require_oracle_compatible=True)
-    table = RuntimeTableStore(workspace / ".geak_tuner" / "runtime_table.json").load()
+    table = RuntimeTableStore(
+        local.materialization_path("runtime_table", task_root=workspace),
+        state_root=workspace / ".geak_tuner" / "runtime_table_state",
+    ).load()
     if table["task"]["name"] != local.task or table["task"]["digest"] != local.task_digest:
         raise IntegrationError("runtime table task digest differs from independent workspace")
     if table["task"].get("semantic_hashes") != dict(local.semantic_hashes):

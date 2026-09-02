@@ -337,8 +337,9 @@ baseline latencies recorded at benchmark setup).
    git apply "$EVAL_DIR/final_patch.diff"
    # (No artifact cleanup needed — the tar copy excluded build/__pycache__/*.so; git apply adds only source.)
    ```
-2b. When `ASM_TUNER_MODE=required`, the applied final patch must contain
-   `asm_tuner_selection.json`. Read its exact `registry_id`; do not choose another row. Under
+2b. When `ASM_TUNER_MODE=required`, the applied final patch must preserve one coherent tracked
+   `asm_tuner_registry.json` / `asm_tuner_runtime_table.json` / `asm_tuner_selection.json` trio.
+   Read the selection's exact `registry_id`; do not choose another row. Under
    `gpu_lock.sh` + `gpu_fence_run.sh`, run `config_search materialize`, then
    `verify-materialization --rebuild --in-place`, then `smoke` against the validation workspace.
    Save all three JSON receipts under `EVAL_DIR` and return them verbatim as

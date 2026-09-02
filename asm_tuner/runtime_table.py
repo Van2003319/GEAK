@@ -115,8 +115,17 @@ def _validate_v2(value: Mapping[str, Any]) -> None:
     task = value.get("task") or {}
     protocol = value.get("protocol") or {}
     score_metric = value.get("score_metric") or {}
-    if not task.get("name") or len(str(task.get("digest") or "")) != 64:
-        raise RuntimeTableError("runtime table lacks a canonical task digest")
+    semantic_hashes = task.get("semantic_hashes") or {}
+    binding_hashes = task.get("binding_hashes") or {}
+    source_digest = hashlib.sha256(_canonical({
+        "semantic_hashes": semantic_hashes,
+        "binding_hashes": binding_hashes,
+    })).hexdigest()
+    if (not task.get("name") or len(str(task.get("digest") or "")) != 64
+            or not isinstance(semantic_hashes, dict) or not semantic_hashes
+            or not isinstance(binding_hashes, dict) or not binding_hashes
+            or task.get("source_digest") != source_digest):
+        raise RuntimeTableError("runtime table lacks canonical task/source digests")
     if protocol.get("schema") != "geak.measurement-protocol/v2" or len(str(protocol.get("hash") or "")) != 64:
         raise RuntimeTableError("runtime table lacks measurement protocol v2")
     _validate_score_metric(score_metric, protocol)
@@ -163,8 +172,9 @@ class RuntimeTableStore:
     point.  Artifacts are immutable and installed before this method is called.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, state_root: Path | None = None) -> None:
         self.path = Path(path)
+        self.state_root = Path(state_root) if state_root is not None else None
 
     @staticmethod
     def empty() -> Dict[str, Any]:
@@ -215,15 +225,29 @@ class RuntimeTableStore:
         oracle = dict(release.get("oracle") or {})
         fallback = dict(release.get("fallback") or {})
         search = dict(release.get("search") or {})
-        if not task.get("name") or len(str(task.get("digest") or "")) != 64:
-            raise RuntimeTableError("release requires task name and 64-byte digest")
+        semantic_hashes = task.get("semantic_hashes") or {}
+        binding_hashes = task.get("binding_hashes") or {}
+        source_digest = hashlib.sha256(_canonical({
+            "semantic_hashes": semantic_hashes,
+            "binding_hashes": binding_hashes,
+        })).hexdigest()
+        if (not task.get("name") or len(str(task.get("digest") or "")) != 64
+                or not isinstance(semantic_hashes, dict) or not semantic_hashes
+                or not isinstance(binding_hashes, dict) or not binding_hashes
+                or task.get("source_digest") != source_digest):
+            raise RuntimeTableError("release requires task name and 64-byte task/source digests")
         if protocol.get("schema") != "geak.measurement-protocol/v2" or len(str(protocol.get("hash") or "")) != 64:
             raise RuntimeTableError("release requires measurement protocol v2 hash")
         _validate_score_metric(score_metric, protocol)
         if fallback.get("kind") not in ("canonical", "fail_closed"):
             raise RuntimeTableError("release requires an explicit fallback")
 
-        with _lock(self.path.with_suffix(self.path.suffix + ".lock")):
+        lock_path = (
+            self.state_root / "locks" / (self.path.name + ".lock")
+            if self.state_root is not None
+            else self.path.with_suffix(self.path.suffix + ".lock")
+        )
+        with _lock(lock_path):
             previous = self.load() if self.path.exists() else self.empty()
             revision = int(previous.get("revision", 0)) + 1
             now = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -282,7 +306,11 @@ class RuntimeTableStore:
             # The live file is replaced exactly once, after every route and hash is
             # present.  A reader sees the old complete suite or the new one, never a mix.
             _atomic_write(self.path, value)
-            snapshot = self.path.with_name(self.path.name + ".v%d.json" % revision)
+            snapshot = (
+                self.state_root / "snapshots" / (self.path.name + ".v%d.json" % revision)
+                if self.state_root is not None
+                else self.path.with_name(self.path.name + ".v%d.json" % revision)
+            )
             _atomic_write(snapshot, value)
             return value
 

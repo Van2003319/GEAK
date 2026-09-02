@@ -9,6 +9,7 @@ run executes the same preflight and never initializes state.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import datetime as dt
 import fcntl
@@ -35,8 +36,11 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 TEMPLATE_SCHEMA = "geak.lane-template/v1"
 ALLOCATION_SCHEMA = "geak.gpu-allocation/v1"
-CONFIG_REGISTRY_SCHEMA = "geak.config-search/v1"
-RUNTIME_TABLE_SCHEMA = "geak.runtime_table/v1"
+CONFIG_REGISTRY_SCHEMA = "geak.config-search/v2"
+CONFIG_REGISTRY_VERSION = 2
+RUNTIME_TABLE_SCHEMA = "geak.runtime_table/v2"
+LAUNCH_CONTRACT_SCHEMA = "geak.asm-launch-contract/v1"
+ARTIFACT_SET_SCHEMA = "geak.asm-artifact-set/v1"
 BASE_COMMIT = "a9876692ed1039b85b2fdafb8c1751548fd13da1"
 EXPECTED_PROTOCOL_HASH = "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec"
 EXPECTED_SCORE_METRIC_ID = "sustained_throughput"
@@ -248,14 +252,22 @@ def check_git(root: Path, expected_commit: str, base_commit: str = BASE_COMMIT) 
     return head
 
 
-def require_tracked(root: Path, path: Path) -> None:
+def require_tracked(
+    root: Path, path: Path, *, code: int = EXIT_CONFIG, category: str = "config",
+) -> None:
     try:
         rel = path.resolve().relative_to(root.resolve())
     except ValueError as exc:
-        raise LaunchError(f"tracked launch input is outside expected root: {path}") from exc
+        raise LaunchError(
+            f"tracked launch input is outside expected root: {path}",
+            code=code, category=category,
+        ) from exc
     proc = git(root, "ls-files", "--error-unmatch", "--", rel.as_posix(), check=False)
     if proc.returncode:
-        raise LaunchError(f"launch input is not tracked by expected commit: {path}")
+        raise LaunchError(
+            f"launch input is not tracked by expected commit: {path}",
+            code=code, category=category,
+        )
 
 
 def _substitute(value: Any, tokens: Mapping[str, Any]) -> Any:
@@ -600,14 +612,117 @@ def check_oracle_manifest(spec: LaunchSpec) -> dict[str, tuple[int, int, int]]:
     return routes
 
 
-def _artifact_path(registry: Path, value: Any) -> Path:
-    path = Path(str(value or ""))
-    return path if path.is_absolute() else registry.parent / path
+def _relative_contract_path(value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise LaunchError(f"{label} path is missing", code=EXIT_TUNER, category="tuner")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path == Path("."):
+        raise LaunchError(
+            f"{label} path must be root-relative without traversal: {value}",
+            code=EXIT_TUNER, category="tuner",
+        )
+    return path
+
+
+def _root_bound_file(root: Path, base: Path, value: Any, label: str) -> Path:
+    raw = Path(str(value or ""))
+    candidate = raw if raw.is_absolute() else base / raw
+    require_regular(candidate, code=EXIT_TUNER, category="tuner")
+    path = candidate.resolve()
+    if not within(path, root):
+        raise LaunchError(
+            f"{label} is outside expected root: {path}", code=EXIT_TUNER, category="tuner",
+        )
+    return path
+
+
+def _literal_string_assignment(path: Path, name: str) -> str:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError) as exc:
+        raise LaunchError(
+            f"cannot parse task runtime loader: {exc}", code=EXIT_TUNER, category="tuner",
+        ) from exc
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (TypeError, ValueError) as exc:
+            raise LaunchError(
+                f"task runtime loader {name} must be a literal string",
+                code=EXIT_TUNER, category="tuner",
+            ) from exc
+        if isinstance(value, str) and value:
+            return value
+    raise LaunchError(
+        f"task runtime loader does not declare {name}", code=EXIT_TUNER, category="tuner",
+    )
+
+
+def _literal_assignment(path: Path, name: str) -> Any:
+    try:
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text, filename=str(path))
+    except (OSError, SyntaxError) as exc:
+        raise LaunchError(f"cannot parse task binding {path}: {exc}",
+                          code=EXIT_TUNER, category="tuner") from exc
+    for node in tree.body:
+        targets: Sequence[ast.expr] = ()
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = (node.target,)
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            try:
+                return ast.literal_eval(node.value)
+            except (TypeError, ValueError) as exc:
+                raise LaunchError(f"task binding {name} must be a literal",
+                                  code=EXIT_TUNER, category="tuner") from exc
+    raise LaunchError(f"task binding {path}:{name} is missing",
+                      code=EXIT_TUNER, category="tuner")
+
+
+def _function_sha256(path: Path, name: str) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text, filename=str(path))
+    except (OSError, SyntaxError) as exc:
+        raise LaunchError(f"cannot parse task function {path}:{name}: {exc}",
+                          code=EXIT_TUNER, category="tuner") from exc
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            segment = ast.get_source_segment(text, node)
+            if segment is None:
+                lines = text.splitlines(keepends=True)
+                segment = "".join(lines[node.lineno - 1:node.end_lineno])
+            return hashlib.sha256(segment.encode("utf-8")).hexdigest()
+    raise LaunchError(f"task function {path}:{name} is missing",
+                      code=EXIT_TUNER, category="tuner")
+
+
+def _artifact_set_summary(rows: Sequence[Mapping[str, str]]) -> dict[str, Any]:
+    normalized = [
+        {"kind": str(row["kind"]), "path": str(row["path"]), "sha256": str(row["sha256"])}
+        for row in rows
+    ]
+    kinds: dict[str, int] = {}
+    for row in normalized:
+        kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
+    return {
+        "schema": ARTIFACT_SET_SCHEMA,
+        "count": len(normalized),
+        "kinds": dict(sorted(kinds.items())),
+        "sha256": sha256_json(normalized),
+    }
 
 
 def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) -> None:
-    if spec.args.get("tuner_registry") != str(spec.tuner_registry) or \
-            spec.args.get("tuner_table") != str(spec.tuner_table):
+    if (spec.args.get("tuner_registry") != str(spec.tuner_registry)
+            or spec.args.get("tuner_table") != str(spec.tuner_table)):
         raise LaunchError(
             "workflow integration does not accept the exact tuner_registry/tuner_table launch args",
             code=EXIT_TUNER, category="tuner")
@@ -616,49 +731,112 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
             raise LaunchError(f"tuner launch input is outside expected root: {path}",
                               code=EXIT_TUNER, category="tuner")
         require_regular(path, code=EXIT_TUNER, category="tuner")
-        require_tracked(spec.root, path)
+        require_tracked(spec.root, path, code=EXIT_TUNER, category="tuner")
+
     registry = read_json(spec.tuner_registry, code=EXIT_TUNER, category="tuner")
     table = read_json(spec.tuner_table, code=EXIT_TUNER, category="tuner")
-    if registry.get("schema") != CONFIG_REGISTRY_SCHEMA or registry.get("schema_version") != 1:
-        raise LaunchError(f"tuner registry schema must be {CONFIG_REGISTRY_SCHEMA} version 1",
-                          code=EXIT_TUNER, category="tuner")
+    if (registry.get("schema") != CONFIG_REGISTRY_SCHEMA
+            or registry.get("schema_version") != CONFIG_REGISTRY_VERSION):
+        raise LaunchError(
+            f"tuner registry schema must be {CONFIG_REGISTRY_SCHEMA} "
+            f"version {CONFIG_REGISTRY_VERSION}", code=EXIT_TUNER, category="tuner",
+        )
     contract = registry.get("launch_contract")
-    if not isinstance(contract, dict):
-        raise LaunchError("tuner registry has no launch_contract binding task/protocol/table",
+    if not isinstance(contract, dict) or contract.get("schema") != LAUNCH_CONTRACT_SCHEMA:
+        raise LaunchError("tuner registry has no versioned launch_contract",
                           code=EXIT_TUNER, category="tuner")
+    protocol = contract.get("protocol") or {}
     if (contract.get("task") != spec.task
+            or protocol.get("schema") != "geak.measurement-protocol/v2"
+            or protocol.get("version") != 2
+            or protocol.get("hash") != EXPECTED_PROTOCOL_HASH
             or contract.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
-            or contract.get("score_metric") != EXPECTED_SCORE_METRIC):
+            or contract.get("score_metric") != EXPECTED_SCORE_METRIC
+            or contract.get("score_metric_hash") != EXPECTED_SCORE_METRIC["hash"]
+            or contract.get("score_metric_id") != EXPECTED_SCORE_METRIC_ID
+            or contract.get("score_metric_inner") != EXPECTED_SCORE_METRIC["inner"]):
         raise LaunchError("tuner registry task/protocol/score-metric binding mismatch",
                           code=EXIT_TUNER, category="tuner")
-    bound_table = Path(str(contract.get("runtime_table") or ""))
-    if not bound_table.is_absolute():
-        bound_table = spec.tuner_registry.parent / bound_table
-    bound_table = bound_table.resolve()
-    if bound_table != spec.tuner_table:
-        raise LaunchError(f"tuner registry binds runtime table {bound_table}, expected {spec.tuner_table}",
+
+    manifest_binding = contract.get("task_manifest")
+    if not isinstance(manifest_binding, dict):
+        raise LaunchError("tuner registry does not bind the task manifest",
                           code=EXIT_TUNER, category="tuner")
-    actual_table_hash = sha256_file(spec.tuner_table)
-    if contract.get("runtime_table_sha256") != actual_table_hash:
-        raise LaunchError("tuner registry runtime-table digest is stale", code=EXIT_TUNER,
+    manifest_rel = _relative_contract_path(manifest_binding.get("path"), "task manifest")
+    expected_manifest_rel = Path("asm_tuner/manifests/tasks") / f"{spec.task}.json"
+    if manifest_rel != expected_manifest_rel:
+        raise LaunchError("tuner registry binds the wrong task manifest",
+                          code=EXIT_TUNER, category="tuner")
+    manifest_path = (spec.root / manifest_rel).resolve()
+    require_regular(manifest_path, code=EXIT_TUNER, category="tuner")
+    require_tracked(spec.root, manifest_path, code=EXIT_TUNER, category="tuner")
+    if sha256_file(manifest_path) != manifest_binding.get("sha256"):
+        raise LaunchError("tuner task-manifest digest is stale", code=EXIT_TUNER,
                           category="tuner")
+    manifest = read_json(manifest_path, code=EXIT_TUNER, category="tuner")
+    task_root_rel = _relative_contract_path(manifest.get("task_root"), "task root")
+    task_root = (spec.root / task_root_rel).resolve()
+    if (manifest.get("task") != spec.task
+            or (manifest.get("protocol") or {}).get("hash") != EXPECTED_PROTOCOL_HASH
+            or manifest.get("score_metric") != EXPECTED_SCORE_METRIC
+            or not within(task_root, spec.root)
+            or (spec.args.get("kernel_path")
+                and Path(str(spec.args["kernel_path"])).resolve() != task_root)):
+        raise LaunchError("tuner task manifest/root differs from the launched task",
+                          code=EXIT_TUNER, category="tuner")
+    materialization = manifest.get("materialization") or {}
+    if not isinstance(materialization, dict):
+        raise LaunchError("task manifest has no materialization contract",
+                          code=EXIT_TUNER, category="tuner")
+    registry_rel = _relative_contract_path(materialization.get("registry"), "task registry")
+    table_rel = _relative_contract_path(materialization.get("runtime_table"), "task runtime table")
+    selection_rel = _relative_contract_path(materialization.get("selection_file"), "task selection")
+    loader_rel = _relative_contract_path(materialization.get("dispatch_module"), "task runtime loader")
+    expected_registry = (task_root / registry_rel).resolve()
+    expected_table = (task_root / table_rel).resolve()
+    selection_path = (task_root / selection_rel).resolve()
+    if spec.tuner_registry != expected_registry or spec.tuner_table != expected_table:
+        raise LaunchError(
+            "passed tuner registry/table differ from task-local materialization paths",
+            code=EXIT_TUNER, category="tuner",
+        )
+    if (contract.get("registry") != registry_rel.as_posix()
+            or contract.get("runtime_table") != table_rel.as_posix()
+            or contract.get("runtime_table_path_base") != "task_root"):
+        raise LaunchError("launch_contract does not bind task-local registry/table paths",
+                          code=EXIT_TUNER, category="tuner")
+    if contract.get("runtime_table_sha256") != sha256_file(spec.tuner_table):
+        raise LaunchError("tuner registry runtime-table digest is stale",
+                          code=EXIT_TUNER, category="tuner")
+
+    selection_binding = contract.get("selection")
+    if (not isinstance(selection_binding, dict)
+            or selection_binding.get("path") != selection_rel.as_posix()
+            or selection_binding.get("path_base") != "task_root"):
+        raise LaunchError("launch_contract does not bind the task selection",
+                          code=EXIT_TUNER, category="tuner")
+    require_regular(selection_path, code=EXIT_TUNER, category="tuner")
+    require_tracked(spec.root, selection_path, code=EXIT_TUNER, category="tuner")
+    if sha256_file(selection_path) != selection_binding.get("sha256"):
+        raise LaunchError("tuner selection digest is stale", code=EXIT_TUNER,
+                          category="tuner")
+    selection = read_json(selection_path, code=EXIT_TUNER, category="tuner")
+
     consumer = contract.get("workflow_consumer")
     if not isinstance(consumer, dict):
         raise LaunchError("tuner registry does not bind the workflow consumer",
                           code=EXIT_TUNER, category="tuner")
-    consumer_path = Path(str(consumer.get("path") or ""))
-    if not consumer_path.is_absolute():
-        consumer_path = spec.root / consumer_path
-    consumer_path = consumer_path.resolve()
-    expected_consumer = (spec.root / "kernel_workflow/kernel_lane.js").resolve()
-    if consumer_path != expected_consumer:
-        raise LaunchError(f"tuner workflow consumer must be {expected_consumer}",
+    consumer_rel = _relative_contract_path(consumer.get("path"), "workflow consumer")
+    expected_consumer = Path("kernel_workflow/kernel_lane.js")
+    if consumer_rel != expected_consumer:
+        raise LaunchError("tuner registry binds the wrong workflow consumer",
                           code=EXIT_TUNER, category="tuner")
+    consumer_path = (spec.root / consumer_rel).resolve()
     require_regular(consumer_path, code=EXIT_TUNER, category="tuner")
-    require_tracked(spec.root, consumer_path)
+    require_tracked(spec.root, consumer_path, code=EXIT_TUNER, category="tuner")
     if sha256_file(consumer_path) != consumer.get("sha256"):
-        raise LaunchError("tuner workflow-consumer digest is stale", code=EXIT_TUNER,
-                          category="tuner")
+        raise LaunchError("tuner workflow-consumer digest is stale",
+                          code=EXIT_TUNER, category="tuner")
     consumer_text = consumer_path.read_text(encoding="utf-8", errors="replace")
     executable_text = re.sub(r"^\s*//.*$", "", consumer_text, flags=re.MULTILINE)
     consumer_markers = ("asm_tuner", "runtime_table", "A.tuner_registry", "A.tuner_table")
@@ -667,73 +845,304 @@ def check_tuner(spec: LaunchSpec, routes: Mapping[str, tuple[int, int, int]]) ->
         raise LaunchError(
             "bound workflow consumer is missing tuner integration marker(s): "
             + ", ".join(missing_markers), code=EXIT_TUNER, category="tuner")
-    configs = registry.get("configs")
-    if not isinstance(configs, list) or not configs:
-        raise LaunchError("tuner registry contains no configs", code=EXIT_TUNER, category="tuner")
-    ready: set[str] = set()
-    for row in configs:
-        if not isinstance(row, dict) or row.get("precompiled") is not True or row.get("status") != "ready":
-            continue
-        identifier = row.get("id")
-        artifact = _artifact_path(spec.tuner_registry, row.get("artifact"))
-        receipt = row.get("build_receipt") or {}
-        if not isinstance(identifier, str) or not identifier or not isinstance(receipt, dict):
-            continue
-        if (receipt.get("task") != spec.task
-                or receipt.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
-                or receipt.get("score_metric") != EXPECTED_SCORE_METRIC):
-            continue
-        require_regular(artifact, code=EXIT_TUNER, category="tuner")
-        if sha256_file(artifact) != row.get("artifact_sha256"):
-            raise LaunchError(f"tuner artifact hash mismatch for {identifier}", code=EXIT_TUNER,
-                              category="tuner")
-        ready.add(identifier)
-    if not ready:
-        raise LaunchError("tuner registry has no ready artifact bound to this task/protocol",
+
+    loader_binding = contract.get("task_runtime_loader")
+    if not isinstance(loader_binding, dict):
+        raise LaunchError("launch_contract does not bind the task runtime loader",
                           code=EXIT_TUNER, category="tuner")
-    if table.get("schema") != RUNTIME_TABLE_SCHEMA or table.get("task") != spec.task:
-        raise LaunchError("tuner runtime table schema/task mismatch", code=EXIT_TUNER,
-                          category="tuner")
+    loader_repo_rel = _relative_contract_path(loader_binding.get("path"), "task runtime loader")
+    expected_loader_rel = task_root_rel / loader_rel
+    loader_path = (spec.root / loader_repo_rel).resolve()
+    if (loader_repo_rel != expected_loader_rel
+            or loader_binding.get("runtime_table") != table_rel.as_posix()):
+        raise LaunchError("task runtime loader path/table binding mismatch",
+                          code=EXIT_TUNER, category="tuner")
+    require_regular(loader_path, code=EXIT_TUNER, category="tuner")
+    require_tracked(spec.root, loader_path, code=EXIT_TUNER, category="tuner")
+    if (sha256_file(loader_path) != loader_binding.get("sha256")
+            or _literal_string_assignment(loader_path, "_TABLE_RELATIVE_PATH")
+            != table_rel.as_posix()):
+        raise LaunchError(
+            "task-local runtime loader does not consume the passed runtime table",
+            code=EXIT_TUNER, category="tuner",
+        )
+
+    if table.get("schema") != RUNTIME_TABLE_SCHEMA:
+        raise LaunchError("tuner runtime table schema mismatch",
+                          code=EXIT_TUNER, category="tuner")
+    table_payload = dict(table)
+    table_digest = table_payload.pop("table_digest", None)
+    if table_digest != sha256_json(table_payload):
+        raise LaunchError("tuner runtime-table digest is stale",
+                          code=EXIT_TUNER, category="tuner")
+    table_task = table.get("task") or {}
+    table_protocol = table.get("protocol") or {}
+    table_oracle = table.get("oracle") or {}
+    task_digest = str(contract.get("task_digest") or "")
+    source_digest = str(contract.get("source_digest") or "")
+    oracle_digest = str(contract.get("oracle_manifest_sha256") or "")
+    semantic_hashes = table_task.get("semantic_hashes") or {}
+    binding_hashes = table_task.get("binding_hashes") or {}
+    computed_source_digest = sha256_json({
+        "semantic_hashes": semantic_hashes,
+        "binding_hashes": binding_hashes,
+    })
+    if (len(task_digest) != 64 or len(source_digest) != 64 or len(oracle_digest) != 64
+            or table_task.get("name") != spec.task
+            or table_task.get("digest") != task_digest
+            or table_task.get("source_digest") != source_digest
+            or computed_source_digest != source_digest
+            or table_protocol.get("schema") != "geak.measurement-protocol/v2"
+            or table_protocol.get("hash") != EXPECTED_PROTOCOL_HASH
+            or table.get("score_metric") != EXPECTED_SCORE_METRIC
+            or table_oracle.get("manifest_sha256") != oracle_digest
+            or table_oracle.get("compatible") is not True):
+        raise LaunchError("tuner task/source/protocol/score/oracle digest binding mismatch",
+                          code=EXIT_TUNER, category="tuner")
+    if not isinstance(semantic_hashes, dict) or not semantic_hashes or not isinstance(binding_hashes, dict):
+        raise LaunchError("tuner runtime table has no canonical source binding",
+                          code=EXIT_TUNER, category="tuner")
+    for relative, expected_hash in semantic_hashes.items():
+        source_rel = _relative_contract_path(relative, "semantic task source")
+        source_path = (task_root / source_rel).resolve()
+        require_regular(source_path, code=EXIT_TUNER, category="tuner")
+        require_tracked(spec.root, source_path, code=EXIT_TUNER, category="tuner")
+        if sha256_file(source_path) != expected_hash:
+            raise LaunchError(f"tuner semantic source digest is stale: {relative}",
+                              code=EXIT_TUNER, category="tuner")
+    oracle_rel = _relative_contract_path(manifest.get("oracle_manifest"), "oracle manifest")
+    oracle_path = (task_root / oracle_rel).resolve()
+    require_regular(oracle_path, code=EXIT_TUNER, category="tuner")
+    require_tracked(spec.root, oracle_path, code=EXIT_TUNER, category="tuner")
+    if sha256_file(oracle_path) != oracle_digest:
+        raise LaunchError("tuner oracle-manifest digest is stale",
+                          code=EXIT_TUNER, category="tuner")
+    bindings = manifest.get("bindings") or {}
+    cases_binding = bindings.get("cases") or {}
+    cases_path = _root_bound_file(
+        spec.root, task_root, cases_binding.get("path"), "task CASES binding",
+    )
+    require_tracked(spec.root, cases_path, code=EXIT_TUNER, category="tuner")
+    cases_value = _literal_assignment(cases_path, str(cases_binding.get("symbol") or "CASES"))
+    try:
+        normalized_cases = [
+            {key: case[key] for key in ("id", "regime", "M", "N", "K", "seed")}
+            for case in cases_value
+        ]
+    except (KeyError, TypeError) as exc:
+        raise LaunchError("task CASES binding is malformed",
+                          code=EXIT_TUNER, category="tuner") from exc
+    computed_bindings = {"cases": sha256_json(normalized_cases)}
+    for binding_name in ("input_builder", "correctness"):
+        binding = bindings.get(binding_name) or {}
+        binding_path = _root_bound_file(
+            spec.root, task_root, binding.get("path"), f"task {binding_name} binding",
+        )
+        require_tracked(spec.root, binding_path, code=EXIT_TUNER, category="tuner")
+        computed_bindings[binding_name] = _function_sha256(
+            binding_path, str(binding.get("symbol") or ""),
+        )
+    if computed_bindings != binding_hashes:
+        raise LaunchError("tuner task binding hashes are stale",
+                          code=EXIT_TUNER, category="tuner")
+    route_manifest_rel = _relative_contract_path(
+        manifest.get("route_manifest"), "asm route manifest",
+    )
+    search_manifest_rel = _relative_contract_path(
+        manifest.get("search_space_manifest"), "asm search-space manifest",
+    )
+    route_manifest_path = (spec.root / route_manifest_rel).resolve()
+    search_manifest_path = (spec.root / search_manifest_rel).resolve()
+    for dependency in (route_manifest_path, search_manifest_path):
+        require_regular(dependency, code=EXIT_TUNER, category="tuner")
+        require_tracked(spec.root, dependency, code=EXIT_TUNER, category="tuner")
+    computed_task_digest = sha256_json({
+        "schema": manifest.get("schema"),
+        "task": manifest.get("task"),
+        "adapter": manifest.get("adapter"),
+        "cases": normalized_cases,
+        "semantic_hashes": semantic_hashes,
+        "binding_hashes": computed_bindings,
+        "route_manifest_sha256": sha256_file(route_manifest_path),
+        "search_space_manifest_sha256": sha256_file(search_manifest_path),
+        "protocol_hash": EXPECTED_PROTOCOL_HASH,
+        "score_metric": EXPECTED_SCORE_METRIC,
+        "oracle_manifest_sha256": oracle_digest,
+        "materialization": {
+            key: materialization[key] for key in (
+                "registry", "runtime_table", "selection_file", "dispatch_module",
+            )
+        },
+    })
+    if computed_task_digest != task_digest:
+        raise LaunchError("tuner canonical task digest is stale",
+                          code=EXIT_TUNER, category="tuner")
     try:
         published_revision = int(table.get("revision", 0))
     except (TypeError, ValueError) as exc:
-        raise LaunchError("tuner runtime-table revision is malformed", code=EXIT_TUNER,
-                          category="tuner") from exc
-    if (table.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
-            or table.get("score_metric") != EXPECTED_SCORE_METRIC
-            or published_revision < 1):
-        raise LaunchError("tuner runtime table is unpublished or bound to a stale protocol/metric",
-                          code=EXIT_TUNER, category="tuner")
+        raise LaunchError("tuner runtime-table revision is malformed",
+                          code=EXIT_TUNER, category="tuner") from exc
+    suite = table.get("suite") or {}
     table_routes = table.get("routes")
-    if not isinstance(table_routes, dict) or set(table_routes) != set(routes):
-        raise LaunchError("tuner runtime-table route inventory mismatch", code=EXIT_TUNER,
-                          category="tuner")
+    if (published_revision < 1 or suite.get("atomic") is not True
+            or suite.get("complete") is not True
+            or suite.get("route_ids") != sorted(routes)
+            or not isinstance(table_routes, dict) or set(table_routes) != set(routes)):
+        raise LaunchError("tuner runtime-table is not a complete atomic route suite",
+                          code=EXIT_TUNER, category="tuner")
+
+    configs = registry.get("configs")
+    registry_id = contract.get("registry_id")
+    if not isinstance(configs, list) or not isinstance(registry_id, str) or not registry_id:
+        raise LaunchError("tuner registry contains no launch-selected config",
+                          code=EXIT_TUNER, category="tuner")
+    selected_rows = [
+        row for row in configs
+        if isinstance(row, dict) and row.get("id") == registry_id
+    ]
+    if len(selected_rows) != 1:
+        raise LaunchError("tuner registry launch-selected config is missing or duplicated",
+                          code=EXIT_TUNER, category="tuner")
+    selected_row = selected_rows[0]
+    selected_config = selected_row.get("config") or {}
+    build_receipt = selected_row.get("build_receipt") or {}
+    if (selected_row.get("precompiled") is not True or selected_row.get("status") != "ready"
+            or not isinstance(selected_config, dict) or not isinstance(build_receipt, dict)
+            or selected_config.get("kind") != "asm_tuner_release"
+            or selected_config.get("task") != spec.task
+            or selected_config.get("task_digest") != task_digest
+            or selected_config.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
+            or selected_config.get("score_metric") != EXPECTED_SCORE_METRIC
+            or selected_config.get("score_metric_hash") != EXPECTED_SCORE_METRIC["hash"]
+            or selected_config.get("score_metric_id") != EXPECTED_SCORE_METRIC_ID
+            or selected_config.get("score_metric_inner") != EXPECTED_SCORE_METRIC["inner"]
+            or selected_config.get("oracle_manifest_sha256") != oracle_digest
+            or selected_config.get("release_id") != contract.get("release_id")
+            or build_receipt.get("task") != spec.task
+            or build_receipt.get("task_digest") != task_digest
+            or build_receipt.get("source_digest") != source_digest
+            or build_receipt.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
+            or build_receipt.get("score_metric") != EXPECTED_SCORE_METRIC
+            or build_receipt.get("oracle_manifest_sha256") != oracle_digest):
+        raise LaunchError("tuner selected registry row has stale task/source/protocol bindings",
+                          code=EXIT_TUNER, category="tuner")
+    release_manifest = _root_bound_file(
+        spec.root, spec.tuner_registry.parent, selected_row.get("artifact"),
+        "tuner release manifest",
+    )
+    if sha256_file(release_manifest) != selected_row.get("artifact_sha256"):
+        raise LaunchError("tuner release-manifest hash mismatch",
+                          code=EXIT_TUNER, category="tuner")
+    release_id = str(contract.get("release_id") or "")
+    if len(release_id) != 64:
+        raise LaunchError("tuner release id is malformed", code=EXIT_TUNER, category="tuner")
+    expected_release_root = task_root / ".geak_tuner" / "releases" / release_id
+    receipts_root_rel = _relative_contract_path(table.get("receipts_root"), "table receipts root")
+    if ((task_root / receipts_root_rel).resolve() != expected_release_root.resolve()
+            or release_manifest != (expected_release_root / "release.json").resolve()):
+        raise LaunchError("tuner release is not in the task-local content-addressed store",
+                          code=EXIT_TUNER, category="tuner")
+
+    registry_artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
+    raw_artifact_set = selected_row.get("artifact_set")
+    if not isinstance(raw_artifact_set, list) or not raw_artifact_set:
+        raise LaunchError("tuner selected registry row has no artifact set",
+                          code=EXIT_TUNER, category="tuner")
+    for raw in raw_artifact_set:
+        if not isinstance(raw, dict) or raw.get("kind") not in {
+                "artifact", "source", "compile_manifest"}:
+            raise LaunchError("tuner registry artifact-set row is malformed",
+                              code=EXIT_TUNER, category="tuner")
+        relative = _relative_contract_path(raw.get("path"), "registry artifact")
+        expected_hash = str(raw.get("sha256") or "")
+        artifact = _root_bound_file(
+            spec.root, spec.tuner_registry.parent, relative, "registry artifact",
+        )
+        if len(expected_hash) != 64 or sha256_file(artifact) != expected_hash:
+            raise LaunchError("tuner registry artifact-set hash mismatch",
+                              code=EXIT_TUNER, category="tuner")
+        if not within(artifact, task_root):
+            raise LaunchError("tuner registry artifact is outside the task root",
+                              code=EXIT_TUNER, category="tuner")
+        normalized = artifact.relative_to(task_root).as_posix()
+        row = {"kind": str(raw["kind"]), "path": normalized, "sha256": expected_hash}
+        registry_artifacts[(row["kind"], row["path"], expected_hash)] = row
+
+    table_artifacts: dict[tuple[str, str, str], dict[str, str]] = {}
+    table_config_ids: set[str] = set()
     for name, shape in routes.items():
         row = table_routes[name]
         if not isinstance(row, dict):
             raise LaunchError(f"tuner runtime-table route {name} must be an object",
                               code=EXIT_TUNER, category="tuner")
         shape_doc = row.get("shape") or {}
-        if not isinstance(shape_doc, dict):
-            raise LaunchError(f"tuner runtime-table route {name} has no shape object",
-                              code=EXIT_TUNER, category="tuner")
         try:
             got = (int(shape_doc.get("m", -1)), int(shape_doc.get("n", -1)),
                    int(shape_doc.get("k", -1)))
-        except (TypeError, ValueError) as exc:
-            raise LaunchError(f"tuner runtime-table route {name} has non-integer dimensions",
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise LaunchError(f"tuner runtime-table route {name} has invalid dimensions",
                               code=EXIT_TUNER, category="tuner") from exc
         entries = row.get("entries")
         if got != shape or not isinstance(entries, list) or not entries:
-            raise LaunchError(f"tuner runtime-table route {name} is incomplete", code=EXIT_TUNER,
-                              category="tuner")
-        if any(not isinstance(entry, dict) or entry.get("config_id") not in ready
-               or entry.get("metric_id") != EXPECTED_SCORE_METRIC_ID
-               or entry.get("metric_inner") != EXPECTED_SCORE_METRIC["inner"]
-               for entry in entries):
-            raise LaunchError(
-                f"tuner runtime-table route {name} references an unready or metric-drifted config",
-                code=EXIT_TUNER, category="tuner")
+            raise LaunchError(f"tuner runtime-table route {name} is incomplete",
+                              code=EXIT_TUNER, category="tuner")
+        for rank, entry in enumerate(entries):
+            if (not isinstance(entry, dict) or entry.get("rank") != rank
+                    or entry.get("task_digest") != task_digest
+                    or entry.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
+                    or entry.get("score_metric_hash") != EXPECTED_SCORE_METRIC["hash"]
+                    or entry.get("metric_id") != EXPECTED_SCORE_METRIC_ID
+                    or entry.get("metric_inner") != EXPECTED_SCORE_METRIC["inner"]):
+                raise LaunchError(
+                    f"tuner runtime-table route {name} has a stale ranked entry",
+                    code=EXIT_TUNER, category="tuner",
+                )
+            table_config_ids.add(str(entry.get("config_id") or ""))
+            for kind, path_key, hash_key in (
+                ("artifact", "artifact", "artifact_sha256"),
+                ("source", "source", "source_sha256"),
+                ("compile_manifest", "compile_manifest", "compile_manifest_sha256"),
+            ):
+                relative = _relative_contract_path(entry.get(path_key), f"table {kind}")
+                expected_hash = str(entry.get(hash_key) or "")
+                artifact = _root_bound_file(
+                    spec.root, spec.tuner_table.parent, relative, f"table {kind}",
+                )
+                if len(expected_hash) != 64 or sha256_file(artifact) != expected_hash:
+                    raise LaunchError(f"tuner runtime-table {kind} hash mismatch",
+                                      code=EXIT_TUNER, category="tuner")
+                if not within(artifact, task_root):
+                    raise LaunchError(f"tuner runtime-table {kind} is outside the task root",
+                                      code=EXIT_TUNER, category="tuner")
+                normalized = artifact.relative_to(task_root).as_posix()
+                artifact_row = {
+                    "kind": kind, "path": normalized, "sha256": expected_hash,
+                }
+                table_artifacts[(kind, normalized, expected_hash)] = artifact_row
+    if "" in table_config_ids or table_config_ids != set(selected_config.get("config_ids") or []):
+        raise LaunchError("tuner registry/runtime-table config sets differ",
+                          code=EXIT_TUNER, category="tuner")
+    registry_rows = [registry_artifacts[key] for key in sorted(registry_artifacts)]
+    table_rows = [table_artifacts[key] for key in sorted(table_artifacts)]
+    if registry_rows != table_rows or contract.get("artifact_set") != _artifact_set_summary(table_rows):
+        raise LaunchError("tuner registry/runtime-table artifact-set summary differs",
+                          code=EXIT_TUNER, category="tuner")
+
+    if (table.get("release_id") != contract.get("release_id")
+            or selection.get("task") != spec.task
+            or selection.get("task_digest") != task_digest
+            or selection.get("source_digest") != source_digest
+            or selection.get("release_id") != contract.get("release_id")
+            or selection.get("registry_id") != registry_id
+            or selection.get("protocol_hash") != EXPECTED_PROTOCOL_HASH
+            or selection.get("score_metric") != EXPECTED_SCORE_METRIC
+            or selection.get("oracle_manifest_sha256") != oracle_digest
+            or selection.get("runtime_table") != table_rel.as_posix()
+            or selection.get("runtime_table_sha256") != sha256_file(spec.tuner_table)
+            or selection.get("table_digest") != table_digest
+            or set(selection.get("config_ids") or []) != table_config_ids):
+        raise LaunchError("tuner selection/registry/runtime-table binding mismatch",
+                          code=EXIT_TUNER, category="tuner")
 
 
 def gpu_sample(gpu: int, sysfs_root: Path = Path("/sys/class/drm")) -> dict[str, Any]:

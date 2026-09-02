@@ -60,6 +60,12 @@ def test_contract_binds_cases_builders_correctness_protocol_and_oracle(manifest,
     assert "scripts/task_runner.py" in contract.semantic_hashes
     assert "harness_lib.py" in contract.semantic_hashes
     assert "geak_tuner_runtime.py" in contract.semantic_hashes
+    assert len(contract.source_digest) == 64
+    assert contract.materialization_relative_path("registry") == Path("asm_tuner_registry.json")
+    assert contract.materialization_relative_path("runtime_table") == Path(
+        "asm_tuner_runtime_table.json")
+    assert contract.materialization_relative_path("selection_file") == Path(
+        "asm_tuner_selection.json")
     assert len(contract.identity()["search_space_sha256"]) == 64
 
 
@@ -139,6 +145,7 @@ def test_runtime_loader_is_identical_for_bf16_and_fp8():
     assert bf16.read_bytes() == fp8.read_bytes()
     text = bf16.read_text()
     assert "ranks are not contiguous" in text
+    assert '_TABLE_RELATIVE_PATH = "asm_tuner_runtime_table.json"' in text
     for wrapper in (
         ROOT / "examples/tasks/dense_bf16_gemm_fused/gemm_wrapper.py",
         ROOT / "examples/tasks/dense_fp8_gemm_rowwise/gemm_wrapper.py",

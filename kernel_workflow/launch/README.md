@@ -17,15 +17,17 @@ clean. The shared allocation is committed in `gpu_allocation.json`: BF16 uses
 2,3,4 and FP8 uses 5,6,7. To adapt physical locks, edit that single file, keep
 the sets disjoint, and commit it before calculating `COMMIT`.
 
-The tuner integration must publish, per task, a tracked config-search registry
-and tracked runtime table. The registry must have a `launch_contract` binding
-`task`, protocol hash, full score-metric object, root-relative table path, table SHA-256, and the
-tracked workflow consumer plus its SHA-256. Both workflow entry points must accept the
-exact `tuner_registry` and `tuner_table` arguments; the bound consumer must
-actually reference those arguments, `asm_tuner`, and `runtime_table`. Ready
-entries must bind the same task/protocol/score metric in `build_receipt` and point to
-hash-valid artifacts. The table must contain all 11 routes, bind metric id/inner on every entry, and
-reference only those ready config IDs.
+The tuner integration publishes, per task, tracked
+`asm_tuner_registry.json`, `asm_tuner_runtime_table.json`, and
+`asm_tuner_selection.json` files at the task root. The registry's versioned
+`launch_contract` binds task/source/oracle digests, protocol and score metric,
+task-root-relative table and selection paths plus hashes, the tracked workflow
+consumer and task-local loader, and an artifact-set digest. Both workflow entry
+points accept the exact `tuner_registry` and `tuner_table` arguments. Content-addressed release
+manifests, generated sources, compile manifests, and ELF artifacts remain untracked below the ignored
+task-local `.geak_tuner/`; preflight permits that only when every path stays below `ROOT`, every hash
+matches, and the tracked registry and table reference the same normalized set.
+The table must contain the complete atomic 11-route suite and bind metric id/inner on every entry.
 This branch intentionally does not fabricate empty tuner files: preflight stays
 red until the real bridge has published them.
 
@@ -74,6 +76,30 @@ Do not relabel the committed latency measurements, and do not bake in one worktr
 another. Rebuild/search, register, and materialize tuner releases only after this re-bake so stale
 latency-ranked artifacts cannot enter the throughput lane.
 
+## Publish and commit the tuner contract
+
+Run `prepare` for each task after the oracle is committed. The command publishes the three reviewable
+task-root files and leaves caches, releases, snapshots, locks, and receipts below `.geak_tuner/`.
+Review and commit only the three published files.
+
+```bash
+ROOT=/absolute/path/to/the/expected/GEAK-worktree
+TASK=dense_bf16_gemm_fused   # use dense_fp8_gemm_rowwise for the sibling
+GPU=2                        # use 5 for FP8
+TASK_ROOT="$ROOT/examples/tasks/$TASK"
+GEAK_GPU_ALLOWED="$GPU" bash "$ROOT/kernel_workflow/scripts/gpu_lock.sh" "$GPU" \
+  bash "$ROOT/kernel_workflow/scripts/gpu_fence_run.sh" \
+  python3 "$ROOT/kernel_workflow/scripts/config_search.py" prepare \
+    --registry "$TASK_ROOT/asm_tuner_registry.json" \
+    --task-manifest "$ROOT/asm_tuner/manifests/tasks/$TASK.json" \
+    --workspace "$TASK_ROOT" --cache "$TASK_ROOT/.geak_tuner/cache"
+git -C "$ROOT" add \
+  "examples/tasks/$TASK/asm_tuner_registry.json" \
+  "examples/tasks/$TASK/asm_tuner_runtime_table.json" \
+  "examples/tasks/$TASK/asm_tuner_selection.json"
+git -C "$ROOT" commit -m "asm_tuner: publish $TASK launch contract"
+```
+
 ## Read-only preflight / dry run
 
 Example for BF16; use `--lane fp8` and the FP8 paths for its sibling:
@@ -87,8 +113,8 @@ SLURM_END_EPOCH=<epoch-from-scontrol>
 python3 "$ROOT/kernel_workflow/scripts/lane_48h.py" preflight \
   --lane bf16 --root "$ROOT" --expected-commit "$COMMIT" \
   --state-dir "$ROOT/exp/fresh_bf16_48h" \
-  --tuner-registry "$ROOT/<published-bf16-registry.json>" \
-  --tuner-table "$ROOT/<published-bf16-runtime-table.json>" \
+  --tuner-registry "$ROOT/examples/tasks/dense_bf16_gemm_fused/asm_tuner_registry.json" \
+  --tuner-table "$ROOT/examples/tasks/dense_bf16_gemm_fused/asm_tuner_runtime_table.json" \
   --slurm-end-epoch "$SLURM_END_EPOCH"
 '
 ```

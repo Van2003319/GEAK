@@ -61,9 +61,19 @@ def test_per_route_halving_publishes_one_atomic_complete_suite(tmp_path):
     }
     score_metric["hash"] = hashlib.sha256(json.dumps(
         score_metric, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    source_contract = {
+        "semantic_hashes": {"task.py": "e" * 64},
+        "binding_hashes": {"cases": "f" * 64},
+    }
+    source_digest = hashlib.sha256(json.dumps(
+        source_contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     release = {
         "release_id": "release-test",
-        "task": {"name": "unit-task", "adapter": "bf16", "digest": "a" * 64},
+        "task": {
+            "name": "unit-task", "adapter": "bf16", "digest": "a" * 64,
+            "source_digest": source_digest,
+            **source_contract,
+        },
         "protocol": protocol,
         "score_metric": score_metric,
         "oracle": {"manifest_sha256": "c" * 64, "compatible": True},

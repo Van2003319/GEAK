@@ -167,6 +167,29 @@ class TaskContract:
         return int(self.score_metric["inner"])
 
     @property
+    def source_digest(self) -> str:
+        return sha256_bytes(canonical_json({
+            "semantic_hashes": dict(self.semantic_hashes),
+            "binding_hashes": dict(self.binding_hashes),
+        }).encode("utf-8"))
+
+    def materialization_relative_path(self, key: str) -> Path:
+        materialization = self.value.get("materialization") or {}
+        raw = materialization.get(key)
+        if not isinstance(raw, str) or not raw:
+            raise ContractError("task materialization lacks %s" % key)
+        path = Path(raw)
+        if path.is_absolute() or path.parent != Path(".") or path.name in (".", ".."):
+            raise ContractError(
+                "task materialization %s must be a stable task-root filename" % key
+            )
+        return path
+
+    def materialization_path(self, key: str, *, task_root: Optional[Path] = None) -> Path:
+        root = Path(task_root).resolve() if task_root is not None else self.task_root
+        return root / self.materialization_relative_path(key)
+
+    @property
     def routes(self) -> Tuple[Route, ...]:
         return tuple(Route(
             str(case["id"]), int(case["M"]), int(case["N"]), int(case["K"]),
@@ -216,6 +239,7 @@ class TaskContract:
             "task": self.task,
             "adapter": self.adapter_name,
             "task_digest": self.task_digest,
+            "source_digest": self.source_digest,
             "semantic_hashes": dict(self.semantic_hashes),
             "binding_hashes": dict(self.binding_hashes),
             "case_ids": [case["id"] for case in self.cases],
@@ -254,6 +278,21 @@ class TaskContract:
         ).resolve()
         if not root.is_dir():
             raise ContractError("canonical task root is missing: %s" % root)
+
+        materialization = value.get("materialization")
+        required_materialization = (
+            "registry", "runtime_table", "selection_file", "dispatch_module",
+        )
+        if not isinstance(materialization, dict):
+            raise ContractError("task contract must declare materialization paths")
+        for key in required_materialization:
+            raw = materialization.get(key)
+            path = Path(str(raw or ""))
+            if (not isinstance(raw, str) or not raw or path.is_absolute()
+                    or path.parent != Path(".") or path.name in (".", "..")):
+                raise ContractError(
+                    "task materialization %s must be a stable task-root filename" % key
+                )
 
         route_path = (repo_root / str(value["route_manifest"])).resolve()
         route_manifest = read_object(route_path)
@@ -388,6 +427,9 @@ class TaskContract:
             "protocol_hash": protocol["hash"],
             "score_metric": score_metric,
             "oracle_manifest_sha256": oracle_sha256,
+            "materialization": {
+                key: materialization[key] for key in required_materialization
+            },
         }
         task_digest = sha256_bytes(canonical_json(identity_payload).encode("utf-8"))
         contract = cls(

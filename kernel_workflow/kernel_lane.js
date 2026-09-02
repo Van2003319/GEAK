@@ -85,7 +85,7 @@ const KNOWN_ARGS = new Set([
   'start_phase',
   // Canonical asm_tuner bridge. required means no Engineer may start until
   // search/create/select/materialize has produced a hash-valid suite table.
-  'asm_tuner_manifest', 'asm_tuner_mode', 'score_metric',
+  'asm_tuner_manifest', 'asm_tuner_mode', 'tuner_registry', 'tuner_table', 'score_metric',
   // Dispatcher-owned, forwarded verbatim, unused by the worker.
   'backends', 'enable_fp8', 'e2e_workflow_dir', 'kernel_lane_script',
 ]);
@@ -1978,17 +1978,35 @@ if (!['off', 'optional', 'required'].includes(ASM_TUNER_MODE)) {
 if (ASM_TUNER_MODE === 'required' && !ASM_TUNER_MANIFEST) {
   throw new Error('asm_tuner_mode=required needs args.asm_tuner_manifest');
 }
+const LAUNCH_TUNER_REGISTRY = String(A.tuner_registry || '').trim();
+const LAUNCH_TUNER_TABLE = String(A.tuner_table || '').trim();
+if (!!LAUNCH_TUNER_REGISTRY !== !!LAUNCH_TUNER_TABLE) {
+  throw new Error('tuner_registry and tuner_table must be supplied together');
+}
+if (LAUNCH_TUNER_REGISTRY && !ASM_TUNER_MANIFEST) {
+  throw new Error('tuner_registry/tuner_table need args.asm_tuner_manifest');
+}
+if (LAUNCH_TUNER_REGISTRY) {
+  const tunerRoot = LAUNCH_TUNER_REGISTRY.replace(/\/asm_tuner_registry\.json$/, '');
+  if (tunerRoot === LAUNCH_TUNER_REGISTRY
+      || LAUNCH_TUNER_TABLE !== `${tunerRoot}/asm_tuner_runtime_table.json`) {
+    throw new Error('tuner_registry/tuner_table must be the stable files in one task root');
+  }
+}
 // Registered before Setup so the capability truly is phase-independent. STATE_DIR makes it
 // continuation-local; standalone runs share an explicit EXP_ROOT/kernel/language registry.
-let configSearchRegistry = STATE_DIR
+let configSearchRegistry = LAUNCH_TUNER_REGISTRY || (STATE_DIR
   ? `${STATE_DIR}/config_search/registry.json`
-  : `${EXP_ROOT}/config_search/${kebab(KERNEL_NAME_HINT)}-${kebab(TARGET_LANGUAGE || 'default')}/registry.json`;
-const asmTunerCache = configSearchRegistry.replace(/\/registry\.json$/, '/cache');
+  : `${EXP_ROOT}/config_search/${kebab(KERNEL_NAME_HINT)}-${kebab(TARGET_LANGUAGE || 'default')}/registry.json`);
+const asmTunerCache = LAUNCH_TUNER_REGISTRY
+  ? configSearchRegistry.replace(/\/asm_tuner_registry\.json$/, '/.geak_tuner/cache')
+  : configSearchRegistry.replace(/\/registry\.json$/, '/cache');
 const availableCapabilities = () => ({
   config_search: {
     schema: 'geak.config-search/v2', phase_independent: true,
     command: `python3 ${CONFIG_SEARCH_HELPER}`,
     registry: configSearchRegistry,
+    runtime_table: LAUNCH_TUNER_TABLE,
     task_manifest: ASM_TUNER_MANIFEST,
     cache: asmTunerCache,
     mode: ASM_TUNER_MODE,
@@ -2271,12 +2289,13 @@ if (!hasBaseline) {
 // Canonical tuner bootstrap. On a fresh state this performs one bounded protocol-v2 paired
 // search over the declared seed/non-default geometry; on continuation it selects the exact registry
 // id in asm_tuner_selection.json. Either way the baseline, profile and every Engineer now execute the
-// same versioned table instead of introducing tuner bytes only after the baseline was measured.
+// same tracked registry/table/selection contract instead of introducing tuner bytes only after the
+// baseline was measured.
 let canonicalTunerPreparation = null;
 if (ASM_TUNER_MODE !== 'off' && ASM_TUNER_MANIFEST) {
   canonicalTunerPreparation = await agentT(
-    `Run EXACTLY this script under the allocated GPU lock and process fence. Commit only the small ` +
-    `reviewable selection file (the .geak_tuner bundle stays ignored), then return the captured JSON ` +
+    `Run EXACTLY this script under the allocated GPU lock and process fence. Commit the three small ` +
+    `reviewable contract files (the .geak_tuner bundle stays ignored), then return the captured JSON ` +
     `stdout verbatim:\n\`\`\`bash\nset +e\nOUT=$(` +
     `${GPU_LOCK_ENV ? `${GPU_LOCK_ENV} ` : ''}GEAK_GPU_ALLOWED=${JSON.stringify(GPU_IDS)} ` +
     `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSON.stringify(GPU_POOL)} ` +
@@ -2287,9 +2306,12 @@ if (ASM_TUNER_MODE !== 'off' && ASM_TUNER_MANIFEST) {
     `--cache ${JSON.stringify(asmTunerCache)} --workspace ${JSON.stringify(CANONICAL)})\n` +
     `RC=$?\nset -e\nif [ "$RC" -eq 0 ]; then\n` +
     `  cd ${JSON.stringify(CANONICAL)}\n` +
-    `  git -c user.email=team@workflow -c user.name=team add asm_tuner_selection.json\n` +
-    `  if ! git diff --cached --quiet -- asm_tuner_selection.json; then\n` +
-    `    git -c user.email=team@workflow -c user.name=team commit -q -m "asm_tuner: select canonical suite release"\n` +
+    `  git -c user.email=team@workflow -c user.name=team add ` +
+    `asm_tuner_registry.json asm_tuner_runtime_table.json asm_tuner_selection.json\n` +
+    `  if ! git diff --cached --quiet -- asm_tuner_registry.json ` +
+    `asm_tuner_runtime_table.json asm_tuner_selection.json; then\n` +
+    `    git -c user.email=team@workflow -c user.name=team commit -q ` +
+    `-m "asm_tuner: publish canonical suite contract"\n` +
     `  fi\nfi\nprintf '%s\\n' "$OUT"\nexit "$RC"\n\`\`\``,
     { phase: 'Setup', label: 'config_search:prepare canonical', schema: CONFIG_PREPARE_SCHEMA });
   if (!(canonicalTunerPreparation && canonicalTunerPreparation.ok)) {
@@ -4391,8 +4413,8 @@ while (!skipLoop && dispatched < BUDGET && !stopReason) {
         : `python3 -c ${JSON.stringify("import json; print(json.dumps({'ok': True, 'schema': 'geak.config-search/v2', 'phase_independent': True, 'prepared_before_engineer': True}))")}`;
       const prepared = await agentT(
         `Run EXACTLY this script and return only the final single-line JSON object. The workspace ` +
-        `baseline commit MUST happen before materialization so asm_tuner_selection.json is a real ` +
-        `candidate change; .geak_tuner is ignored immutable runtime state:\n\`\`\`bash\n` +
+        `baseline commit MUST happen before materialization so the tracked asm_tuner registry, table, ` +
+        `and selection are real candidate changes; .geak_tuner is ignored immutable runtime state:\n\`\`\`bash\n` +
         `mkdir -p ${d.out_dir}/workspace\n` +
         `( cd ${d.seed_dir} && tar --exclude=./.git --exclude='*/.git' ` +
         `--exclude=./build --exclude='*/build' --exclude=./.geak_tuner ` +
@@ -5336,7 +5358,8 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
     if (commitOK) {
       if (ASM_TUNER_MODE !== 'off' && ASM_TUNER_MANIFEST) {
         const refreshedTuner = await agentT(
-          `The canonical commit may have changed asm_tuner_selection.json. Run EXACTLY this command ` +
+          `The canonical commit may have changed the tracked asm_tuner registry/table/selection. ` +
+          `Run EXACTLY this command ` +
           `before any reprofile and return its JSON stdout verbatim:\n\`\`\`bash\n` +
           `${GPU_LOCK_ENV ? `${GPU_LOCK_ENV} ` : ''}GEAK_GPU_ALLOWED=${JSON.stringify(GPU_IDS)} ` +
           `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSON.stringify(GPU_POOL)} ` +

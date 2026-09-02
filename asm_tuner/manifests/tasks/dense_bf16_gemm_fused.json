@@ -21,7 +21,8 @@
   "materialization": {
     "dispatch_module": "geak_tuner_runtime.py",
     "fallback": "canonical",
-    "runtime_table": ".geak_tuner/runtime_table.json",
+    "registry": "asm_tuner_registry.json",
+    "runtime_table": "asm_tuner_runtime_table.json",
     "selection_file": "asm_tuner_selection.json"
   },
   "oracle_manifest": "oracle_routes.v2.json",

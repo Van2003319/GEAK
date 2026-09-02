@@ -105,13 +105,14 @@ def test_materialization_is_complete_atomic_ranked_and_independently_verifiable(
     assert receipt["ok"] is True
     assert receipt["route_count"] == 11
     assert len(receipt["config_ids"]) == 2
-    table = RuntimeTableStore(workspace / ".geak_tuner/runtime_table.json").load()
+    table = RuntimeTableStore(workspace / "asm_tuner_runtime_table.json").load()
     assert table["suite"]["atomic"] is True
     assert table["suite"]["complete"] is True
     assert len(table["routes"]) == 11
     assert all([entry["rank"] for entry in row["entries"]] == [0, 1]
                for row in table["routes"].values())
     assert table["fallback"]["kind"] == "canonical"
+    assert table["task"]["source_digest"] == contract.source_digest
     assert table["search"]["compiled_candidates"] == 2
     assert table["score_metric"] == dict(contract.score_metric)
     assert all(entry["metric_id"] == contract.score_metric_id
@@ -150,7 +151,7 @@ def test_materialized_source_tamper_fails_closed(tmp_path, monkeypatch):
                     ignore=shutil.ignore_patterns("build", ".torch_ext", "__pycache__"))
     monkeypatch.setattr(integration.ctypes, "CDLL", lambda path: FakeLibrary())
     materialize_release(contract, release, workspace=workspace, registry_id="cfg-unit")
-    table = RuntimeTableStore(workspace / ".geak_tuner/runtime_table.json").load()
+    table = RuntimeTableStore(workspace / "asm_tuner_runtime_table.json").load()
     entry = table["routes"][table["suite"]["route_ids"][0]]["entries"][1]
     (workspace / entry["source"]).write_text("tampered\n")
     with pytest.raises(IntegrationError, match="source hash mismatch"):

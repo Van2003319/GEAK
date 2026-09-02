@@ -9,10 +9,11 @@
   },
   "asm_tuner_runtime": {
     "dispatch_loader": "geak_tuner_runtime.py",
-    "dispatch_loader_sha256": "d9ee134a1b50046f2f3b1f0def1d37291994a0ea0024e12a70e2b4a503ca4207",
+    "dispatch_loader_sha256": "a8dea961de35c18886c13c89017614d0e03311ff34832e561255f33307bcf50d",
     "fallback": "canonical for shapes outside the exact CASES suite",
     "required_lane_verification": "materialize + independent rebuild/load/hash + task dispatch smoke",
-    "runtime_table": ".geak_tuner/runtime_table.json",
+    "registry": "asm_tuner_registry.json",
+    "runtime_table": "asm_tuner_runtime_table.json",
     "selection_file": "asm_tuner_selection.json",
     "task_manifest": "asm_tuner/manifests/tasks/dense_bf16_gemm_fused.json"
   },
@@ -45,7 +46,7 @@
     ],
     "trusted_tuner_loader_exception": {
       "does_not_exempt": [
-        ".geak_tuner/runtime_table.json",
+        "asm_tuner_runtime_table.json",
         "generated source",
         "selected ELF",
         "any other dynamic loader"
