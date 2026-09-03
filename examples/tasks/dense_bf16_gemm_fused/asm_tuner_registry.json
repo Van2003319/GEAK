@@ -1,30 +1,105 @@
 {
   "configs": [
     {
-      "artifact": ".geak_tuner/releases/cf491ffcd8720a9c8e88d0c5c0648e09adcf26bdbefd68e8a3a7c786c1065872/release.json",
+      "artifact": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/release.json",
       "artifact_set": [
         {
           "kind": "artifact",
-          "path": ".geak_tuner/releases/cf491ffcd8720a9c8e88d0c5c0648e09adcf26bdbefd68e8a3a7c786c1065872/artifacts/069ae022819710d97eecfed1945fc593eaf380798b751acfbe7863a9aeeb0c76.so",
-          "sha256": "069ae022819710d97eecfed1945fc593eaf380798b751acfbe7863a9aeeb0c76"
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/artifacts/3cbf63e9a12e4a19a8ecbe98817b2f03d21a0d465af2caa3931f7a1fe2e17174.so",
+          "sha256": "3cbf63e9a12e4a19a8ecbe98817b2f03d21a0d465af2caa3931f7a1fe2e17174"
+        },
+        {
+          "kind": "artifact",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/artifacts/57261899ca5514fb5315cca33732eace5680054ed2515ce49d7794a534a6a5ac.so",
+          "sha256": "57261899ca5514fb5315cca33732eace5680054ed2515ce49d7794a534a6a5ac"
+        },
+        {
+          "kind": "artifact",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/artifacts/909429c568dea04998dc14f5a9ff6929bd65fea55c4c0b9c0af4002a541c0421.so",
+          "sha256": "909429c568dea04998dc14f5a9ff6929bd65fea55c4c0b9c0af4002a541c0421"
+        },
+        {
+          "kind": "artifact",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/artifacts/90e3b81e8b18a26616ac971b49e977d1aec5849ec03314ad1716b1029864261a.so",
+          "sha256": "90e3b81e8b18a26616ac971b49e977d1aec5849ec03314ad1716b1029864261a"
+        },
+        {
+          "kind": "artifact",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/artifacts/a69455a0a31cbc4bcd464d2eada81cf1cc06219d5fc5575b7e9da64ca96e9d2b.so",
+          "sha256": "a69455a0a31cbc4bcd464d2eada81cf1cc06219d5fc5575b7e9da64ca96e9d2b"
+        },
+        {
+          "kind": "artifact",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/artifacts/f8d28ac69a6229c8c59542cae20d7e493de67fa48fa13ac4ba3895de9c63defe.so",
+          "sha256": "f8d28ac69a6229c8c59542cae20d7e493de67fa48fa13ac4ba3895de9c63defe"
         },
         {
           "kind": "compile_manifest",
-          "path": ".geak_tuner/releases/cf491ffcd8720a9c8e88d0c5c0648e09adcf26bdbefd68e8a3a7c786c1065872/manifests/b374659f249fcca0bf31e5639b655c52f1b7d29a34fbfe777b3913fe1311cbd9.json",
-          "sha256": "b374659f249fcca0bf31e5639b655c52f1b7d29a34fbfe777b3913fe1311cbd9"
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/manifests/504b14ef09223a89db1f7b236a16e1374b64ff4e5963bc2e52781c8a64661c72.json",
+          "sha256": "504b14ef09223a89db1f7b236a16e1374b64ff4e5963bc2e52781c8a64661c72"
+        },
+        {
+          "kind": "compile_manifest",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/manifests/6f560707227fc99bf66fdef4c9c85acc4b3bcb0d0ddc27ce7699303d08b57d20.json",
+          "sha256": "6f560707227fc99bf66fdef4c9c85acc4b3bcb0d0ddc27ce7699303d08b57d20"
+        },
+        {
+          "kind": "compile_manifest",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/manifests/8afdae972f030d90eeb1d0f831a261f26e1c0f50989962846c5b67c5f65cabc3.json",
+          "sha256": "8afdae972f030d90eeb1d0f831a261f26e1c0f50989962846c5b67c5f65cabc3"
+        },
+        {
+          "kind": "compile_manifest",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/manifests/a625a4e3393036b9ebf886d36067e09c743b4fc341632b874b533c9f609abff8.json",
+          "sha256": "a625a4e3393036b9ebf886d36067e09c743b4fc341632b874b533c9f609abff8"
+        },
+        {
+          "kind": "compile_manifest",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/manifests/b024b0c3f04f5136da1b3634313effac592c71ad90414f35a8fe73b961c5df79.json",
+          "sha256": "b024b0c3f04f5136da1b3634313effac592c71ad90414f35a8fe73b961c5df79"
+        },
+        {
+          "kind": "compile_manifest",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/manifests/e56462313cc0297536a09f667c55dbd54435ffbeb19a2400077359505405fe32.json",
+          "sha256": "e56462313cc0297536a09f667c55dbd54435ffbeb19a2400077359505405fe32"
         },
         {
           "kind": "source",
-          "path": ".geak_tuner/releases/cf491ffcd8720a9c8e88d0c5c0648e09adcf26bdbefd68e8a3a7c786c1065872/sources/ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1.hip",
-          "sha256": "ee5d0b29a60b906d226092cf13a9a81a96b9577b1128ee6d862f3f38f81599d1"
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/sources/45392cfb85e1e50737ec9160b3739178884c131bfc5824f9cfb9a160d8c19236.hip",
+          "sha256": "45392cfb85e1e50737ec9160b3739178884c131bfc5824f9cfb9a160d8c19236"
+        },
+        {
+          "kind": "source",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/sources/5d0f0f5d48f5b4de518b51f020450141db94d5da29ef585be00b9f776c3a4204.hip",
+          "sha256": "5d0f0f5d48f5b4de518b51f020450141db94d5da29ef585be00b9f776c3a4204"
+        },
+        {
+          "kind": "source",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/sources/ad78bc15bb7948c124d1dcff49195df70d57d2a285b58d65a862aaa7f0bd4e20.hip",
+          "sha256": "ad78bc15bb7948c124d1dcff49195df70d57d2a285b58d65a862aaa7f0bd4e20"
+        },
+        {
+          "kind": "source",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/sources/c59deb16117c79d1cf1406e670b25f638060931a1cd69604f3dc91acc1ee149f.hip",
+          "sha256": "c59deb16117c79d1cf1406e670b25f638060931a1cd69604f3dc91acc1ee149f"
+        },
+        {
+          "kind": "source",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/sources/e21cf4c771f34b34568656a468fdea676bcf4e5f3fe834718f1bab53e9a3b08c.hip",
+          "sha256": "e21cf4c771f34b34568656a468fdea676bcf4e5f3fe834718f1bab53e9a3b08c"
+        },
+        {
+          "kind": "source",
+          "path": ".geak_tuner/releases/a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77/sources/fb2ca4c71adc945c235657d22705fea9f8e6420d1be060befe4ff6a8c194fa9f.hip",
+          "sha256": "fb2ca4c71adc945c235657d22705fea9f8e6420d1be060befe4ff6a8c194fa9f"
         }
       ],
-      "artifact_sha256": "b762e91a99578825eca237e7437ba2c284586f0acb9f0e1ffc35a954fc329521",
+      "artifact_sha256": "dfe855ff5bfbbacecd355c892a92063f64f1b85f42a79178b8195ef5ad460ef9",
       "build_receipt": {
-        "artifact_set_sha256": "dc4f912c0ff052a9b98b6317126abd6eb772d7f5c18d69e946357801189bfe21",
+        "artifact_set_sha256": "2e9bcb2c0cd2fb22b45221ea0477f2386df7765707ed81c1a1610684e9535e14",
         "oracle_manifest_sha256": "d7c75823dd2484c5442b63423d26d1025e4ada993f18904f8af30f41102c6b91",
         "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-        "release_id": "cf491ffcd8720a9c8e88d0c5c0648e09adcf26bdbefd68e8a3a7c786c1065872",
+        "release_id": "a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77",
         "schema": "geak.asm-materialized-release/v1",
         "score_metric": {
           "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
@@ -35,23 +110,31 @@
           "unit": "ms/call",
           "version": 1
         },
-        "search_id": "ee52ddf4eca83c43b1e172b6c2c0d0aab168ffadc9222066fd34032ece9ef4e5",
+        "search_id": "4f19db4842a021df7d3f90df58bfae2fbe35c2661cec0710d947ee3f86ee6e9d",
         "source_digest": "a382805b59a0fd73a56e50b3338ea9e3832f63fc54bb50a0226d9f1436f2c2bf",
-        "table_digest": "8a8e6c4610b45fd18e0a7800aaa9a21e5c62e8a49453dcabbcb73f7f4312235e",
+        "table_digest": "4185c0bbd9ce2400cd71b4dde16e328fcb2bcdea5983b3ad43584e77605af805",
         "task": "dense_bf16_gemm_fused",
         "task_digest": "79a7938db647e68907ddd816b0a9916d7a87272f4bb99049c090b88fb532b6e6"
       },
       "config": {
         "adapter": "bf16",
         "config_ids": [
-          "9539a5460e4eb2decfb6",
+          "00d29ed1408c0042de19",
+          "20dd16f7a50cff73f672",
+          "2d3250ccffa034ff0b33",
+          "329b1a235bbba83a20c1",
+          "486e5704374dde752613",
+          "6fb01f01ccac3f4b2ecd",
+          "728175935b169f20887b",
+          "73e443cd30232887db40",
+          "a7267cc35e7a9c5e9ad6",
           "c7f2c38f1343003c32d9"
         ],
         "kind": "asm_tuner_release",
         "oracle_manifest_sha256": "d7c75823dd2484c5442b63423d26d1025e4ada993f18904f8af30f41102c6b91",
         "priority": 0,
         "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
-        "release_id": "cf491ffcd8720a9c8e88d0c5c0648e09adcf26bdbefd68e8a3a7c786c1065872",
+        "release_id": "a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77",
         "score_metric": {
           "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
           "id": "sustained_throughput",
@@ -68,24 +151,24 @@
         "task_digest": "79a7938db647e68907ddd816b0a9916d7a87272f4bb99049c090b88fb532b6e6",
         "variant": "generated-successive-halving"
       },
-      "created_unix_ns": 1788392066484059132,
-      "id": "cfg-6fb1548d7ab8e4e52435",
+      "created_unix_ns": 1788400462018845269,
+      "id": "cfg-4bc454df1c70947c960e",
       "mechanism": "canonical protocol-v2 paired search",
       "precompiled": true,
-      "published_unix_ns": 1788392068493107098,
+      "published_unix_ns": 1788400575434113443,
       "status": "ready"
     }
   ],
   "launch_contract": {
     "artifact_set": {
-      "count": 3,
+      "count": 18,
       "kinds": {
-        "artifact": 1,
-        "compile_manifest": 1,
-        "source": 1
+        "artifact": 6,
+        "compile_manifest": 6,
+        "source": 6
       },
       "schema": "geak.asm-artifact-set/v1",
-      "sha256": "dc4f912c0ff052a9b98b6317126abd6eb772d7f5c18d69e946357801189bfe21"
+      "sha256": "2e9bcb2c0cd2fb22b45221ea0477f2386df7765707ed81c1a1610684e9535e14"
     },
     "oracle_manifest_sha256": "d7c75823dd2484c5442b63423d26d1025e4ada993f18904f8af30f41102c6b91",
     "protocol": {
@@ -95,11 +178,11 @@
     },
     "protocol_hash": "6c479d8f24864215652dc11c625ab8817dd868aeba273d4ae0fd61881d7523ec",
     "registry": "asm_tuner_registry.json",
-    "registry_id": "cfg-6fb1548d7ab8e4e52435",
-    "release_id": "cf491ffcd8720a9c8e88d0c5c0648e09adcf26bdbefd68e8a3a7c786c1065872",
+    "registry_id": "cfg-4bc454df1c70947c960e",
+    "release_id": "a6f4cdd4b90d39eea39054f240b0a3b657d9206fe68d2fdff756f52ab5c77a77",
     "runtime_table": "asm_tuner_runtime_table.json",
     "runtime_table_path_base": "task_root",
-    "runtime_table_sha256": "34fec9e6fef6ce4b696762b82cb67899e2c21fc78ade66494fe6ca28fb3191e5",
+    "runtime_table_sha256": "f744060b54b79ae1a1b12176b427a2679da7b6b0794fab09f3902b84ce6e481f",
     "schema": "geak.asm-launch-contract/v1",
     "score_metric": {
       "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
@@ -116,7 +199,7 @@
     "selection": {
       "path": "asm_tuner_selection.json",
       "path_base": "task_root",
-      "sha256": "32a1d82969120956d8efab2e057b001c73f586e5a360c03e39c424697254d22d"
+      "sha256": "6a040861d03ec6d81eb0813a3725fe87c5f6f649b45caea9d0dc9839be8da265"
     },
     "source_digest": "a382805b59a0fd73a56e50b3338ea9e3832f63fc54bb50a0226d9f1436f2c2bf",
     "task": "dense_bf16_gemm_fused",
@@ -137,5 +220,5 @@
   },
   "schema": "geak.config-search/v2",
   "schema_version": 2,
-  "updated_unix_ns": 1788392068494029158
+  "updated_unix_ns": 1788400575436726384
 }
