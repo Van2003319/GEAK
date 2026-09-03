@@ -168,7 +168,8 @@ class CommitAdvancesOnlyWhenTheTreeMoved(unittest.TestCase):
 
     def test_reprofile_is_gated_on_the_commit_too(self):
         self.assertRegex(
-            SOURCE, r"if \(commitOK\) \{\s*\n\s*profileSummary = await agentT\(", (
+            SOURCE,
+            r"if \(commitOK\) \{(?:(?!\n    \})[\s\S])*?profileSummary = await agentT\(", (
                 "re-profiling an unchanged canonical and filing it as the new best's bottleneck shift "
                 "manufactures a shift out of profiler drift (up to 17% between rocprofv3 invocations "
                 "on this lane) and steers the next round off it"))

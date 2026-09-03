@@ -65,14 +65,21 @@ The production chain is:
    `GEAK_PAIRED_EXPECTED_ROUTES`, `GEAK_PAIRED_RAW_RECEIPT`, and `GEAK_SCORE_METRIC`, and writes
    `geak.paired-measurement-suite/v2` with a versioned score/secondary metric pair.
 2. The lane runs `scripts/paired_verify.py produce` under one `gpu_lock.sh` +
-   `gpu_fence_run.sh` scope over the entire command. The producer hashes candidate, incumbent, and
-   immutable task roots before/after, rejects incumbent or harness mutation, and validates every
-   `geak.measurement-receipt/v2` raw block: same slot, candidate+incumbent in every block, device
-   event timing, dispatch priming, live output ring, one protocol hash, one lock, and exact full-suite
-   coverage. Optional oracle arms stay only in the sealed task receipt's absolute report.
+   `gpu_fence_run.sh` scope over the entire command. The producer first removes any prior output, then
+   atomically publishes the new full receipt without clobbering a path recreated during measurement.
+   The compact status is derived only from those exact published bytes. It hashes candidate, incumbent,
+   and immutable task roots
+   before/after, rejects mutation, and validates every `geak.measurement-receipt/v2` raw block: same
+   slot, candidate+incumbent in every block, device event timing, dispatch priming, live output ring,
+   one protocol hash, one lock, and exact full-suite coverage. Optional oracle arms stay only in the
+   sealed file. Stdout is **only** `geak.paired-verify-produce-status/v1`: an under-10KB lane-token,
+   path/content-SHA/byte-size plus schema, metric, route, and block-count summary. Full raw blocks never
+   enter the
+   model's StructuredOutput.
 3. The lane—not the model—creates a unique session from eval-dir/round/candidate/ordinal and supplies
-   the planner-owned non-empty targets. `paired_verify.py adapt` derives pair ids from outer block
-   ordinals and directly emits `geak.route-gate-input/v2`.
+   the planner-owned non-empty targets. `paired_verify.py adapt` receives the producer's expected
+   content SHA and byte size, reads the exact file once, validates its canonical hash and every route/
+   raw block/protocol/metric/lock invariant, derives pair ids, and emits `geak.route-gate-input/v2`.
 4. `scripts/route_gate.py` is the sole statistical decision and emits
    `geak.route-gate-receipt/v2`.
 
@@ -84,11 +91,14 @@ bash kernel_workflow/scripts/gpu_lock.sh <gpu-pool> \
   python3 kernel_workflow/scripts/paired_verify.py produce \
     --candidate-root <verify/candidate> --incumbent-root <verify/incumbent> \
     --task-root <immutable-task-root> --score-metric sustained_throughput \
-    --expected-route <route> ... --output <paired_task_receipt.json> -- \
+    --producer-token <lane-generated-session> --expected-route <route> ... \
+    --output <paired_task_receipt.json> -- \
     python3 <immutable-task-root>/scripts/task_runner.py paired-verify
 
 python3 kernel_workflow/scripts/paired_verify.py adapt \
-  --receipt <paired_task_receipt.json> --session-id <lane-generated> \
+  --receipt <paired_task_receipt.json> --expected-sha256 <produce-status.sha256> \
+  --expected-size <produce-status.size> --expected-producer-token <lane-generated-session> \
+  --session-id <lane-generated-session> \
   --expected-route <route> ... --target-route <planner-route> ...
 ```
 
@@ -104,12 +114,21 @@ Type-7 fifth percentile as a one-sided 95% lower bound. Suite resampling keeps w
 together. Acceptance intersects target MDE, non-target non-regression, suite non-inferiority, and the
 10% catastrophic point-estimate fence. Defaults are 2%, 2%, and 1% respectively.
 
-The gate input and receipt both carry the task canonical SHA, measurement protocol object/hash, GPU
-lock, priming, slot/raw invariants, output lifecycle, immutable root hashes, effective margins, route
+The gate input and receipt both carry the task canonical SHA and exact source-file path/content-SHA/
+byte-size binding, measurement protocol object/hash, GPU lock, priming, slot/raw invariants, output
+lifecycle, immutable root hashes, effective margins, route
 weights, algorithm parameters, suite endpoint, and all route endpoints. Python recomputes protocol
 hashes. Workflow JS independently canonicalizes and SHA-256 hashes the exact submitted gate input,
 deep-compares the echoed measurement binding, algorithm, effective margins and normalized weights,
 and rejects a plausible-looking fake hash.
+
+On resume, a latest-round `invocation_error` winner is classified as
+`retryable_infrastructure` only when its registered patch, durable verification receipt, candidate and
+incumbent roots, and full paired receipt all still hash and validate against the persisted state and
+current canonical tree. The journal is reopened and prioritized for independent reverification; STATE
+and canonical bytes are not changed, and the candidate still cannot commit without a fresh Python gate
+ACCEPT receipt. Statistical refusal, invalid evidence, incomplete/tampered directories, and older
+non-latest candidates are never reopened this way.
 
 Migration is fail-closed. A task without a checked-in v2 paired adapter, a partial suite, old
 verifier-authored pair arrays, an empty/missing planner target, stale protocol/hash, or any

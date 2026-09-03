@@ -22,6 +22,7 @@ from typing import Any, Iterator, Mapping, Sequence
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+import paired_verify  # noqa: E402
 import workflow_state  # noqa: E402
 
 SCHEMA = "geak.round-journal/v1"
@@ -289,6 +290,8 @@ def _transition_entry(
     now = time.time_ns()
     entry["status"] = status
     entry["updated_unix_ns"] = now
+    if status in FINAL_STATUSES:
+        entry.pop("retryable_infrastructure", None)
     if verification_path is not None and _regular(verification_path):
         entry["verification"] = {
             "status": "passed" if status in {"verified", "integrated"} else "failed",
@@ -380,13 +383,25 @@ def discover(
             recovered = dict(entry)
             recovered["worker_result"] = worker
             recovered["parent_hash_mismatches"] = parent_mismatches
+            retryable = entry.get("retryable_infrastructure") is True
+            recovered["recovery_classification"] = (
+                "retryable_infrastructure" if retryable else "interrupted_completion")
             recovered["recovery_reason"] = (
+                "retryable_infrastructure: prior Python gate invocation failed after durable "
+                "verification; independently reverify without committing"
+                if retryable else
                 "deadline_or_process_interrupted_after_engineer_completion; independently reverify"
             )
             recoverable.append(recovered)
-    recoverable.sort(key=lambda entry: (int(entry.get("round") or 0),
-                                        int(entry.get("created_unix_ns") or 0),
-                                        str(entry.get("candidate_id") or "")))
+    # Infrastructure retries run before ordinary interrupted work; newest retry first.
+    recoverable.sort(key=lambda entry: (
+        0 if entry.get("retryable_infrastructure") is True else 1,
+        -int(entry.get("round") or 0) if entry.get("retryable_infrastructure") is True
+        else int(entry.get("round") or 0),
+        -int(entry.get("created_unix_ns") or 0) if entry.get("retryable_infrastructure") is True
+        else int(entry.get("created_unix_ns") or 0),
+        str(entry.get("candidate_id") or ""),
+    ))
     return {
         "ok": True,
         "schema": SCHEMA,
@@ -395,6 +410,122 @@ def discover(
         "canonical_hashes": current_hashes,
         "policy": "registered-only; unregistered filesystem artifacts are never harvested",
     }
+
+
+def reopen_latest_gate_invocation(
+    journal_dir: os.PathLike[str] | str,
+    *,
+    state_file: os.PathLike[str] | str,
+    canonical: os.PathLike[str] | str,
+    expected_routes: Sequence[str],
+) -> dict[str, Any]:
+    """Reopen only the latest state-backed invocation failure for independent revalidation."""
+    state = _read_json(Path(state_file))
+    if state.get("schema") != workflow_state.SCHEMA:
+        raise JournalError("retry state is not a validated workflow-state/v2 document")
+    round_number = state.get("last_round")
+    if isinstance(round_number, bool) or not isinstance(round_number, int) or round_number < 1:
+        return {"ok": True, "schema": SCHEMA, "reopened": False,
+                "reason": "state has no completed round to retry"}
+    rounds = [row for row in (state.get("rounds") or [])
+              if isinstance(row, Mapping) and row.get("round") == round_number]
+    if len(rounds) != 1:
+        raise JournalError("latest completed state round is absent or ambiguous")
+    latest = rounds[0]
+    gate = latest.get("gate_receipt")
+    winner = latest.get("winner")
+    if (not isinstance(gate, Mapping) or gate.get("decision") != "invocation_error"
+            or not isinstance(winner, Mapping)):
+        return {"ok": True, "schema": SCHEMA, "reopened": False,
+                "reason": "latest completed round has no gate invocation error winner"}
+    source = winner.get("source")
+    if not isinstance(source, str) or not source.startswith("engineer "):
+        raise JournalError("latest invocation-error winner is not one registered engineer candidate")
+    direction = source.removeprefix("engineer ").strip()
+    results = [row for row in (latest.get("results") or [])
+               if isinstance(row, Mapping) and row.get("id") == direction]
+    if len(results) != 1 or results[0].get("status") != "verified":
+        raise JournalError("latest invocation-error winner was not independently verified")
+    expected = sorted(expected_routes)
+    if (not expected or len(expected) != len(set(expected))
+            or any(not isinstance(route, str) or not route or route != route.strip()
+                   for route in expected)):
+        raise JournalError("expected route manifest is empty, duplicate, or non-canonical")
+    state_hashes = state.get("canonical_hashes")
+    current_hashes = workflow_state.canonical_hashes(canonical)
+    if state_hashes != current_hashes:
+        raise JournalError("current canonical tree differs from the latest persisted state")
+
+    candidate_id = f"r{round_number}:{direction}"
+    root = Path(journal_dir)
+    with _locked(root):
+        matches: list[tuple[Path, dict[str, Any]]] = []
+        for entry_path in _entry_files(root):
+            entry = _read_json(entry_path)
+            if entry.get("candidate_id") == candidate_id and entry.get("round") == round_number:
+                matches.append((entry_path, entry))
+        if len(matches) != 1:
+            raise JournalError(f"retry journal entry is absent or ambiguous: {candidate_id}")
+        entry_path, entry = matches[0]
+        already_reopened = (entry.get("status") == "verified"
+                            and entry.get("retryable_infrastructure") is True)
+        if not already_reopened:
+            history = entry.get("history") or []
+            last_reason = (history[-1].get("reason")
+                           if history and isinstance(history[-1], Mapping) else "")
+            legacy_rejected = (
+                entry.get("status") == "rejected"
+                and last_reason == "round settled: not the committed winner")
+            barrier_not_settled = entry.get("status") == "verified"
+            if not (legacy_rejected or barrier_not_settled):
+                raise JournalError("journal candidate was rejected for a mechanism/evidence reason")
+        if entry.get("parent_canonical_hashes") != current_hashes:
+            raise JournalError("retry candidate parent differs from the current canonical tree")
+        integrity = _verify_registered_bytes(entry)
+        if integrity:
+            raise JournalError(integrity)
+        verification = entry.get("verification") or {}
+        verification_receipt = verification.get("receipt") or {}
+        verify_path = Path(str(verification_receipt.get("path") or ""))
+        if (verification.get("status") != "passed" or not _regular(verify_path)
+                or _sha256(verify_path) != verification_receipt.get("sha256")
+                or verify_path.name != "verification_result.json"):
+            raise JournalError("durable verification receipt is missing, stale, or incomplete")
+        verify_dir = verify_path.parent
+        round_dir = Path(str(entry.get("eval_dir") or "")) / f"round_{round_number}"
+        try:
+            relative_verify = verify_dir.relative_to(round_dir)
+        except ValueError as exc:
+            raise JournalError("verification receipt is outside its registered round") from exc
+        if len(relative_verify.parts) != 1 or not relative_verify.name.startswith("verify_"):
+            raise JournalError("verification receipt is not in one deterministic verify directory")
+        candidate_root = verify_dir / "candidate"
+        incumbent_root = verify_dir / "incumbent"
+        task_path = verify_dir / "paired_task_receipt.json"
+        if (candidate_root.is_symlink() or incumbent_root.is_symlink()
+                or not candidate_root.is_dir() or not incumbent_root.is_dir()
+                or not _regular(task_path)):
+            raise JournalError("retry verify directory is missing candidate/incumbent/full receipt")
+        task_value = _read_json(task_path)
+        try:
+            task, _ = paired_verify.validate_task_receipt(task_value, expected)
+        except paired_verify.PairedVerifyError as exc:
+            raise JournalError(f"retry paired task receipt is invalid: {exc}") from exc
+        if (task.get("candidate_root") != str(candidate_root)
+                or task.get("incumbent_root") != str(incumbent_root)
+                or task.get("candidate_hashes") != workflow_state.canonical_hashes(candidate_root)
+                or task.get("incumbent_hashes") != workflow_state.canonical_hashes(incumbent_root)):
+            raise JournalError("retry paired task receipt does not bind the complete verify roots")
+        if not already_reopened:
+            entry["retryable_infrastructure"] = True
+            entry = _transition_entry(
+                entry_path, entry, status="verified",
+                reason=("retryable_infrastructure: latest persisted gate decision was invocation_error; "
+                        "full prior verify evidence is intact; independently reverify without committing"),
+                verification_receipt=str(verify_path),
+            )
+    return {"ok": True, "schema": SCHEMA, "reopened": True,
+            "idempotent": already_reopened, "entry": entry, "entry_file": str(entry_path)}
 
 
 def settle_round(
@@ -406,7 +537,11 @@ def settle_round(
     committed: bool,
     integration_receipt: str = "",
     candidate_ids: Sequence[str] | None = None,
+    retryable_infrastructure: bool = False,
 ) -> dict[str, Any]:
+    if retryable_infrastructure and (committed or not winner_direction):
+        raise JournalError(
+            "retryable_infrastructure requires one uncommitted verified winner direction")
     root = Path(journal_dir)
     changed: list[dict[str, Any]] = []
     candidate_filter = set(candidate_ids or ())
@@ -425,7 +560,14 @@ def settle_round(
                     continue
                 if committed:
                     status, reason = "integrated", "round winner committed into canonical"
+                elif retryable_infrastructure:
+                    entry["retryable_infrastructure"] = True
+                    status = "verified"
+                    reason = (
+                        "retryable_infrastructure: Python gate invocation failed after durable "
+                        "verification; preserve for next-wave revalidation")
                 else:
+                    entry.pop("retryable_infrastructure", None)
                     status, reason = "verified", "winner not committed; preserve for next-wave revalidation"
             elif entry.get("status") == "engineer_complete" and (entry.get("artifact") or {}).get("present"):
                 # Verification never reached a durable receipt (API failure/process cut). It is neither
@@ -464,6 +606,12 @@ def _parser() -> argparse.ArgumentParser:
     trans.add_argument("--verification-receipt", default="")
     trans.add_argument("--integration-receipt", default="")
 
+    reopen = sub.add_parser("reopen-gate-invocation")
+    reopen.add_argument("--journal-dir", required=True)
+    reopen.add_argument("--state-file", required=True)
+    reopen.add_argument("--canonical", required=True)
+    reopen.add_argument("--expected-route", action="append", default=[])
+
     disc = sub.add_parser("discover")
     disc.add_argument("--journal-dir", required=True)
     disc.add_argument("--canonical", required=True)
@@ -477,6 +625,7 @@ def _parser() -> argparse.ArgumentParser:
     settle.add_argument("--committed", action="store_true")
     settle.add_argument("--integration-receipt", default="")
     settle.add_argument("--candidate-id", action="append", default=[])
+    settle.add_argument("--retryable-infrastructure", action="store_true")
     return parser
 
 
@@ -495,6 +644,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 reason=args.reason,
                                 verification_receipt=args.verification_receipt,
                                 integration_receipt=args.integration_receipt)
+        elif args.command == "reopen-gate-invocation":
+            result = reopen_latest_gate_invocation(
+                args.journal_dir, state_file=args.state_file, canonical=args.canonical,
+                expected_routes=args.expected_route)
         elif args.command == "discover":
             result = discover(args.journal_dir, canonical=args.canonical,
                               current_eval_dir=args.current_eval_dir)
@@ -504,7 +657,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                   winner_direction=args.winner_direction,
                                   committed=args.committed,
                                   integration_receipt=args.integration_receipt,
-                                  candidate_ids=args.candidate_id)
+                                  candidate_ids=args.candidate_id,
+                                  retryable_infrastructure=args.retryable_infrastructure)
         sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
         return 0 if result.get("ok", result.get("registered", False)) else 2
     except JournalError as exc:

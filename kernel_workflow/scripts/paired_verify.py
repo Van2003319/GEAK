@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -25,6 +26,7 @@ from workflow_state import canonical_hashes
 
 RAW_SUITE_SCHEMA = "geak.paired-measurement-suite/v2"
 TASK_RECEIPT_SCHEMA = "geak.paired-verify-task-receipt/v2"
+PRODUCE_STATUS_SCHEMA = "geak.paired-verify-produce-status/v1"
 MEASUREMENT_SCHEMA = "geak.measurement-receipt/v2"
 PROTOCOL_SCHEMA = "geak.measurement-protocol/v2"
 SCORE_METRIC_SCHEMA = "geak.score-metric/v1"
@@ -32,6 +34,7 @@ SCORE_METRIC_IDS = ("single_call_latency", "sustained_throughput")
 GATE_INPUT_SCHEMA = "geak.route-gate-input/v2"
 BINDING_SCHEMA = "geak.paired-verify-binding/v2"
 MIN_PAIRS = 8
+MAX_PRODUCE_STATUS_BYTES = 10_000
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ALLOWED_GATE_CONFIG = frozenset({
     "practical_mde", "non_regression_margin",
@@ -66,16 +69,37 @@ def canonical_sha256(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("ascii")).hexdigest()
 
 
-def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+def _bytes_sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _json_file_bytes(value: Mapping[str, Any]) -> bytes:
+    rendered = json.dumps(
+        value, sort_keys=True, indent=2, ensure_ascii=True, allow_nan=False)
+    return (rendered + "\n").encode("ascii")
+
+
+def _atomic_json(
+    path: Path, value: Mapping[str, Any], *, replace_existing: bool = True,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     try:
-        with tmp.open("x", encoding="utf-8") as handle:
-            json.dump(value, handle, sort_keys=True, indent=2, allow_nan=False)
-            handle.write("\n")
+        with tmp.open("xb") as handle:
+            handle.write(_json_file_bytes(value))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        if replace_existing:
+            os.replace(tmp, path)
+        else:
+            # The stale file was cleared before measurement.  Publishing with link(2), rather
+            # than replace(2), atomically refuses any path recreated while the task was running.
+            try:
+                os.link(tmp, path)
+            except FileExistsError as exc:
+                raise PairedVerifyError(
+                    f"refusing to replace a recreated paired task receipt: {path}") from exc
+            tmp.unlink()
         try:
             fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
@@ -96,6 +120,143 @@ def _load_json(path: os.PathLike[str] | str) -> object:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise PairedVerifyError(f"cannot read JSON receipt {path}: {exc}") from exc
+
+
+def _absolute_canonical_path(path: Path, label: str) -> Path:
+    text = os.fspath(path)
+    if not path.is_absolute() or os.path.abspath(text) != text:
+        raise PairedVerifyError(f"{label} must be an absolute normalized path")
+    return path
+
+
+def _fresh_output_path(path: Path) -> Path:
+    """Remove any prior receipt before work so a failed invocation cannot reuse it."""
+    path = _absolute_canonical_path(path, "produce output")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.is_symlink() or path.exists():
+            if path.exists() and path.is_dir() and not path.is_symlink():
+                raise PairedVerifyError(f"produce output is a directory: {path}")
+            path.unlink()
+    except OSError as exc:
+        raise PairedVerifyError(f"cannot clear prior produce output {path}: {exc}") from exc
+    return path
+
+
+def _stable_regular_file_bytes(path: Path, label: str) -> bytes:
+    """Read one regular-file inode and reject swaps or in-place writes during the read."""
+    path = _absolute_canonical_path(path, label)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise PairedVerifyError(
+            f"{label} is missing, replaced, or not a regular file: {path}") from exc
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise PairedVerifyError(f"{label} is not a regular file: {path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    try:
+        linked = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise PairedVerifyError(f"{label} was replaced while being read: {path}") from exc
+    if not stat.S_ISREG(linked.st_mode):
+        raise PairedVerifyError(f"{label} was replaced by a non-regular file: {path}")
+    def snapshot(row: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+
+    if snapshot(before) != snapshot(after) or snapshot(after) != snapshot(linked):
+        raise PairedVerifyError(f"{label} was replaced or modified while being read: {path}")
+    return b"".join(chunks)
+
+
+def load_bound_task_receipt(
+    path: Path, *, expected_sha256: str, expected_size: int,
+) -> tuple[object, dict[str, object]]:
+    """Read once, bind exact bytes, then decode; never hash one file and parse another."""
+    path = _absolute_canonical_path(path, "paired task receipt")
+    if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(expected_sha256) is None:
+        raise PairedVerifyError("expected paired task SHA-256 is malformed")
+    if (isinstance(expected_size, bool) or not isinstance(expected_size, int)
+            or expected_size <= 0):
+        raise PairedVerifyError("expected paired task size must be a positive integer")
+    data = _stable_regular_file_bytes(path, "paired task receipt")
+    actual_size = len(data)
+    actual_sha256 = _bytes_sha256(data)
+    if actual_size != expected_size:
+        raise PairedVerifyError(
+            f"paired task receipt size mismatch: expected {expected_size}, got {actual_size}")
+    if actual_sha256 != expected_sha256:
+        raise PairedVerifyError(
+            f"paired task receipt SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PairedVerifyError(f"cannot decode paired task receipt {path}: {exc}") from exc
+    return value, {"path": str(path), "sha256": actual_sha256, "size": actual_size}
+
+
+def task_receipt_status(path: Path, receipt: Mapping[str, object]) -> dict[str, object]:
+    """Return the only object a producer relay may carry through StructuredOutput."""
+    path = _absolute_canonical_path(path, "paired task receipt")
+    data = _stable_regular_file_bytes(path, "paired task receipt")
+    if data != _json_file_bytes(receipt):
+        raise PairedVerifyError(
+            "paired task receipt bytes changed or were replaced before status generation")
+    try:
+        on_disk = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PairedVerifyError(f"cannot summarize paired task receipt {path}: {exc}") from exc
+    if on_disk != receipt:
+        raise PairedVerifyError("paired task receipt changed before status generation")
+    rows = receipt.get("routes")
+    if not isinstance(rows, list) or not rows:
+        raise PairedVerifyError("paired task receipt has no routes to summarize")
+    producer_token = receipt.get("producer_token")
+    if (not isinstance(producer_token, str) or not producer_token.strip()
+            or producer_token != producer_token.strip()):
+        raise PairedVerifyError("paired task receipt has no producer freshness token")
+    first_measurement = rows[0].get("measurement_receipt") if isinstance(rows[0], Mapping) else None
+    blocks = first_measurement.get("blocks") if isinstance(first_measurement, Mapping) else None
+    status: dict[str, object] = {
+        "schema": PRODUCE_STATUS_SCHEMA,
+        "ok": True,
+        "path": str(path),
+        "sha256": _bytes_sha256(data),
+        "size": len(data),
+        "producer_token": producer_token,
+        "receipt": {
+            "schema": receipt.get("schema"),
+            "canonical_input_sha256": receipt.get("canonical_input_sha256"),
+        },
+        "metric": {
+            "id": receipt.get("metric_id"),
+            "inner": receipt.get("inner"),
+            "score_metric_sha256": (
+                receipt.get("score_metric", {}).get("hash")
+                if isinstance(receipt.get("score_metric"), Mapping) else None),
+            "protocol_sha256": receipt.get("protocol_hash"),
+        },
+        "routes": {
+            "count": len(rows),
+            "names": [row.get("route") for row in rows if isinstance(row, Mapping)],
+            "blocks": len(blocks) if isinstance(blocks, list) else 0,
+        },
+    }
+    encoded = canonical_json(status).encode("ascii")
+    if len(encoded) >= MAX_PRODUCE_STATUS_BYTES:
+        raise PairedVerifyError(
+            f"paired produce status is {len(encoded)} bytes; limit is <{MAX_PRODUCE_STATUS_BYTES}")
+    return status
 
 
 def _names(value: object, label: str) -> list[str]:
@@ -496,8 +657,13 @@ def _requested_score_metric(metric_id: str | None) -> str:
 def produce(
     *, candidate_root: Path, incumbent_root: Path, task_root: Path,
     expected_routes: Sequence[str], command: Sequence[str], output: Path,
-    score_metric_id: str | None = None,
+    producer_token: str, score_metric_id: str | None = None,
 ) -> dict[str, Any]:
+    # Clear first: any failure below must leave no old receipt that a relay could mistake for this run.
+    output = _fresh_output_path(output)
+    if (not isinstance(producer_token, str) or not producer_token.strip()
+            or producer_token != producer_token.strip()):
+        raise PairedVerifyError("producer token is blank or non-canonical")
     if os.environ.get("GEAK_GPU_LOCK_HELD") != "1":
         raise PairedVerifyError("produce must run inside kernel_workflow/scripts/gpu_lock.sh")
     lock_path = os.environ.get("GEAK_GPU_LOCK_FILE", "")
@@ -544,12 +710,16 @@ def produce(
         "GEAK_SCORE_METRIC": selected_metric_id,
     })
     try:
-        proc = subprocess.run(command, cwd=candidate_root, env=env, text=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        proc = subprocess.run(command, cwd=candidate_root, env=env,
+                              capture_output=True, check=False)
         if proc.returncode != 0:
+            stdout = bytes(proc.stdout or b"")
+            stderr = bytes(proc.stderr or b"")
+            # Never relay task output: an old adapter may have printed the full raw receipt.
             raise PairedVerifyError(
-                f"task paired command exited {proc.returncode}: "
-                f"{proc.stderr.strip() or proc.stdout.strip()}")
+                f"task paired command exited {proc.returncode}; "
+                f"stdout_bytes={len(stdout)},stdout_sha256={_bytes_sha256(stdout)}; "
+                f"stderr_bytes={len(stderr)},stderr_sha256={_bytes_sha256(stderr)}")
         raw = _load_json(raw_path)
         task_after = canonical_hashes(task_root)
         if task_before != task_after:
@@ -564,10 +734,12 @@ def produce(
             expected_metric_id=selected_metric_id)
         receipt["task_root"] = str(task_root)
         receipt["task_hashes"] = task_after
+        # Lane-owned freshness challenge: a prior file/status cannot satisfy a new adapter request.
+        receipt["producer_token"] = producer_token
         # Re-seal after adding immutable producer identity.
         receipt.pop("canonical_input_sha256", None)
         receipt["canonical_input_sha256"] = canonical_sha256(receipt)
-        _atomic_json(output, receipt)
+        _atomic_json(output, receipt, replace_existing=False)
         return receipt
     finally:
         try:
@@ -675,7 +847,8 @@ def validate_task_receipt(
 
 def adapt(
     task_receipt: object, *, session_id: str, expected_routes: Sequence[str],
-    target_routes: Sequence[str], gate_config: Mapping[str, object] | None = None,
+    target_routes: Sequence[str], receipt_binding: Mapping[str, object],
+    expected_producer_token: str, gate_config: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(session_id, str) or not session_id.strip() or session_id != session_id.strip():
         raise PairedVerifyError("lane session id is blank or non-canonical")
@@ -685,6 +858,19 @@ def adapt(
     if unknown:
         raise PairedVerifyError(f"target_routes are outside the suite: {unknown}")
     task, routes = validate_task_receipt(task_receipt, expected)
+    if (not isinstance(expected_producer_token, str) or not expected_producer_token.strip()
+            or task.get("producer_token") != expected_producer_token):
+        raise PairedVerifyError("paired task receipt producer token is stale")
+    binding = dict(receipt_binding) if isinstance(receipt_binding, Mapping) else {}
+    binding_path = binding.get("path")
+    binding_sha256 = binding.get("sha256")
+    binding_size = binding.get("size")
+    if (not isinstance(binding_path, str) or not isinstance(binding_sha256, str)
+            or SHA256_RE.fullmatch(binding_sha256) is None
+            or isinstance(binding_size, bool) or not isinstance(binding_size, int)
+            or binding_size <= 0):
+        raise PairedVerifyError("paired task receipt file binding is malformed")
+    _absolute_canonical_path(Path(binding_path), "receipt binding path")
     block_ids = [block["block"] for block in routes[expected[0]]["blocks"]]
     pair_ids = [f"{session_id}:block-{block:04d}" for block in block_ids]
     paired_routes, lifecycle, receipt_hashes = [], {}, {}
@@ -712,6 +898,8 @@ def adapt(
         "candidate_dispatch": task["candidate_dispatch"],
         "incumbent_dispatch": task["incumbent_dispatch"],
         "canonical_input_sha256": task["canonical_input_sha256"],
+        "producer_token": task["producer_token"],
+        "task_receipt_file": binding,
         "protocol": task["protocol"],
         "protocol_hash": task["protocol_hash"],
         "score_metric": task["score_metric"],
@@ -772,10 +960,14 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--task-root", required=True)
     p.add_argument("--expected-route", action="append", default=[])
     p.add_argument("--score-metric", choices=SCORE_METRIC_IDS)
+    p.add_argument("--producer-token", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("command", nargs=argparse.REMAINDER)
     a = sub.add_parser("adapt", help="emit route-gate-input/v2 from a task receipt")
     a.add_argument("--receipt", required=True)
+    a.add_argument("--expected-sha256", required=True)
+    a.add_argument("--expected-size", required=True, type=int)
+    a.add_argument("--expected-producer-token", required=True)
     a.add_argument("--session-id", required=True)
     a.add_argument("--expected-route", action="append", default=[])
     a.add_argument("--target-route", action="append", default=[])
@@ -791,19 +983,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             command = list(args.command)
             if command and command[0] == "--":
                 command.pop(0)
-            result = produce(
+            output = Path(args.output)
+            receipt = produce(
                 candidate_root=Path(args.candidate_root), incumbent_root=Path(args.incumbent_root),
                 task_root=Path(args.task_root), expected_routes=args.expected_route,
-                command=command, output=Path(args.output),
+                command=command, output=output, producer_token=args.producer_token,
                 score_metric_id=args.score_metric)
+            result = task_receipt_status(output, receipt)
         else:
             config = json.loads(args.gate_config_json)
             if not isinstance(config, dict):
                 raise PairedVerifyError("gate-config-json must decode to an object")
+            task_receipt, receipt_binding = load_bound_task_receipt(
+                Path(args.receipt), expected_sha256=args.expected_sha256,
+                expected_size=args.expected_size)
             result = adapt(
-                _load_json(args.receipt), session_id=args.session_id,
+                task_receipt, session_id=args.session_id,
                 expected_routes=args.expected_route, target_routes=args.target_route,
-                gate_config=config)
+                receipt_binding=receipt_binding,
+                expected_producer_token=args.expected_producer_token, gate_config=config)
             if args.output:
                 _atomic_json(Path(args.output), result)
         sys.stdout.write(canonical_json(result) + "\n")

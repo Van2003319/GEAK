@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("round_journal.py")
+sys.path.insert(0, str(SCRIPT.parent))
+from test_paired_verify import task_receipt as paired_task_receipt  # noqa: E402
+
 SPEC = importlib.util.spec_from_file_location("round_journal_under_test", SCRIPT)
 assert SPEC and SPEC.loader
 RJ = importlib.util.module_from_spec(SPEC)
@@ -217,3 +220,181 @@ def test_empty_patch_is_journaled_as_no_patch(tmp_path: Path) -> None:
     )
     assert result["registered"] is True
     assert result["entry"]["artifact"]["present"] is False
+
+
+def test_gate_invocation_error_is_retryable_and_prioritized_without_commit(tmp_path: Path) -> None:
+    journal, canonical, old_eval, patch, receipt, _ = register(tmp_path)
+    verify = old_eval / "round_4" / "verify_0" / "verification_result.json"
+    verify.parent.mkdir()
+    verify.write_text('{"status":"verified","correctness":"pass"}', encoding="utf-8")
+    RJ.transition(
+        journal, eval_dir=str(old_eval), candidate_id="r4:r4_d0", status="verified",
+        reason="independent verification completed", verification_receipt=str(verify),
+    )
+    settled = RJ.settle_round(
+        journal, eval_dir=str(old_eval), round_number=4, winner_direction="r4_d0",
+        committed=False, candidate_ids=["r4:r4_d0"], retryable_infrastructure=True,
+    )
+    entry = settled["entries"][0]
+    assert entry["status"] == "verified"
+    assert entry["retryable_infrastructure"] is True
+    assert "retryable_infrastructure" in entry["history"][-1]["reason"]
+
+    # A newer ordinary interruption must still wait behind the infrastructure retry.
+    ordinary = RJ.register(
+        journal, eval_dir=str(old_eval), candidate_id="r5:r5_d0", round_number=5,
+        direction="r5_d0", phase="phase1_source", artifact=patch,
+        worker_receipt=receipt, canonical=canonical, target_routes=["route-a"],
+    )
+    assert ordinary["registered"] is True
+    found = RJ.discover(journal, canonical=canonical, current_eval_dir=str(tmp_path / "wave2"))
+    assert [row["candidate_id"] for row in found["recoverable"]] == [
+        "r4:r4_d0", "r5:r5_d0",
+    ]
+    retry = found["recoverable"][0]
+    assert retry["recovery_classification"] == "retryable_infrastructure"
+    assert "independently reverify without committing" in retry["recovery_reason"]
+    assert (canonical / "kernel.py").read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_resume_reopens_latest_legacy_invocation_error_only_after_full_validation(
+    tmp_path: Path,
+) -> None:
+    journal, canonical, old_eval, _, _, _ = register(tmp_path)
+    verify_dir = old_eval / "round_4" / "verify_0"
+    verify_dir.mkdir()
+    verify = verify_dir / "verification_result.json"
+    verify.write_text('{"status":"verified","correctness":"pass"}', encoding="utf-8")
+    RJ.transition(
+        journal, eval_dir=str(old_eval), candidate_id="r4:r4_d0", status="verified",
+        reason="independent verification completed", verification_receipt=str(verify),
+    )
+    # Simulate the pre-fix lane: an invocation error was incorrectly settled as rejection.
+    RJ.settle_round(
+        journal, eval_dir=str(old_eval), round_number=4, winner_direction="",
+        committed=False, candidate_ids=["r4:r4_d0"],
+    )
+    task = paired_task_receipt(verify_dir)
+    (verify_dir / "paired_task_receipt.json").write_text(
+        json.dumps(task, sort_keys=True), encoding="utf-8")
+    state = {
+        "schema": RJ.workflow_state.SCHEMA,
+        "last_round": 4,
+        "canonical_hashes": RJ.workflow_state.canonical_hashes(canonical),
+        "rounds": [{
+            "round": 4,
+            "winner": {"source": "engineer r4_d0", "geomean": 1.05},
+            "gate_receipt": {"decision": "invocation_error"},
+            "results": [{"id": "r4_d0", "status": "verified"}],
+        }],
+    }
+    state_file = tmp_path / "STATE.json"
+    state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    state_before = state_file.read_bytes()
+    canonical_before = (canonical / "kernel.py").read_bytes()
+
+    reopened = RJ.reopen_latest_gate_invocation(
+        journal, state_file=state_file, canonical=canonical,
+        expected_routes=["target", "guard"],
+    )
+    assert reopened["reopened"] is True and reopened["idempotent"] is False
+    assert reopened["entry"]["status"] == "verified"
+    assert reopened["entry"]["retryable_infrastructure"] is True
+    again = RJ.reopen_latest_gate_invocation(
+        journal, state_file=state_file, canonical=canonical,
+        expected_routes=["target", "guard"],
+    )
+    assert again["reopened"] is True and again["idempotent"] is True
+    assert state_file.read_bytes() == state_before
+    assert (canonical / "kernel.py").read_bytes() == canonical_before
+    found = RJ.discover(journal, canonical=canonical, current_eval_dir=str(tmp_path / "wave2"))
+    assert found["recoverable"][0]["candidate_id"] == "r4:r4_d0"
+    assert found["recoverable"][0]["recovery_classification"] == "retryable_infrastructure"
+
+
+def test_resume_does_not_reopen_tampered_or_statistically_refused_candidate(tmp_path: Path) -> None:
+    journal, canonical, old_eval, _, _, _ = register(tmp_path)
+    verify_dir = old_eval / "round_4" / "verify_0"
+    verify_dir.mkdir()
+    verify = verify_dir / "verification_result.json"
+    verify.write_text('{"status":"verified","correctness":"pass"}', encoding="utf-8")
+    RJ.transition(
+        journal, eval_dir=str(old_eval), candidate_id="r4:r4_d0", status="verified",
+        reason="independent verification completed", verification_receipt=str(verify),
+    )
+    RJ.settle_round(
+        journal, eval_dir=str(old_eval), round_number=4, winner_direction="",
+        committed=False, candidate_ids=["r4:r4_d0"],
+    )
+    task = paired_task_receipt(verify_dir)
+    receipt_path = verify_dir / "paired_task_receipt.json"
+    receipt_path.write_text(json.dumps(task, sort_keys=True), encoding="utf-8")
+    state = {
+        "schema": RJ.workflow_state.SCHEMA, "last_round": 4,
+        "canonical_hashes": RJ.workflow_state.canonical_hashes(canonical),
+        "rounds": [{"round": 4, "winner": {"source": "engineer r4_d0"},
+                    "gate_receipt": {"decision": "refuse"},
+                    "results": [{"id": "r4_d0", "status": "verified"}]}],
+    }
+    state_file = tmp_path / "STATE.json"
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    refused = RJ.reopen_latest_gate_invocation(
+        journal, state_file=state_file, canonical=canonical,
+        expected_routes=["target", "guard"],
+    )
+    assert refused["reopened"] is False
+
+    state["rounds"][0]["gate_receipt"]["decision"] = "invocation_error"
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    receipt_path.write_text('{"schema":"tampered"}', encoding="utf-8")
+    try:
+        RJ.reopen_latest_gate_invocation(
+            journal, state_file=state_file, canonical=canonical,
+            expected_routes=["target", "guard"],
+        )
+    except RJ.JournalError as exc:
+        assert "paired task receipt is invalid" in str(exc)
+    else:
+        raise AssertionError("tampered paired receipt was reopened")
+    entry = json.loads(next((journal / "entries").glob("*.json")).read_text(encoding="utf-8"))
+    assert entry["status"] == "rejected"
+
+
+def test_resume_reopens_invocation_error_after_state_barrier_before_settlement(
+    tmp_path: Path,
+) -> None:
+    journal, canonical, old_eval, _, _, _ = register(tmp_path)
+    verify_dir = old_eval / "round_4" / "verify_0"
+    verify_dir.mkdir()
+    verify = verify_dir / "verification_result.json"
+    verify.write_text('{"status":"verified","correctness":"pass"}', encoding="utf-8")
+    RJ.transition(
+        journal, eval_dir=str(old_eval), candidate_id="r4:r4_d0", status="verified",
+        reason="independent verification completed", verification_receipt=str(verify),
+    )
+    task = paired_task_receipt(verify_dir)
+    (verify_dir / "paired_task_receipt.json").write_text(
+        json.dumps(task, sort_keys=True), encoding="utf-8")
+    state = {
+        "schema": RJ.workflow_state.SCHEMA,
+        "last_round": 4,
+        "canonical_hashes": RJ.workflow_state.canonical_hashes(canonical),
+        "rounds": [{
+            "round": 4,
+            "winner": {"source": "engineer r4_d0", "geomean": 1.05},
+            "gate_receipt": {"decision": "invocation_error"},
+            "results": [{"id": "r4_d0", "status": "verified"}],
+        }],
+    }
+    state_file = tmp_path / "STATE.json"
+    state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+    reopened = RJ.reopen_latest_gate_invocation(
+        journal, state_file=state_file, canonical=canonical,
+        expected_routes=["target", "guard"],
+    )
+    assert reopened["reopened"] is True and reopened["idempotent"] is False
+    assert reopened["entry"]["status"] == "verified"
+    assert reopened["entry"]["retryable_infrastructure"] is True
+    found = RJ.discover(journal, canonical=canonical, current_eval_dir=str(tmp_path / "wave2"))
+    assert found["recoverable"][0]["recovery_classification"] == "retryable_infrastructure"

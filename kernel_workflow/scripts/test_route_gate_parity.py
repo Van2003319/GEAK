@@ -10,6 +10,7 @@ statistical implementation exists in JavaScript.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -46,6 +47,10 @@ def spec(gain: float = 0.03) -> dict:
     ids = [f"pair-{i:02d}" for i in range(RG.MIN_PAIRS)]
     routes = []
     binding = measurement_binding(["target", "guard"])
+    binding["producer_token"] = "session-parity"
+    binding["task_receipt_file"] = {
+        "path": "/tmp/paired-task.json", "sha256": "f" * 64, "size": 12345,
+    }
     for name, route_gain in (("target", gain), ("guard", 0.0)):
         control = [1.0 + i * 0.001 for i in range(RG.MIN_PAIRS)]
         candidate = [value * (1.0 - route_gain) for value in control]
@@ -174,10 +179,16 @@ class ReceiptConsumerParityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path = root / "paired-task.json"
-            task_path.write_text(json.dumps(paired_task_receipt(root)), encoding="utf-8")
+            task = paired_task_receipt(root)
+            task_path.write_text(json.dumps(task), encoding="utf-8")
+            task_bytes = task_path.read_bytes()
             adapted = subprocess.run([
                 sys.executable, str(SCRIPTS / "paired_verify.py"), "adapt",
-                "--receipt", str(task_path), "--session-id", "lane-cross-component",
+                "--receipt", str(task_path),
+                "--expected-sha256", hashlib.sha256(task_bytes).hexdigest(),
+                "--expected-size", str(len(task_bytes)),
+                "--expected-producer-token", task["producer_token"],
+                "--session-id", "lane-cross-component",
                 "--expected-route", "target", "--expected-route", "guard",
                 "--target-route", "target",
             ], text=True, capture_output=True, check=False)

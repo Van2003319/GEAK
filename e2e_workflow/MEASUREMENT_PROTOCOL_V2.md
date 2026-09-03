@@ -99,9 +99,12 @@ materialization, performance, and fresh-lane preflight fail closed.
 The bundled BF16 and FP8 task runners expose `paired-verify`. It is invoked only by
 `kernel_workflow/scripts/paired_verify.py produce` with an immutable absolute task-runner path. The
 producer supplies candidate/incumbent roots through `GEAK_PAIRED_*`, propagates the explicit score
-metric, holds one repository GPU lock around the complete suite, and seals
-`geak.paired-verify-task-receipt/v2`. The raw suite, sealed receipt, gate input, and gate receipt all
-bind the same `metric_id` and `inner`. Every route uses a common
+metric, holds one repository GPU lock around the complete suite, and atomically seals
+`geak.paired-verify-task-receipt/v2` without clobbering a concurrently recreated output path.
+Producer stdout is only the compact
+`geak.paired-verify-produce-status/v1`; the adapter reopens the full file with the lane token and exact
+content SHA/byte size, so raw receipt blocks never cross StructuredOutput. The raw suite, sealed
+receipt, gate input, and gate receipt all bind the same `metric_id` and `inner`. Every route uses a common
 slot count, so its candidate and untouched incumbent observations have one shared outer-block
 inventory across the suite. The adapter derives session pair IDs; no role/model reports them.
 

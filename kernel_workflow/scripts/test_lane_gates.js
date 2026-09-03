@@ -57,6 +57,24 @@ const makeReceiptConsumer = () => new Function(`
     catch (e) { return routeGateInvocationFailure('Python route gate failed closed: ' + e.message); }
   };`)();
 
+const makePairedStatusConsumer = () => new Function(`
+  ${grab(/^const ROUTE_GATE_MIN_PAIRS = .*?;$/m, 'gate minimum pairs')}
+  ${grab(/^const PAIRED_VERIFY_TASK_SCHEMA = .*?;$/m, 'paired task schema')}
+  ${grab(/^const PAIRED_VERIFY_STATUS_SCHEMA = .*?;$/m, 'paired status schema')}
+  ${grab(/^const sortedStrings = .*?;$/m, 'sortedStrings')}
+  ${grab(/^const sameStrings = .*?;$/m, 'sameStrings')}
+  ${grab(/^const canonicalJSONString = [\s\S]*?^};/m, 'canonical JSON')}
+  ${grab(/^const validatePairedTaskStatus = [\s\S]*?^};/m, 'paired status validator')}
+  return (status, request) => {
+    try { return { ok: true, value: validatePairedTaskStatus(status, request) }; }
+    catch (e) { return { ok: false, error: String(e.message || e) }; }
+  };`)();
+
+const classifyRetryableGate = new Function(`
+  ${grab(/^const ROUTE_GATE_INVOCATION_ERROR_SCHEMA = .*?;$/m, 'gate error schema')}
+  ${grab(/^const retryableGateInfrastructure = [\s\S]*?^};/m, 'retryable gate classifier')}
+  return retryableGateInfrastructure;`)();
+
 console.log('\n# the correctness gate and the primary-metric selector, executed');
 {
   // Finding (62). Both of these were lexical-only until now, and both are gates:
@@ -917,6 +935,74 @@ console.log('\n# the budget, the commit threshold and the correctness gate');
 
 console.log('\n# Python receipt transport is authoritative and fail-closed, executed');
 {
+  const consumeStatus = makePairedStatusConsumer();
+  const statusRequest = {
+    task_receipt: '/tmp/eval/verify_0/paired_task_receipt.json',
+    session_id: 'lane-producer-token',
+    expected_routes: ['a', 'b'],
+    score_metric: { id: 'sustained_throughput', inner: 4,
+      hash: 'd'.repeat(64), protocol_hash: 'e'.repeat(64) },
+  };
+  const compactStatus = {
+    schema: 'geak.paired-verify-produce-status/v1', ok: true,
+    path: statusRequest.task_receipt, sha256: 'a'.repeat(64), size: 13000000,
+    producer_token: statusRequest.session_id,
+    receipt: { schema: 'geak.paired-verify-task-receipt/v2',
+      canonical_input_sha256: 'b'.repeat(64) },
+    metric: { id: 'sustained_throughput', inner: 4,
+      score_metric_sha256: 'd'.repeat(64), protocol_sha256: 'e'.repeat(64) },
+    routes: { count: 2, names: ['a', 'b'], blocks: 8 },
+  };
+  ok(consumeStatus(compactStatus, statusRequest).ok === true,
+    'the producer relay accepts a compact path/hash/size/metric/route status');
+  const mutateStatus = (change) => {
+    const value = JSON.parse(JSON.stringify(compactStatus)); change(value);
+    return consumeStatus(value, statusRequest);
+  };
+  ok(!mutateStatus(s => { s.path = '/tmp/other/paired_task_receipt.json'; }).ok,
+    'a status cannot substitute another absolute receipt path');
+  ok(!mutateStatus(s => { s.producer_token = 'prior-invocation'; }).ok,
+    'an old status/file pair cannot satisfy the lane freshness token');
+  ok(!mutateStatus(s => { s.sha256 = 'not-a-content-hash'; }).ok
+     && !mutateStatus(s => { s.size = 0; }).ok,
+    'a status without an exact content hash and positive byte size is rejected');
+  ok(!mutateStatus(s => { s.routes.names = ['a']; s.routes.count = 1; }).ok,
+    'a compact status cannot truncate the complete route inventory');
+  const statusSchema = grab(/^const PAIRED_TASK_STATUS_OUTPUT_SCHEMA = [\s\S]*?^};/m,
+    'paired compact status schema');
+  ok(!/measurement_receipt|secondary_measurement_receipt|gpu_lock|output_lifecycle/.test(statusSchema)
+     && /additionalProperties: false/.test(statusSchema)
+     && !/const PAIRED_TASK_OUTPUT_SCHEMA/.test(src),
+    'the producer StructuredOutput schema cannot carry the multi-megabyte receipt');
+  ok(/--expected-sha256 \${JSON\.stringify\(request\.task_receipt_sha256\)}/.test(src)
+     && /--expected-size \${JSON\.stringify\(request\.task_receipt_size\)}/.test(src)
+     && /--expected-producer-token \${JSON\.stringify\(request\.session_id\)}/.test(src)
+     && /--producer-token \${JSON\.stringify\(request\.session_id\)}/.test(src),
+    'producer and adapter bind the file to the current lane invocation token, hash, and size');
+
+  const retryCandidate = {
+    verify_dir: '/tmp/eval/round_2/verify_0',
+    journal_verification: { ok: true, entry: { status: 'verified', verification: {
+      receipt: { path: '/tmp/eval/round_2/verify_0/verification_result.json',
+        sha256: '9'.repeat(64) },
+    } } },
+  };
+  const invocationFailure = {
+    schema: 'geak.route-gate-invocation-error/v1', decision: 'invocation_error', accepted: false,
+  };
+  ok(classifyRetryableGate(retryCandidate, invocationFailure) === true,
+    'an invocation failure after exact durable verification is retryable infrastructure');
+  const incompleteRetry = JSON.parse(JSON.stringify(retryCandidate));
+  incompleteRetry.journal_verification.entry.verification.receipt.path = '/tmp/other/result.json';
+  ok(classifyRetryableGate(incompleteRetry, invocationFailure) === false
+     && classifyRetryableGate(retryCandidate,
+       { schema: 'geak.route-gate-receipt/v2', decision: 'refuse' }) === false,
+    'a mismatched verify receipt or statistical refusal is never marked retryable infrastructure');
+  ok(/--retryable-infrastructure/.test(src)
+     && /event: 'gate_retryable_infrastructure'/.test(src)
+     && /winner && \(improved \|\| retryableInfrastructure\)/.test(src),
+    'retryable infrastructure preserves only the verified winner journal for resume, without commit');
+
   const consume = makeReceiptConsumer();
   const ids = Array.from({ length: 8 }, (_, i) => `pair-${String(i).padStart(2, '0')}`);
   const protocolHash = '4cdec943cb2d207b6a5616b390b9daa49458801487fd438fbc94e97c6679812e';
@@ -926,7 +1012,8 @@ console.log('\n# Python receipt transport is authoritative and fail-closed, exec
     schema: 'geak.paired-verify-binding/v2',
     producer_schema: 'geak.paired-verify-task-receipt/v2',
     promotion_control: 'incumbent', oracle_role: 'absolute_report_only',
-    canonical_input_sha256: 'c'.repeat(64),
+    producer_token: 'session-1', canonical_input_sha256: 'c'.repeat(64),
+    task_receipt_file: { path: '/tmp/paired-task.json', sha256: 'f'.repeat(64), size: 12345 },
     protocol: { schema: 'geak.measurement-protocol/v2', version: 2,
       name: 'semantic_weight_rotating', warmup_cycles: 1,
       slot_policy: 'semantic_weight_rotation', cache_policy: 'semantic_weight_rotating',

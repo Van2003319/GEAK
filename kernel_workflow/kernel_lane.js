@@ -197,6 +197,7 @@ const ROUTE_GATE_DEFAULT_NON_REGRESSION_MARGIN = 0.02;
 const ROUTE_GATE_DEFAULT_SUITE_MARGIN = 0.01;
 const ROUTE_GATE_CATASTROPHIC_REGRESSION = 0.10;
 const PAIRED_VERIFY_TASK_SCHEMA = 'geak.paired-verify-task-receipt/v2';
+const PAIRED_VERIFY_STATUS_SCHEMA = 'geak.paired-verify-produce-status/v1';
 const PAIRED_VERIFY_BINDING_SCHEMA = 'geak.paired-verify-binding/v2';
 const ROUTE_GATE_SCRIPT = `${WORKFLOW_DIR}/scripts/route_gate.py`;
 const PAIRED_VERIFY_SCRIPT = `${WORKFLOW_DIR}/scripts/paired_verify.py`;
@@ -412,22 +413,78 @@ const expectedGateEffective = (spec) => {
     weights,
   };
 };
-const PAIRED_TASK_OUTPUT_SCHEMA = {
+const PAIRED_TASK_STATUS_OUTPUT_SCHEMA = {
   type: 'object',
   properties: {
-    schema: { type: 'string' }, source_schema: { type: 'string' },
-    expected_routes: { type: 'array', minItems: 1, items: { type: 'string' } },
-    protocol_hash: { type: 'string' }, score_metric: { type: 'object', additionalProperties: true },
-    metric_id: { type: 'string' }, inner: { type: 'number' },
-    secondary_metric: { type: 'object', additionalProperties: true },
-    gpu_lock: { type: 'object', additionalProperties: true },
-    incumbent_unchanged: { type: 'boolean' }, canonical_input_sha256: { type: 'string' },
-    routes: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: true } },
+    schema: { type: 'string' }, ok: { type: 'boolean' }, path: { type: 'string' },
+    sha256: { type: 'string' }, size: { type: 'number' }, producer_token: { type: 'string' },
+    receipt: {
+      type: 'object',
+      properties: { schema: { type: 'string' }, canonical_input_sha256: { type: 'string' } },
+      required: ['schema', 'canonical_input_sha256'], additionalProperties: false,
+    },
+    metric: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' }, inner: { type: 'number' },
+        score_metric_sha256: { type: 'string' }, protocol_sha256: { type: 'string' },
+      },
+      required: ['id', 'inner', 'score_metric_sha256', 'protocol_sha256'],
+      additionalProperties: false,
+    },
+    routes: {
+      type: 'object',
+      properties: {
+        count: { type: 'number' }, names: { type: 'array', items: { type: 'string' } },
+        blocks: { type: 'number' },
+      },
+      required: ['count', 'names', 'blocks'], additionalProperties: false,
+    },
   },
-  required: ['schema', 'source_schema', 'expected_routes', 'protocol_hash', 'score_metric',
-    'metric_id', 'inner', 'secondary_metric', 'gpu_lock', 'incumbent_unchanged',
-    'canonical_input_sha256', 'routes'],
-  additionalProperties: true,
+  required: ['schema', 'ok', 'path', 'sha256', 'size', 'producer_token',
+    'receipt', 'metric', 'routes'],
+  additionalProperties: false,
+};
+const validatePairedTaskStatus = (status, request) => {
+  if (!status || typeof status !== 'object' || status.schema !== PAIRED_VERIFY_STATUS_SCHEMA
+      || status.ok !== true) {
+    throw new Error('paired producer returned no successful compact status');
+  }
+  if (typeof request.task_receipt !== 'string' || !request.task_receipt.startsWith('/')) {
+    throw new Error('paired receipt output path is not absolute');
+  }
+  if (status.path !== request.task_receipt) {
+    throw new Error('paired producer status changed the expected absolute receipt path');
+  }
+  if (status.producer_token !== request.session_id) {
+    throw new Error('paired producer status is stale for this lane invocation');
+  }
+  if (typeof status.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(status.sha256)
+      || !Number.isInteger(status.size) || status.size <= 0) {
+    throw new Error('paired producer status has no exact file hash/size binding');
+  }
+  const receipt = status.receipt;
+  if (!receipt || receipt.schema !== PAIRED_VERIFY_TASK_SCHEMA
+      || typeof receipt.canonical_input_sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(receipt.canonical_input_sha256)) {
+    throw new Error('paired producer status has no canonical task receipt binding');
+  }
+  const metric = status.metric;
+  if (!metric || metric.id !== request.score_metric.id || metric.inner !== request.score_metric.inner
+      || metric.score_metric_sha256 !== request.score_metric.hash
+      || metric.protocol_sha256 !== request.score_metric.protocol_hash) {
+    throw new Error('paired producer status metric differs from the lane contract');
+  }
+  const routes = status.routes;
+  if (!routes || routes.count !== request.expected_routes.length
+      || !sameStrings(routes.names, request.expected_routes)
+      || !Number.isInteger(routes.blocks) || routes.blocks < ROUTE_GATE_MIN_PAIRS) {
+    throw new Error('paired producer status is missing the complete route/block summary');
+  }
+  if (canonicalJSONString(status).length >= 10000) {
+    throw new Error('paired producer status exceeds the compact transport limit');
+  }
+  return status;
 };
 const ROUTE_GATE_INPUT_OUTPUT_SCHEMA = {
   type: 'object',
@@ -463,7 +520,18 @@ const validateRouteGateInput = (spec, expected) => {
       || spec.measurement.producer_schema !== PAIRED_VERIFY_TASK_SCHEMA) {
     throw new Error('paired adapter returned no deterministic producer binding');
   }
+  const taskReceiptFile = spec.measurement.task_receipt_file;
+  if (!taskReceiptFile || taskReceiptFile.path !== expected.task_receipt
+      || taskReceiptFile.sha256 !== expected.task_receipt_sha256
+      || taskReceiptFile.size !== expected.task_receipt_size
+      || typeof taskReceiptFile.sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(taskReceiptFile.sha256)
+      || !Number.isInteger(taskReceiptFile.size) || taskReceiptFile.size <= 0) {
+    throw new Error('paired adapter changed the producer file path/hash/size binding');
+  }
   if (!expected.score_metric || !sameCanonical(spec.measurement.score_metric, expected.score_metric)
+      || spec.measurement.producer_token !== expected.session_id
+      || spec.measurement.canonical_input_sha256 !== expected.task_receipt_canonical_sha256
       || spec.measurement.metric_id !== expected.score_metric.id
       || spec.measurement.inner !== expected.score_metric.inner) {
     throw new Error('paired adapter score metric/inner differs from the lane contract');
@@ -500,6 +568,17 @@ const routeGateInvocationFailure = (reason) => ({
   routes: [], target_passed: [], regressed: [], catastrophic: [], failures: [String(reason)],
   pair_ids: [], suite: null,
 });
+const retryableGateInfrastructure = (cand, receipt) => {
+  if (!cand || !receipt || receipt.schema !== ROUTE_GATE_INVOCATION_ERROR_SCHEMA
+      || receipt.decision !== 'invocation_error' || !cand.journal_verification
+      || !cand.journal_verification.ok || !cand.journal_verification.entry
+      || cand.journal_verification.entry.status !== 'verified'
+      || typeof cand.verify_dir !== 'string' || !cand.verify_dir.startsWith('/')) return false;
+  const verification = cand.journal_verification.entry.verification;
+  const file = verification && verification.receipt;
+  return !!(file && file.path === `${cand.verify_dir}/verification_result.json`
+    && typeof file.sha256 === 'string' && /^[0-9a-f]{64}$/.test(file.sha256));
+};
 const validateRouteGateReceipt = (receipt, spec) => {
   if (!receipt || typeof receipt !== 'object') throw new Error('receipt is not an object');
   if (receipt.schema !== ROUTE_GATE_RECEIPT_SCHEMA) {
@@ -547,6 +626,7 @@ const validateRouteGateReceipt = (receipt, spec) => {
       || (measurement.metric_id === 'sustained_throughput' && measurement.inner <= 1)
       || measurement.promotion_control !== 'incumbent'
       || measurement.oracle_role !== 'absolute_report_only'
+      || typeof measurement.producer_token !== 'string' || !measurement.producer_token
       || measurement.incumbent_unchanged !== true
       || !measurement.gpu_lock || measurement.gpu_lock.mode !== 'external'
       || typeof measurement.gpu_lock.path !== 'string' || !measurement.gpu_lock.path
@@ -576,6 +656,14 @@ const validateRouteGateReceipt = (receipt, spec) => {
         && (protocol.slot_policy !== 'semantic_weight_rotation'
           || protocol.cache_policy !== 'semantic_weight_rotating'))) {
     throw new Error('receipt score metric hash/protocol/rotation binding is invalid');
+  }
+  const taskReceiptFile = measurement.task_receipt_file;
+  if (!taskReceiptFile || typeof taskReceiptFile.path !== 'string'
+      || !taskReceiptFile.path.startsWith('/')
+      || typeof taskReceiptFile.sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(taskReceiptFile.sha256)
+      || !Number.isInteger(taskReceiptFile.size) || taskReceiptFile.size <= 0) {
+    throw new Error('receipt has no exact paired task file path/hash/size binding');
   }
   if (!sameCanonical(receipt.algorithm, ROUTE_GATE_ALGORITHM_EFFECTIVE)) {
     throw new Error('receipt algorithm/effective seed does not match the pinned v2 protocol');
@@ -673,12 +761,16 @@ const pairedVerifyAdapterCommand = (request) => {
     .map(route => ` --expected-route ${JSON.stringify(String(route))}`).join('');
   const targetArgs = request.target_routes
     .map(route => ` --target-route ${JSON.stringify(String(route))}`).join('');
-  return `Run EXACTLY the command below and return its one JSON stdout object verbatim. The lane, not
-this relay, supplied session_id and target_routes. Do not synthesize a task receipt or retry with a
-smaller suite. Exit 2 means invalid/infra evidence and is a normal fail-closed outcome.
+  return `Run EXACTLY the command below and return its one small JSON stdout object verbatim. The lane,
+not this relay, supplied session_id, target_routes, and the exact producer content hash. Python reads
+and validates the full receipt file; never print, copy, summarize, or reconstruct that file yourself.
+Do not retry with a smaller suite. Exit 2 means invalid/infra evidence and is a normal fail-closed outcome.
 \`\`\`bash
 python3 ${JSON.stringify(PAIRED_VERIFY_SCRIPT)} adapt ` +
     `--receipt ${JSON.stringify(request.task_receipt)} ` +
+    `--expected-sha256 ${JSON.stringify(request.task_receipt_sha256)} ` +
+    `--expected-size ${JSON.stringify(request.task_receipt_size)} ` +
+    `--expected-producer-token ${JSON.stringify(request.session_id)} ` +
     `--session-id ${JSON.stringify(request.session_id)}` + expectedArgs + targetArgs +
     ` --gate-config-json ${JSON.stringify(JSON.stringify(request.gate_config || {}))}
 \`\`\``;
@@ -2570,10 +2662,12 @@ const pairedTaskProducerCommand = (request) => {
     .map(route => ` --expected-route ${JSON.stringify(String(route))}`).join('');
   const taskArgv = request.task_argv.map(value => JSON.stringify(String(value))).join(' ');
   const lockPrefix = GPU_LOCK_ENV ? `${GPU_LOCK_ENV} ` : '';
-  return `Run EXACTLY this command and return its one JSON stdout object verbatim. This is one outer
-GPU-lock scope around candidate+unmodified-incumbent, every route and every protocol-v2 block. The
-task may retain oracle arms for absolute reporting, but paired_verify.py selects no oracle as control.
-Do not run a partial --case command and do not hand-write either receipt.
+  return `Run EXACTLY this command and return only its one compact status JSON stdout object verbatim.
+The complete task receipt stays at --output and MUST NOT be read, printed, copied into StructuredOutput,
+or reconstructed by the relay. This is one outer GPU-lock scope around candidate+unmodified-incumbent,
+every route and every protocol-v2 block. The task may retain oracle arms for absolute reporting, but
+paired_verify.py selects no oracle as control. Do not run a partial --case command and do not hand-write
+either the receipt or its status.
 \`\`\`bash
 ${lockPrefix}bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSON.stringify(request.gpu_id)} ` +
     `bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_fence_run.sh`)} ` +
@@ -2581,29 +2675,19 @@ ${lockPrefix}bash ${JSON.stringify(`${WORKFLOW_DIR}/scripts/gpu_lock.sh`)} ${JSO
     `--candidate-root ${JSON.stringify(request.candidate_root)} ` +
     `--incumbent-root ${JSON.stringify(request.incumbent_root)} ` +
     `--task-root ${JSON.stringify(request.task_root)} ` +
-    `--score-metric ${JSON.stringify(request.score_metric.id)}` + expectedArgs +
+    `--score-metric ${JSON.stringify(request.score_metric.id)} ` +
+    `--producer-token ${JSON.stringify(request.session_id)}` + expectedArgs +
     ` --output ${JSON.stringify(request.task_receipt)} -- ${taskArgv}
 \`\`\``;
 };
 const producePairedTaskReceipt = async (request, runOpts) => {
   if (!request.task_argv.length) throw new Error('benchmark supplied no paired_verify_argv');
   const opts = runOpts || {};
-  const receipt = await agentT(pairedTaskProducerCommand(request), {
+  const status = await agentT(pairedTaskProducerCommand(request), {
     phase: opts.phase || 'Verify', label: opts.label || 'paired verify producer', effort: 'low',
-    schema: PAIRED_TASK_OUTPUT_SCHEMA,
+    schema: PAIRED_TASK_STATUS_OUTPUT_SCHEMA,
   });
-  if (!receipt || receipt.schema !== PAIRED_VERIFY_TASK_SCHEMA
-      || receipt.incumbent_unchanged !== true
-      || receipt.canonical_input_sha256 !== canonicalSha256((() => {
-        const copy = { ...receipt }; delete copy.canonical_input_sha256; return copy;
-      })())
-      || !sameStrings(receipt.expected_routes, request.expected_routes)
-      || !sameCanonical(receipt.score_metric, request.score_metric)
-      || receipt.metric_id !== request.score_metric.id
-      || receipt.inner !== request.score_metric.inner) {
-    throw new Error('paired producer returned a stale, partial, or non-canonical task receipt');
-  }
-  return receipt;
+  return validatePairedTaskStatus(status, request);
 };
 const routeGateForCandidate = async (cand, runOpts) => {
   const opts = runOpts || {};
@@ -2631,9 +2715,12 @@ const routeGateForCandidate = async (cand, runOpts) => {
         ...(GATE_ROUTE_WEIGHTS ? { route_weights: GATE_ROUTE_WEIGHTS } : {}),
       },
     };
-    await producePairedTaskReceipt(request, {
+    const produced = await producePairedTaskReceipt(request, {
       phase: opts.phase, label: opts.producerLabel || `paired producer ${cand && cand.id}`,
     });
+    request.task_receipt_sha256 = produced.sha256;
+    request.task_receipt_size = produced.size;
+    request.task_receipt_canonical_sha256 = produced.receipt.canonical_input_sha256;
     const spec = await routeGateInputFromTask(request, null, {
       phase: opts.phase, label: opts.adapterLabel || `paired adapter ${cand && cand.id}`,
     });
@@ -3773,6 +3860,34 @@ correctness check; only report committed=true if it still passes. Return JSON {c
 // become executable merely because a filename happens to look harvestable.
 let interruptedArtifacts = [];
 if (STATE_DIR && !setup.resume_invalidated) {
+  if (setup.resumed) {
+    const expectedArgs = sortedStrings(GATE_EXPECTED_ROUTES)
+      .map(route => ` --expected-route ${JSON.stringify(String(route))}`).join('');
+    const reopened = await agentT(
+      `Run EXACTLY this command and return its one compact JSON stdout object verbatim, including ` +
+      `when it exits 2. It may reopen only the latest persisted invocation_error winner whose ` +
+      `registered artifact, verification receipt, complete verify roots, and full paired receipt all ` +
+      `still hash and validate. It never changes STATE or canonical bytes and never commits anything:
+` +
+      `\`\`\`bash
+` +
+      `python3 ${JSON.stringify(ROUND_JOURNAL_HELPER)} reopen-gate-invocation ` +
+      `--journal-dir ${JSON.stringify(ROUND_JOURNAL_DIR)} ` +
+      `--state-file ${JSON.stringify(`${STATE_DIR}/STATE.json`)} ` +
+      `--canonical ${JSON.stringify(CANONICAL)}` + expectedArgs + `
+` +
+      `\`\`\``,
+      { phase: 'Setup', label: 'round_journal:reopen-gate-invocation',
+        schema: JOURNAL_ACTION_SCHEMA });
+    if (reopened && reopened.reopened === true) {
+      const candidateId = reopened.entry && reopened.entry.candidate_id
+        ? reopened.entry.candidate_id : 'latest invocation-error winner';
+      log(`[journal] ${candidateId} marked retryable_infrastructure; it will be independently ` +
+          'reverified before new work. STATE and canonical bytes remain unchanged.');
+      processLog.push({ event: 'gate_retryable_infrastructure_reopened', round,
+        candidate_id: candidateId });
+    }
+  }
   const discovered = await agentT(
     `Run EXACTLY this command and return its single JSON stdout object verbatim. Do not inspect or ` +
     `harvest any other file:
@@ -4956,6 +5071,7 @@ worker_result.json structure as StructuredOutput.` +
       ? r.configSelection.config : null,
     config_materialization: r.ver.config_materialization || null,
     journal: r.journal || null,
+    journal_verification: r.journalVerification || null,
     // Fixed verifier roots are prepared from candidate and untouched canonical bytes. The lane
     // invokes paired_verify.py over them; verifier-authored session/pair fields are ignored.
     verify_dir: r.d.verify_dir, gpu_id: r.d.gpu_id, round,
@@ -5089,6 +5205,7 @@ worker_result.json structure as StructuredOutput.` +
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
         journal: integrateJournal,
+        journal_verification: integrateJournalVerification,
         target_routes: integratedTargetsValid ? integratedTargetRoutes : undefined,
         verify_dir: `${EVAL_DIR}/round_${round}/integrate`, gpu_id: GPU_POOL, round,
       });
@@ -5179,9 +5296,11 @@ worker_result.json structure as StructuredOutput.` +
   const legacyImproved = !!(verdict && verdict.legacyImproved);
   let improved = false;
   let routeReceipt = null;
+  let retryableInfrastructure = false;
   if (winner) {
     routeReceipt = verdict.routeReceipt;
     improved = !!verdict.improved;
+    retryableInfrastructure = retryableGateInfrastructure(winner, routeReceipt);
     const tag = routeReceipt && routeReceipt.decision
       ? String(routeReceipt.decision).toUpperCase() : 'INVOCATION_ERROR';
     log(`  [gate r${round}] ${tag} -- ${routeReceipt && routeReceipt.reason
@@ -5194,6 +5313,13 @@ worker_result.json structure as StructuredOutput.` +
     } else {
       log(`  [gate r${round}] FAIL CLOSED: no valid statistical receipt; the stored per-case table ` +
           'and legacy suite geomean are diagnostics only and cannot bank this candidate.');
+    }
+    if (retryableInfrastructure) {
+      log(`  [gate r${round}] RETRYABLE_INFRASTRUCTURE -- ${winner.id} has an exact durable ` +
+          'verification receipt, but no valid Python gate decision. It remains uncommitted and its ' +
+          'journal entry is preserved for priority revalidation on resume.');
+      processLog.push({ event: 'gate_retryable_infrastructure', round,
+        candidate_id: winner.id, verify_dir: winner.verify_dir });
     }
     if (improved !== legacyImproved) {
       // Legacy comparison stays visible for migration audit only. It cannot alter `improved` in
@@ -5772,7 +5898,7 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
   if (integrateJournal && integrateJournal.registered) {
     addJournalTarget(EVAL_DIR, round, `r${round}:integrated`);
   }
-  const unsettledWinner = winner && improved ? winner.id : '';
+  const unsettledWinner = winner && (improved || retryableInfrastructure) ? winner.id : '';
   for (const target of journalTargets) {
     await agentT(
       `Run EXACTLY this command and return its JSON stdout verbatim:
@@ -5783,6 +5909,7 @@ Report the two SHAs verbatim from \`git rev-parse HEAD\`; if they are equal, the
       `--round ${target.round} --winner-direction ${JSON.stringify(unsettledWinner)} ` +
       target.candidate_ids.map(id => `--candidate-id ${JSON.stringify(id)} `).join('') +
       `${committedThisRound && statePersisted ? '--committed ' : ''}` +
+      `${retryableInfrastructure ? '--retryable-infrastructure ' : ''}` +
       `--integration-receipt ${JSON.stringify(`${EVAL_DIR}/round_${round}/commit_result.json`)}
 \`\`\``,
       { phase: 'Merge', label: `round_journal:settle r${target.round}`, schema: JOURNAL_ACTION_SCHEMA });

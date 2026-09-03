@@ -25,6 +25,7 @@ harness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(harness)
 
 LOCK = "/tmp/geak-paired-test-gpu.lock"
+PRODUCER_TOKEN = "lane-test-producer-token"
 
 
 class FakeOutput:
@@ -131,6 +132,13 @@ def roots(tmp_path: Path) -> tuple[Path, Path]:
     return candidate, incumbent
 
 
+def receipt_binding(tmp_path: Path, receipt: dict, name: str = "paired-task.json") -> dict:
+    path = (tmp_path / name).resolve()
+    pv._atomic_json(path, receipt)
+    status = pv.task_receipt_status(path, receipt)
+    return {key: status[key] for key in ("path", "sha256", "size")}
+
+
 def task_receipt(tmp_path: Path, routes=("target", "guard")) -> dict:
     candidate, incumbent = roots(tmp_path)
     candidate_hashes = ws.canonical_hashes(candidate)
@@ -147,6 +155,7 @@ def task_receipt(tmp_path: Path, routes=("target", "guard")) -> dict:
             expected_routes=routes, lock_path=LOCK, command=["python3", str(task_root / "adapter.py")])
     receipt["task_root"] = str(task_root.resolve())
     receipt["task_hashes"] = ws.canonical_hashes(task_root)
+    receipt["producer_token"] = PRODUCER_TOKEN
     receipt.pop("canonical_input_sha256")
     receipt["canonical_input_sha256"] = pv.canonical_sha256(receipt)
     return receipt
@@ -154,11 +163,14 @@ def task_receipt(tmp_path: Path, routes=("target", "guard")) -> dict:
 
 def test_task_receipt_to_adapter_to_python_gate(tmp_path: Path) -> None:
     task = task_receipt(tmp_path)
+    binding = receipt_binding(tmp_path, task)
     gate_input = pv.adapt(
         task, session_id="lane-session-1", expected_routes=["target", "guard"],
-        target_routes=["target"])
+        target_routes=["target"], receipt_binding=binding,
+        expected_producer_token=PRODUCER_TOKEN)
     assert gate_input["schema"] == rg.INPUT_SCHEMA
     assert gate_input["measurement"]["canonical_input_sha256"] == task["canonical_input_sha256"]
+    assert gate_input["measurement"]["task_receipt_file"] == binding
     assert gate_input["measurement"]["protocol_hash"] == task["protocol_hash"]
     assert gate_input["measurement"]["score_metric"] == task["score_metric"]
     assert gate_input["measurement"]["metric_id"] == "sustained_throughput"
@@ -178,6 +190,16 @@ def test_task_receipt_to_adapter_to_python_gate(tmp_path: Path) -> None:
     assert receipt["input_sha256"] == rg._input_digest(gate_input)
 
 
+def test_old_receipt_token_cannot_be_reused_for_a_new_lane_invocation(tmp_path: Path) -> None:
+    task = task_receipt(tmp_path)
+    binding = receipt_binding(tmp_path, task)
+    with pytest.raises(pv.PairedVerifyError, match="producer token is stale"):
+        pv.adapt(
+            task, session_id="new-session", expected_routes=["target", "guard"],
+            target_routes=["target"], receipt_binding=binding,
+            expected_producer_token="new-session")
+
+
 def test_complete_suite_missing_one_route_is_rejected(tmp_path: Path) -> None:
     task = task_receipt(tmp_path)
     task["routes"] = task["routes"][:1]
@@ -186,7 +208,8 @@ def test_complete_suite_missing_one_route_is_rejected(tmp_path: Path) -> None:
     task["canonical_input_sha256"] = pv.canonical_sha256(task_without_digest)
     with pytest.raises(pv.PairedVerifyError, match="missing complete-suite routes"):
         pv.adapt(task, session_id="lane-session", expected_routes=["target", "guard"],
-                 target_routes=["target"])
+                 target_routes=["target"], receipt_binding=receipt_binding(tmp_path, task),
+                 expected_producer_token=PRODUCER_TOKEN)
 
 
 def test_stale_task_digest_and_protocol_hash_are_rejected(tmp_path: Path) -> None:
@@ -194,7 +217,8 @@ def test_stale_task_digest_and_protocol_hash_are_rejected(tmp_path: Path) -> Non
     task["expected_routes"].reverse()
     with pytest.raises(pv.PairedVerifyError, match="canonical input SHA"):
         pv.adapt(task, session_id="lane-session", expected_routes=["target", "guard"],
-                 target_routes=["target"])
+                 target_routes=["target"], receipt_binding=receipt_binding(tmp_path, task),
+                 expected_producer_token=PRODUCER_TOKEN)
     task = task_receipt(tmp_path / "second")
     task["protocol"]["seed"] += 1
     unhashed = dict(task)
@@ -202,7 +226,8 @@ def test_stale_task_digest_and_protocol_hash_are_rejected(tmp_path: Path) -> Non
     task["canonical_input_sha256"] = pv.canonical_sha256(unhashed)
     with pytest.raises(pv.PairedVerifyError, match="protocol hash"):
         pv.adapt(task, session_id="lane-session", expected_routes=["target", "guard"],
-                 target_routes=["target"])
+                 target_routes=["target"], receipt_binding=receipt_binding(tmp_path, task),
+                 expected_producer_token=PRODUCER_TOKEN)
 
 
 def test_metric_id_and_inner_drift_are_rejected(tmp_path: Path) -> None:
@@ -213,7 +238,8 @@ def test_metric_id_and_inner_drift_are_rejected(tmp_path: Path) -> None:
     task["canonical_input_sha256"] = pv.canonical_sha256(unhashed)
     with pytest.raises(pv.PairedVerifyError, match="metric_id/inner"):
         pv.adapt(task, session_id="lane-session", expected_routes=["target", "guard"],
-                 target_routes=["target"])
+                 target_routes=["target"], receipt_binding=receipt_binding(tmp_path, task),
+                 expected_producer_token=PRODUCER_TOKEN)
 
 
 def test_latency_legacy_selection_remains_explicitly_sealable(tmp_path: Path) -> None:
@@ -247,7 +273,8 @@ def test_unprimed_or_stale_output_lifecycle_is_rejected(tmp_path: Path) -> None:
     task["canonical_input_sha256"] = pv.canonical_sha256(unhashed)
     with pytest.raises(pv.PairedVerifyError, match="priming"):
         pv.adapt(task, session_id="lane-session", expected_routes=["target", "guard"],
-                 target_routes=["target"])
+                 target_routes=["target"], receipt_binding=receipt_binding(tmp_path, task),
+                 expected_producer_token=PRODUCER_TOKEN)
 
 
 def test_produce_runs_one_command_under_external_lock_and_seals_roots(tmp_path: Path) -> None:
@@ -265,11 +292,17 @@ def test_produce_runs_one_command_under_external_lock_and_seals_roots(tmp_path: 
         receipt = pv.produce(
             candidate_root=candidate, incumbent_root=incumbent, task_root=task_root,
             expected_routes=["target", "guard"], command=[sys.executable, str(adapter)],
-            output=output, score_metric_id="sustained_throughput")
+            output=output, producer_token=PRODUCER_TOKEN,
+            score_metric_id="sustained_throughput")
     assert output.is_file()
     assert receipt["incumbent_unchanged"] is True
     assert receipt["gpu_lock"] == {"mode": "external", "path": LOCK}
     assert pv.validate_task_receipt(receipt, ["target", "guard"])[0] == receipt
+    status = pv.task_receipt_status(output, receipt)
+    assert status["schema"] == pv.PRODUCE_STATUS_SCHEMA
+    assert status["path"] == str(output)
+    assert status["size"] == output.stat().st_size
+    assert len(pv.canonical_json(status).encode("ascii")) < pv.MAX_PRODUCE_STATUS_BYTES
 
 
 def test_produce_refuses_when_incumbent_is_modified(tmp_path: Path) -> None:
@@ -289,4 +322,185 @@ def test_produce_refuses_when_incumbent_is_modified(tmp_path: Path) -> None:
             pytest.raises(pv.PairedVerifyError, match="modified the incumbent"):
         pv.produce(candidate_root=candidate, incumbent_root=incumbent, task_root=task_root,
                    expected_routes=["target", "guard"], command=[sys.executable, str(adapter)],
-                   output=tmp_path / "out.json", score_metric_id="sustained_throughput")
+                   output=tmp_path / "out.json", producer_token=PRODUCER_TOKEN,
+                   score_metric_id="sustained_throughput")
+
+
+def test_produce_cli_stdout_is_compact_status_not_full_receipt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, incumbent = roots(tmp_path)
+    raw_path = tmp_path / "seed_raw.json"
+    raw_path.write_text(json.dumps(raw_suite()), encoding="utf-8")
+    task_root = tmp_path / "task"
+    task_root.mkdir()
+    adapter = task_root / "adapter.py"
+    adapter.write_text("import os,shutil\nshutil.copyfile(" + repr(str(raw_path))
+                       + ", os.environ['GEAK_PAIRED_RAW_RECEIPT'])\n", encoding="utf-8")
+    output = tmp_path / "paired_task_receipt.json"
+    argv = [
+        "produce", "--candidate-root", str(candidate), "--incumbent-root", str(incumbent),
+        "--task-root", str(task_root), "--expected-route", "target",
+        "--expected-route", "guard", "--score-metric", "sustained_throughput",
+        "--producer-token", PRODUCER_TOKEN,
+        "--output", str(output), "--", sys.executable, str(adapter),
+    ]
+    with mock.patch.dict(os.environ, {"GEAK_GPU_LOCK_HELD": "1",
+                                      "GEAK_GPU_LOCK_FILE": LOCK}, clear=False):
+        assert pv.main(argv) == 0
+    stdout = capsys.readouterr().out
+    status = json.loads(stdout)
+    full = json.loads(output.read_text(encoding="utf-8"))
+    assert status["schema"] == pv.PRODUCE_STATUS_SCHEMA
+    assert status["routes"] == {"count": 2, "names": ["guard", "target"], "blocks": 8}
+    assert "measurement_receipt" not in stdout
+    assert len(stdout.encode("utf-8")) < pv.MAX_PRODUCE_STATUS_BYTES
+    assert len(output.read_bytes()) > len(stdout.encode("utf-8")) * 10
+    assert full["schema"] == pv.TASK_RECEIPT_SCHEMA
+
+
+def test_produce_failure_cannot_reuse_an_old_output(tmp_path: Path) -> None:
+    candidate, incumbent = roots(tmp_path)
+    task_root = tmp_path / "task"
+    task_root.mkdir()
+    output = tmp_path / "paired_task_receipt.json"
+    output.write_text('{"schema":"stale"}\n', encoding="utf-8")
+    with mock.patch.dict(os.environ, {"GEAK_GPU_LOCK_HELD": "0"}, clear=False), \
+            pytest.raises(pv.PairedVerifyError, match="gpu_lock"):
+        pv.produce(candidate_root=candidate, incumbent_root=incumbent, task_root=task_root,
+                   expected_routes=["target"], command=[sys.executable, str(task_root / "adapter.py")],
+                   output=output, producer_token=PRODUCER_TOKEN)
+    assert not output.exists()
+
+
+def test_bound_receipt_rejects_hash_size_and_path_tampering(tmp_path: Path) -> None:
+    task = task_receipt(tmp_path)
+    output = tmp_path / "paired_task_receipt.json"
+    pv._atomic_json(output, task)
+    status = pv.task_receipt_status(output, task)
+    loaded, binding = pv.load_bound_task_receipt(
+        output, expected_sha256=status["sha256"], expected_size=status["size"])
+    assert loaded == task
+    assert binding == {key: status[key] for key in ("path", "sha256", "size")}
+
+    original = output.read_bytes()
+    changed = original.replace(b'\n  "', b'\n\t "', 1)
+    assert len(changed) == len(original) and changed != original
+    output.write_bytes(changed)
+    with pytest.raises(pv.PairedVerifyError, match="SHA-256 mismatch"):
+        pv.load_bound_task_receipt(
+            output, expected_sha256=status["sha256"], expected_size=status["size"])
+
+    output.write_bytes(original)
+    with pytest.raises(pv.PairedVerifyError, match="size mismatch"):
+        pv.load_bound_task_receipt(
+            output, expected_sha256=status["sha256"], expected_size=status["size"] + 1)
+    alias = tmp_path / "receipt-alias.json"
+    alias.symlink_to(output)
+    with pytest.raises(pv.PairedVerifyError, match="regular file"):
+        pv.load_bound_task_receipt(
+            alias, expected_sha256=status["sha256"], expected_size=status["size"])
+    with pytest.raises(pv.PairedVerifyError, match="absolute normalized path"):
+        pv.load_bound_task_receipt(
+            Path("relative.json"), expected_sha256=status["sha256"], expected_size=status["size"])
+
+
+@pytest.mark.parametrize("payload_bytes", [6_500_000, 13_000_000])
+def test_multi_megabyte_full_receipt_stays_out_of_compact_transport(
+    tmp_path: Path, payload_bytes: int,
+) -> None:
+    routes = tuple(f"route_{index:02d}" for index in range(11))
+    task = task_receipt(tmp_path, routes=routes)
+    marker = "FULL_RECEIPT_MUST_NOT_CROSS_AGENT_SCHEMA:"
+    task["synthetic_transport_payload"] = marker + ("x" * payload_bytes)
+    task.pop("canonical_input_sha256")
+    task["canonical_input_sha256"] = pv.canonical_sha256(task)
+    output = tmp_path / "paired_task_receipt.json"
+    pv._atomic_json(output, task)
+
+    status = pv.task_receipt_status(output, task)
+    encoded_status = pv.canonical_json(status).encode("ascii")
+    assert output.stat().st_size >= payload_bytes
+    assert len(encoded_status) < pv.MAX_PRODUCE_STATUS_BYTES
+    assert marker not in encoded_status.decode("ascii")
+    assert status["routes"]["count"] == 11
+    assert status["routes"]["names"] == list(routes)
+
+    loaded, binding = pv.load_bound_task_receipt(
+        output, expected_sha256=status["sha256"], expected_size=status["size"])
+    gate_input = pv.adapt(
+        loaded, session_id=f"large-{payload_bytes}", expected_routes=routes,
+        target_routes=[routes[0]], receipt_binding=binding,
+        expected_producer_token=PRODUCER_TOKEN)
+    assert gate_input["expected_route_count"] == 11
+    assert len(gate_input["paired_routes"]) == 11
+    assert gate_input["measurement"]["task_receipt_file"] == binding
+    assert marker not in pv.canonical_json(gate_input)
+
+
+def test_status_rejects_semantically_equal_byte_replacement(tmp_path: Path) -> None:
+    task = task_receipt(tmp_path)
+    output = tmp_path / "paired_task_receipt.json"
+    pv._atomic_json(output, task)
+    original = output.read_bytes()
+    changed = original.replace(b'\n  "', b'\n\t "', 1)
+    assert changed != original and len(changed) == len(original)
+    assert json.loads(changed) == task
+    output.write_bytes(changed)
+    with pytest.raises(pv.PairedVerifyError, match="bytes changed or were replaced"):
+        pv.task_receipt_status(output, task)
+
+
+def test_produce_refuses_output_recreated_during_measurement(tmp_path: Path) -> None:
+    candidate, incumbent = roots(tmp_path)
+    raw_path = tmp_path / "seed_raw.json"
+    raw_path.write_text(json.dumps(raw_suite()), encoding="utf-8")
+    output = tmp_path / "paired_task_receipt.json"
+    task_root = tmp_path / "task"
+    task_root.mkdir()
+    adapter = task_root / "adapter.py"
+    adapter.write_text(
+        "import os, pathlib, shutil\n"
+        f"shutil.copyfile({str(raw_path)!r}, os.environ['GEAK_PAIRED_RAW_RECEIPT'])\n"
+        f"pathlib.Path({str(output)!r}).write_text('{{\"replacement\":true}}\\n')\n",
+        encoding="utf-8",
+    )
+    with mock.patch.dict(os.environ, {"GEAK_GPU_LOCK_HELD": "1",
+                                      "GEAK_GPU_LOCK_FILE": LOCK}, clear=False), \
+            pytest.raises(pv.PairedVerifyError, match="refusing to replace"):
+        pv.produce(
+            candidate_root=candidate, incumbent_root=incumbent, task_root=task_root,
+            expected_routes=["target", "guard"], command=[sys.executable, str(adapter)],
+            output=output, producer_token=PRODUCER_TOKEN,
+            score_metric_id="sustained_throughput",
+        )
+    assert output.read_text(encoding="utf-8") == '{"replacement":true}\n'
+
+
+def test_failed_task_command_never_relays_raw_stdout(tmp_path: Path) -> None:
+    candidate, incumbent = roots(tmp_path)
+    task_root = tmp_path / "task"
+    task_root.mkdir()
+    adapter = task_root / "adapter.py"
+    leaked = "FULL_RAW_RECEIPT_MUST_STAY_ON_DISK:"
+    adapter.write_text(
+        "import sys\n"
+        f"sys.stdout.write({leaked!r} + ('x' * 200000))\n"
+        "sys.stderr.write('private raw diagnostics')\n"
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "paired_task_receipt.json"
+    with mock.patch.dict(os.environ, {"GEAK_GPU_LOCK_HELD": "1",
+                                      "GEAK_GPU_LOCK_FILE": LOCK}, clear=False), \
+            pytest.raises(pv.PairedVerifyError) as failure:
+        pv.produce(
+            candidate_root=candidate, incumbent_root=incumbent, task_root=task_root,
+            expected_routes=["target"], command=[sys.executable, str(adapter)],
+            output=output, producer_token=PRODUCER_TOKEN,
+        )
+    message = str(failure.value)
+    assert "task paired command exited 7" in message
+    assert "stdout_bytes=" in message and "stderr_sha256=" in message
+    assert leaked not in message and "private raw diagnostics" not in message
+    assert not output.exists()

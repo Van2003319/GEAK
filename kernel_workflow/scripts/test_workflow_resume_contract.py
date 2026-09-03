@@ -56,10 +56,16 @@ def test_engineer_artifact_is_registered_before_verification_and_recovery_is_reg
     assert register < verify
     assert "if (!(journal && journal.registered && journal.entry))" in LANE
     assert "Only atomically receipted bytes may cross the execution boundary" in LANE
+    reopen = LANE.index("round_journal:reopen-gate-invocation")
     discover = LANE.index("round_journal:discover")
     loop = LANE.index("while (!skipLoop && dispatched < BUDGET")
-    assert discover < loop
+    assert reopen < discover < loop
     assert "they will be independently reverified before new work is planned" in LANE
+    assert "STATE and canonical bytes remain unchanged" in LANE
+    journal = (ROOT / "scripts" / "round_journal.py").read_text(encoding="utf-8")
+    assert "def reopen_latest_gate_invocation(" in journal
+    assert 'gate.get("decision") != "invocation_error"' in journal
+    assert "validate_task_receipt(task_value, expected)" in journal
 
 
 def test_config_search_is_registered_without_a_phase_lock() -> None:
