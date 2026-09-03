@@ -112,7 +112,7 @@
         },
         "search_id": "b069ee563296b33539fccaa19a5d13ab0a5284392943d4bfe4b4b0347d96bf4a",
         "source_digest": "2f60906d612934f13cf0b79a4f70d0e47bd033ecb4c6ab6f336e528b52d5187b",
-        "table_digest": "831f5040b71d891f61045165f17e24118ecde2804bde31d5c039b50dc2fb7388",
+        "table_digest": "9b399eaad015fb62604385672a5d5634b0bff337024f0013ac39bedcfa3a8cbf",
         "task": "dense_fp8_gemm_rowwise",
         "task_digest": "07c237bd70cb316dc61fcffbbae131a7e317495857e2dbe1b53b85d6410112e9"
       },
@@ -154,7 +154,7 @@
       "id": "cfg-28cc4c246b3f4e8a8470",
       "mechanism": "canonical protocol-v2 paired search",
       "precompiled": true,
-      "published_unix_ns": 1788400578557789596,
+      "published_unix_ns": 1788413166723334621,
       "status": "ready"
     }
   ],
@@ -181,7 +181,7 @@
     "release_id": "04a7d410f480cc14be2dd80da01f3961d5cf488f491d76537543cc6423971591",
     "runtime_table": "asm_tuner_runtime_table.json",
     "runtime_table_path_base": "task_root",
-    "runtime_table_sha256": "3a0f51bcb3ae9e8b3f5ce148c399dbd887a40703631536fc4e6953549443abb4",
+    "runtime_table_sha256": "4570412d72618e5bd5b2aa1754bc0873aeb4096e68f430d11944e6430d5c7b03",
     "schema": "geak.asm-launch-contract/v1",
     "score_metric": {
       "hash": "c104dd5f35ce8a7d4591d0952265a40ee72cf21e2addcb4bfd7762737dcc12b8",
@@ -198,7 +198,7 @@
     "selection": {
       "path": "asm_tuner_selection.json",
       "path_base": "task_root",
-      "sha256": "f23cf8eb762642589798df8036cd541b9b360de3512dfc63f37e8aa8c3a24cbf"
+      "sha256": "35b35a9e024141b12ecb73e54461de51cc6e025b36ecfd4e004b57de7aa458cc"
     },
     "source_digest": "2f60906d612934f13cf0b79a4f70d0e47bd033ecb4c6ab6f336e528b52d5187b",
     "task": "dense_fp8_gemm_rowwise",
@@ -214,10 +214,10 @@
     },
     "workflow_consumer": {
       "path": "kernel_workflow/kernel_lane.js",
-      "sha256": "ea714d944861b9e34863978e140264dd14e6e872bb3d90f08ff66a6ea9215ad1"
+      "sha256": "fc8267f7c8f0aa797b7ad4dfddf960a774285a7310846b2778fe0f343aa6740d"
     }
   },
   "schema": "geak.config-search/v2",
   "schema_version": 2,
-  "updated_unix_ns": 1788400578561101447
+  "updated_unix_ns": 1788413166726760670
 }

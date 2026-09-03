@@ -43,6 +43,26 @@
       ],
       "run_id": "materialize-04a7d410f480cc14",
       "updated_at": "2026-09-03T01:56:18.176196+00:00"
+    },
+    {
+      "previous_table_digest": "831f5040b71d891f61045165f17e24118ecde2804bde31d5c039b50dc2fb7388",
+      "release_id": "04a7d410f480cc14be2dd80da01f3961d5cf488f491d76537543cc6423971591",
+      "revision": 3,
+      "route_ids": [
+        "decode_m16_square",
+        "decode_m2_square",
+        "decode_m32_down",
+        "decode_m64_square",
+        "decode_m8_up",
+        "decode_m96_up",
+        "prefill_m1024_down",
+        "prefill_m128_square",
+        "prefill_m2048_square",
+        "prefill_m256_down",
+        "prefill_m512_up"
+      ],
+      "run_id": "materialize-04a7d410f480cc14",
+      "updated_at": "2026-09-03T05:26:06.338250+00:00"
     }
   ],
   "oracle": {
@@ -68,7 +88,7 @@
   },
   "receipts_root": ".geak_tuner/releases/04a7d410f480cc14be2dd80da01f3961d5cf488f491d76537543cc6423971591",
   "release_id": "04a7d410f480cc14be2dd80da01f3961d5cf488f491d76537543cc6423971591",
-  "revision": 2,
+  "revision": 3,
   "routes": {
     "decode_m16_square": {
       "entries": [],
@@ -14103,7 +14123,7 @@
       "prefill_m512_up"
     ]
   },
-  "table_digest": "831f5040b71d891f61045165f17e24118ecde2804bde31d5c039b50dc2fb7388",
+  "table_digest": "9b399eaad015fb62604385672a5d5634b0bff337024f0013ac39bedcfa3a8cbf",
   "task": {
     "adapter": "fp8_rowwise",
     "binding_hashes": {
@@ -14131,5 +14151,5 @@
     },
     "source_digest": "2f60906d612934f13cf0b79a4f70d0e47bd033ecb4c6ab6f336e528b52d5187b"
   },
-  "updated_at": "2026-09-03T01:56:18.176196+00:00"
+  "updated_at": "2026-09-03T05:26:06.338250+00:00"
 }
