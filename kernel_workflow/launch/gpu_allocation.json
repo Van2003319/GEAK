@@ -1,8 +1,18 @@
 {
   "schema": "geak.gpu-allocation/v1",
   "lanes": {
-    "bf16": [2, 3, 4],
-    "fp8": [5, 6, 7]
+    "bf16": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "fp8": [
+      4,
+      5,
+      6,
+      7
+    ]
   },
-  "note": "Edit and commit this one shared plan to adapt physical locks; preflight refuses overlap."
+  "note": "All eight GPUs are usable: BF16 owns 0-3 and FP8 owns 4-7; preflight refuses overlap."
 }
